@@ -9,6 +9,34 @@ const roleMiddleware = require('../middleware/role.middleware');
 router.use(authMiddleware);
 router.use(roleMiddleware(['admin', 'coordinator']));
 
+
+
+// =============================================
+// ✅ SUPPRIMER UN UTILISATEUR (ADMIN)
+// =============================================
+router.delete('/users/:id', authMiddleware, roleMiddleware(['admin']), async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // 1. Supprimer les données associées
+    await supabase.from('patient_family_links').delete().eq('family_id', id);
+    await supabase.from('patient_aidant_assignments').delete().eq('family_id', id);
+    await supabase.from('inscriptions').delete().eq('user_id', id);
+    await supabase.from('notifications').delete().eq('user_id', id);
+    await supabase.from('profiles').delete().eq('id', id);
+
+    // 2. Supprimer l'utilisateur Auth (via Service Role)
+    const { error } = await supabase.auth.admin.deleteUser(id);
+    
+    if (error) throw error;
+
+    res.json({ success: true, message: 'Utilisateur supprimé avec succès' });
+  } catch (error) {
+    console.error('❌ Delete user error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // =============================================
 // STATISTIQUES - AVEC NOUVEAUX STATUTS
 // =============================================
