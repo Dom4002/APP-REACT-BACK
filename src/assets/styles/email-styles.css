@@ -1,0 +1,174 @@
+/* 📁 backend/src/assets/emails/styles/email-styles.css */
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  background-color: #f5f0e8;
+  -webkit-font-smoothing: antialiased;
+}
+
+.container {
+  max-width: 600px;
+  margin: 0 auto;
+  padding: 20px;
+  background-color: #f5f0e8;
+}
+
+.card {
+  background-color: #ffffff;
+  border-radius: 24px;
+  padding: 40px 32px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
+  border: 1px solid #e5e0d8;
+}
+
+.header {
+  text-align: center;
+  margin-bottom: 32px;
+}
+
+.logo-container {
+  display: inline-block;
+  margin-bottom: 16px;
+}
+
+.logo-img {
+  max-height: 60px;
+  width: auto;
+}
+
+.logo-text-img {
+  max-height: 30px;
+  width: auto;
+  display: block;
+  margin: 4px auto 0;
+}
+
+.title {
+  font-size: 24px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+.title-senior {
+  color: #1a4a3a;
+}
+
+.title-maman {
+  color: #db4a6d;
+}
+
+.title-aidant {
+  color: #2c6e5c;
+}
+
+.subtitle {
+  color: #6b7280;
+  font-size: 16px;
+}
+
+.divider {
+  border: none;
+  border-top: 1px solid #e5e0d8;
+  margin: 24px 0;
+}
+
+.footer {
+  text-align: center;
+  margin-top: 32px;
+  padding-top: 24px;
+  border-top: 1px solid #e5e0d8;
+}
+
+.footer-text {
+  color: #9ca3af;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.btn {
+  display: inline-block;
+  color: #ffffff !important;
+  padding: 12px 32px;
+  border-radius: 12px;
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 14px;
+  margin-top: 16px;
+}
+
+.btn-senior {
+  background: #1a4a3a;
+}
+
+.btn-maman {
+  background: #db4a6d;
+}
+
+.btn-aidant {
+  background: #2c6e5c;
+}
+
+.highlight-box {
+  background: #f5f0e8;
+  border-radius: 16px;
+  padding: 24px;
+  margin: 24px 0;
+  text-align: center;
+  border: 2px dashed #c9a84c;
+}
+
+.highlight-box-maman {
+  border-color: #db4a6d;
+}
+
+.highlight-box-aidant {
+  border-color: #2c6e5c;
+}
+
+.code {
+  font-size: 40px;
+  font-weight: 900;
+  letter-spacing: 12px;
+  font-family: 'Courier New', monospace;
+}
+
+.code-senior {
+  color: #1a4a3a;
+}
+
+.code-maman {
+  color: #db4a6d;
+}
+
+.code-aidant {
+  color: #2c6e5c;
+}
+
+@media only screen and (max-width: 480px) {
+  .card {
+    padding: 24px 16px;
+  }
+  
+  .logo-img {
+    max-height: 45px;
+  }
+  
+  .logo-text-img {
+    max-height: 22px;
+  }
+  
+  .title {
+    font-size: 20px;
+  }
+  
+  .code {
+    font-size: 28px;
+    letter-spacing: 8px;
+  }
+}
