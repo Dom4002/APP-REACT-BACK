@@ -1,7 +1,7 @@
 // 📁 backend/src/services/email.service.js
 
 const axios = require('axios');
-const { getLogoForEmail, getLogoTextForEmail } = require('../config/emailAssets');
+const { getLogoForEmail } = require('../config/emailAssets');
 
 const BREVO_API_KEY = process.env.BREVO_API_KEY;
 const BREVO_URL = 'https://api.brevo.com/v3';
@@ -40,7 +40,7 @@ const sendEmail = async ({ to, subject, htmlContent, textContent, sender = { nam
 };
 
 // =============================================
-// GÉNÉRATEUR DE STYLES DYNAMIQUES
+// GÉNÉRATEUR DE STYLES UNIFORMES
 // =============================================
 
 const getEmailStyles = (brandColor = '#1a4a3a', secondaryColor = '#c9a84c') => `
@@ -82,33 +82,32 @@ const getEmailStyles = (brandColor = '#1a4a3a', secondaryColor = '#c9a84c') => `
     display: inline-flex;
     flex-direction: column;
     align-items: center;
-    gap: 6px;
+    gap: 4px;
   }
   
   .logo-icon {
-    max-height: 52px;
+    max-height: 56px;
     width: auto;
     display: block;
   }
   
-  .logo-text {
-    max-height: 24px;
-    width: auto;
+  .brand-name {
     display: block;
-    margin-top: 2px;
-  }
-  
-  .brand-badge {
-    display: inline-block;
-    background: ${brandColor};
-    color: #ffffff;
-    font-size: 10px;
+    font-size: 14px;
     font-weight: 700;
     letter-spacing: 1.5px;
     text-transform: uppercase;
-    padding: 4px 14px;
-    border-radius: 20px;
-    margin-top: 6px;
+    color: ${brandColor};
+    margin-top: 4px;
+  }
+  
+  .brand-sub {
+    display: block;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: ${brandColor}80;
   }
   
   .title {
@@ -149,19 +148,6 @@ const getEmailStyles = (brandColor = '#1a4a3a', secondaryColor = '#c9a84c') => `
     color: #6b7280;
   }
   
-  .footer-social {
-    display: flex;
-    justify-content: center;
-    gap: 12px;
-    margin-bottom: 12px;
-  }
-  
-  .footer-social a {
-    color: #9ca3af;
-    text-decoration: none;
-    font-size: 13px;
-  }
-  
   .btn-primary {
     display: inline-block;
     background: ${brandColor};
@@ -172,24 +158,10 @@ const getEmailStyles = (brandColor = '#1a4a3a', secondaryColor = '#c9a84c') => `
     font-weight: 600;
     font-size: 14px;
     margin-top: 8px;
-    transition: opacity 0.2s;
   }
   
   .btn-primary:hover {
     opacity: 0.85;
-  }
-  
-  .btn-secondary {
-    display: inline-block;
-    background: transparent;
-    color: ${brandColor} !important;
-    padding: 11px 34px;
-    border-radius: 12px;
-    text-decoration: none;
-    font-weight: 600;
-    font-size: 14px;
-    border: 2px solid ${brandColor}44;
-    margin-top: 8px;
   }
   
   .highlight-box {
@@ -257,34 +229,6 @@ const getEmailStyles = (brandColor = '#1a4a3a', secondaryColor = '#c9a84c') => `
     margin-top: 2px;
   }
   
-  .status-badge {
-    display: inline-block;
-    padding: 4px 16px;
-    border-radius: 20px;
-    font-size: 12px;
-    font-weight: 600;
-  }
-  
-  .status-badge.success {
-    background: #d1fae5;
-    color: #065f46;
-  }
-  
-  .status-badge.warning {
-    background: #fef3c7;
-    color: #92400e;
-  }
-  
-  .status-badge.error {
-    background: #fee2e2;
-    color: #991b1b;
-  }
-  
-  .status-badge.info {
-    background: ${brandColor}12;
-    color: ${brandColor};
-  }
-  
   .feature-list {
     list-style: none;
     padding: 0;
@@ -298,6 +242,7 @@ const getEmailStyles = (brandColor = '#1a4a3a', secondaryColor = '#c9a84c') => `
     display: flex;
     align-items: center;
     gap: 10px;
+    justify-content: center;
   }
   
   .feature-list li::before {
@@ -311,11 +256,15 @@ const getEmailStyles = (brandColor = '#1a4a3a', secondaryColor = '#c9a84c') => `
     }
     
     .logo-icon {
-      max-height: 40px;
+      max-height: 44px;
     }
     
-    .logo-text {
-      max-height: 18px;
+    .brand-name {
+      font-size: 12px;
+    }
+    
+    .brand-sub {
+      font-size: 9px;
     }
     
     .title {
@@ -331,7 +280,7 @@ const getEmailStyles = (brandColor = '#1a4a3a', secondaryColor = '#c9a84c') => `
       grid-template-columns: 1fr;
     }
     
-    .btn-primary, .btn-secondary {
+    .btn-primary {
       display: block;
       text-align: center;
     }
@@ -339,23 +288,22 @@ const getEmailStyles = (brandColor = '#1a4a3a', secondaryColor = '#c9a84c') => `
 `;
 
 // =============================================
-// GÉNÉRATEUR D'EN-TÊTE AVEC LOGO
+// GÉNÉRATEUR D'EN-TÊTE - UN SEUL LOGO + TEXTE
 // =============================================
 
 const generateHeader = (type = 'general', title = '', brandColor = '#1a4a3a') => {
   const logoIcon = getLogoForEmail(type);
-  const logoText = getLogoTextForEmail(type);
   
   const brandName = type === 'maman' ? 'Maman & Bébé' : 
                     type === 'aidant' ? 'Aidant' : 
-                    'Services';
+                    'Santé Plus Services';
   
   return `
     <div class="header">
       <div class="logo-wrapper">
         <img src="${logoIcon}" alt="Santé Plus" class="logo-icon" />
-        <img src="${logoText}" alt="Santé Plus ${brandName}" class="logo-text" />
-        <span class="brand-badge" style="background:${brandColor};">${brandName}</span>
+        <span class="brand-name">${brandName}</span>
+        <span class="brand-sub">Accompagnement & Coordination</span>
       </div>
       ${title ? `<h1 class="title">${title}</h1>` : ''}
     </div>
@@ -368,15 +316,11 @@ const generateHeader = (type = 'general', title = '', brandColor = '#1a4a3a') =>
 
 const generateFooter = () => `
   <div class="footer">
-    <div class="footer-social">
-      <a href="https://santeplus.bj">🌐 Site web</a>
-      <a href="mailto:contact@santeplus.bj">📧 Email</a>
-      <a href="tel:+2290191343458">📞 Téléphone</a>
-    </div>
     <p class="footer-text">
       <strong>Santé Plus Services</strong><br>
       Cotonou, Bénin<br>
-      📧 contact@santeplus.bj | 📞 +229 01 91 34 34 58
+      📧 <a href="mailto:contact@santeplus.bj" style="color:#6b7280;text-decoration:none;">contact@santeplus.bj</a> 
+      | 📞 <a href="tel:+2290191343458" style="color:#6b7280;text-decoration:none;">+229 01 91 34 34 58</a>
     </p>
     <p class="footer-text" style="margin-top:8px; font-size:11px; color:#d1d5db;">
       © ${new Date().getFullYear()} Santé Plus Services — Tous droits réservés
@@ -859,7 +803,7 @@ const templates = {
   },
 
   // =============================================
-  // VISITE APPROUVÉE (AIDANT)
+  // VISITE APPROUVÉE
   // =============================================
   visitApproved: (data, type = 'general') => {
     const brandColor = type === 'maman' ? '#db4a6d' : type === 'aidant' ? '#2c6e5c' : '#1a4a3a';
