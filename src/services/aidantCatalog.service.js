@@ -22,37 +22,30 @@ const getAvailableAidants = async (filters = {}) => {
       .eq('is_verified', true)
       .eq('status', 'approved');
 
-    // Filtrer par zone
     if (filters.zone) {
       query = query.contains('zones', [filters.zone]);
     }
 
-    // Filtrer par spécialité
     if (filters.specialty) {
       query = query.contains('specialties', [filters.specialty]);
     }
 
-    // Filtrer par note minimum
     if (filters.minRating) {
       query = query.gte('rating', filters.minRating);
     }
 
-    // Filtrer par disponibilité
     if (filters.onlyAvailable !== false) {
       query = query.eq('available', true);
     }
 
-    // Filtrer par expérience
     if (filters.minExperience) {
       query = query.gte('experience_years', filters.minExperience);
     }
 
-    // Trier
     const sortField = filters.sortBy || 'rating';
     const sortOrder = filters.sortOrder || 'desc';
     query = query.order(sortField, { ascending: sortOrder === 'asc' });
 
-    // Pagination
     const limit = filters.limit || 20;
     const offset = filters.offset || 0;
     query = query.range(offset, offset + limit - 1);
@@ -60,9 +53,7 @@ const getAvailableAidants = async (filters = {}) => {
     const { data, error } = await query;
     if (error) throw error;
 
-    // Calculer les assignations actives depuis patient_family_links
     const aidantsWithStats = await Promise.all((data || []).map(async (aidant) => {
-      // Compter les assignations actives
       const { count: activeAssignments, error: countError } = await supabase
         .from('patient_family_links')
         .select('id', { count: 'exact', head: true })
@@ -81,7 +72,6 @@ const getAvailableAidants = async (filters = {}) => {
         };
       }
 
-      // Récupérer les avis
       const { data: reviews, error: reviewsError } = await supabase
         .from('aidant_reviews')
         .select('rating')
@@ -136,7 +126,6 @@ const getAidantById = async (aidantId) => {
 
     if (aidantError) throw aidantError;
 
-    // Compter les assignations actives depuis patient_family_links
     const { count: activeAssignments, error: countError } = await supabase
       .from('patient_family_links')
       .select('id', { count: 'exact', head: true })
@@ -146,7 +135,6 @@ const getAidantById = async (aidantId) => {
       console.error('❌ Erreur comptage assignations:', countError);
     }
 
-    // Récupérer les patients assignés
     const { data: patients, error: patientsError } = await supabase
       .from('patient_family_links')
       .select(`
@@ -154,6 +142,7 @@ const getAidantById = async (aidantId) => {
         is_primary,
         relationship,
         created_at,
+        target_type,
         patient:patients(
           id,
           first_name,
@@ -168,7 +157,6 @@ const getAidantById = async (aidantId) => {
       console.error('❌ Erreur récupération patients:', patientsError);
     }
 
-    // Récupérer les avis
     const { data: reviews, error: reviewsError } = await supabase
       .from('aidant_reviews')
       .select(`
@@ -216,9 +204,9 @@ const getAidantById = async (aidantId) => {
 };
 
 // ============================================================
-// ASSIGNER UN AIDANT À UN PATIENT (VIA patient_family_links)
+// ✅ ASSIGNER UN AIDANT - PERSONNEL OU PATIENT
 // ============================================================
-const assignAidantToPatient = async (aidantId, familyId, patientId, assignmentType = 'permanente') => {
+const assignAidantToPatient = async (aidantId, familyId, patientId = null, assignmentType = 'permanente') => {
   try {
     // 1. Vérifier que l'aidant existe
     const { data: aidant, error: aidantError } = await supabase
@@ -244,40 +232,68 @@ const assignAidantToPatient = async (aidantId, familyId, patientId, assignmentTy
       throw new Error(`Cet aidant a déjà ${currentCount} assignations (maximum ${maxAssignments})`);
     }
 
-    // 3. Vérifier que le patient existe
-    const { data: patient, error: patientError } = await supabase
-      .from('patients')
-      .select('id, first_name, last_name')
-      .eq('id', patientId)
-      .single();
+    // 3. Déterminer target_type et target_name
+    let targetType = 'personal';
+    let targetName = null;
+    let assignToId = familyId;
+    let patient = null;
 
-    if (patientError || !patient) {
-      throw new Error('Patient non trouvé');
+    if (patientId) {
+      // ✅ Assignation à un patient
+      const { data: patientData, error: patientError } = await supabase
+        .from('patients')
+        .select('id, first_name, last_name')
+        .eq('id', patientId)
+        .single();
+
+      if (patientError || !patientData) {
+        throw new Error('Patient non trouvé');
+      }
+      patient = patientData;
+      targetType = 'patient';
+      targetName = `${patient.first_name} ${patient.last_name}`;
+      assignToId = patientId;
+    } else {
+      // ✅ Assignation personnelle (au compte)
+      const { data: profileData, error: profileError } = await supabase
+        .from('profiles')
+        .select('id, full_name')
+        .eq('id', familyId)
+        .single();
+
+      if (profileError || !profileData) {
+        throw new Error('Compte non trouvé');
+      }
+      targetName = profileData.full_name;
     }
 
-    // 4. Vérifier que le patient n'est pas déjà assigné à cet aidant
+    // 4. Vérifier que l'assignation n'existe pas déjà
+    const queryField = patientId ? 'patient_id' : 'family_id';
+    const queryValue = patientId || familyId;
+
     const { data: existing, error: existingError } = await supabase
       .from('patient_family_links')
       .select('id')
-      .eq('patient_id', patientId)
+      .eq(queryField, queryValue)
       .eq('family_id', aidant.user_id)
       .maybeSingle();
 
     if (existing) {
-      throw new Error('Ce patient est déjà assigné à cet aidant');
+      throw new Error('Déjà assigné');
     }
 
-    // 5. Créer l'assignation dans patient_family_links
+    // 5. Créer l'assignation
     const { data: link, error: linkError } = await supabase
       .from('patient_family_links')
       .insert({
-        patient_id: patientId,
+        patient_id: patientId || null,
         family_id: aidant.user_id,
+        target_type: targetType,
         is_primary: true,
         can_manage_visits: true,
         can_manage_orders: true,
         can_receive_notifications: true,
-        relationship: assignmentType, // 'permanente', 'temporaire', 'ponctuelle'
+        relationship: assignmentType,
       })
       .select()
       .single();
@@ -287,7 +303,7 @@ const assignAidantToPatient = async (aidantId, familyId, patientId, assignmentTy
       throw new Error('Erreur lors de l\'assignation');
     }
 
-    // 6. Mettre à jour current_assignments MANUELLEMENT pour garantir la synchro
+    // 6. Mettre à jour current_assignments
     const newCount = currentCount + 1;
     await supabase
       .from('aidants')
@@ -310,33 +326,43 @@ const assignAidantToPatient = async (aidantId, familyId, patientId, assignmentTy
     }
 
     // 8. Notifications
+    const targetDisplay = targetType === 'patient' ? `le patient ${targetName}` : `${targetName} (personnel)`;
+
     await supabase.from('notifications').insert({
       user_id: aidant.user_id,
-      title: '📋 Nouveau patient assigné',
-      body: `Vous avez été assigné à ${patient.first_name} ${patient.last_name} (${assignmentType}).`,
+      title: '📋 Nouvelle assignation',
+      body: `Vous avez été assigné à ${targetDisplay} (${assignmentType}).`,
       type: 'system',
       data: { 
         patient_id: patientId,
+        is_personal: !patientId,
         assignment_type: assignmentType,
-        action: 'view_assignment'
+        target_type: targetType,
+        target_name: targetName,
       },
     });
 
     await supabase.from('notifications').insert({
       user_id: familyId,
       title: '✅ Aidant assigné avec succès',
-      body: `L'aidant a été assigné à votre patient (${assignmentType}).`,
+      body: `L'aidant a été assigné à ${targetDisplay} (${assignmentType}).`,
       type: 'system',
       data: { 
         aidant_id: aidantId,
         patient_id: patientId,
+        is_personal: !patientId,
         assignment_type: assignmentType,
+        target_type: targetType,
+        target_name: targetName,
       },
     });
 
     return {
       assignment: link,
       aidant: updatedAidant || aidant,
+      is_personal: !patientId,
+      target_type: targetType,
+      target_name: targetName,
     };
   } catch (error) {
     console.error('❌ Assign aidant error:', error);
@@ -357,6 +383,7 @@ const getFamilyAssignments = async (familyId) => {
         is_primary,
         relationship,
         created_at,
+        target_type,
         patient:patients(
           id,
           first_name,
@@ -377,7 +404,6 @@ const getFamilyAssignments = async (familyId) => {
 
     if (error) throw error;
 
-    // Pour chaque assignation, récupérer l'aidant
     const assignmentsWithAidant = await Promise.all((data || []).map(async (item) => {
       const { data: aidant, error: aidantError } = await supabase
         .from('aidants')
@@ -423,6 +449,7 @@ const getAidantAssignments = async (aidantUserId) => {
         is_primary,
         relationship,
         created_at,
+        target_type,
         patient:patients(
           id,
           first_name,
@@ -452,14 +479,13 @@ const getAidantAssignments = async (aidantUserId) => {
 };
 
 // ============================================================
-// RÉVOQUER UNE ASSIGNATION (depuis patient_family_links)
+// RÉVOQUER UNE ASSIGNATION
 // ============================================================
 const revokeAssignment = async (assignmentId, familyId) => {
   try {
-    // 1. Vérifier que l'assignation existe et appartient à la famille
     const { data: link, error: linkError } = await supabase
       .from('patient_family_links')
-      .select('id, family_id, patient_id, relationship')
+      .select('id, family_id, patient_id, relationship, target_type')
       .eq('id', assignmentId)
       .eq('family_id', familyId)
       .single();
@@ -468,7 +494,6 @@ const revokeAssignment = async (assignmentId, familyId) => {
       throw new Error('Assignation non trouvée ou non autorisée');
     }
 
-    // 2. Supprimer l'assignation
     const { error: deleteError } = await supabase
       .from('patient_family_links')
       .delete()
@@ -478,10 +503,8 @@ const revokeAssignment = async (assignmentId, familyId) => {
       throw new Error('Erreur lors de la révocation');
     }
 
-    // 3. Attendre que le trigger fasse son travail
     await new Promise(resolve => setTimeout(resolve, 100));
 
-    // 4. Récupérer l'aidant mis à jour
     const { data: updatedAidant, error: updateError } = await supabase
       .from('aidants')
       .select('*')
@@ -492,11 +515,14 @@ const revokeAssignment = async (assignmentId, familyId) => {
       console.error('❌ Erreur récupération aidant mis à jour:', updateError);
     }
 
-    // 5. Notification
+    const targetDisplay = link.target_type === 'patient' 
+      ? 'patient' 
+      : 'personnel';
+
     await supabase.from('notifications').insert({
       user_id: familyId,
       title: '🔄 Assignation révoquée',
-      body: `L'assignation (${link.relationship || 'permanente'}) a été révoquée.`,
+      body: `L'assignation ${targetDisplay} (${link.relationship || 'permanente'}) a été révoquée.`,
       type: 'system',
       data: { assignment_id: assignmentId },
     });
