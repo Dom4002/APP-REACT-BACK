@@ -128,8 +128,9 @@ router.post('/admin/test-approve', async (req, res) => {
   }
 });
 
+ 
 // =============================================
-// ✅ INSCRIPTION - BLOQUÉ POUR LES AIDANTS
+// ✅ INSCRIPTION - CORRIGÉE
 // =============================================
 router.post('/register', async (req, res) => {
   console.log('📝 ===== REGISTER REQUEST =====');
@@ -329,9 +330,15 @@ router.post('/register', async (req, res) => {
     }
 
     // =============================================
-    // 4. Créer l'inscription
+    // 4. ✅ CRÉER L'INSCRIPTION - UNIQUEMENT POUR LES AIDANTS
     // =============================================
-    console.log('🔍 Création de l\'inscription...');
+    // ✅ LES COMPTES FAMILLE SONT AUTOMATIQUEMENT VALIDÉS
+    // ✅ SEULS LES AIDANTS ONT BESOIN D'APPROBATION
+    
+    // ✅ DÉTERMINER LE STATUT SELON LE RÔLE
+    const inscriptionStatus = role === 'aidant' ? 'en_attente' : 'validee';
+    
+    console.log(`🔍 Création de l'inscription avec statut: ${inscriptionStatus} pour le rôle: ${role}`);
     
     await supabase
       .from('inscriptions')
@@ -339,14 +346,16 @@ router.post('/register', async (req, res) => {
         user_id: authData.user.id,
         patient_data: (role === 'family' && patientData) ? patientData : null,
         offre_id: (role === 'family' && offreId) ? offreId : null,
-        status: 'en_attente',
+        status: inscriptionStatus, // ✅ 'validee' pour famille, 'en_attente' pour aidant
         source: 'web',
-        comments: null,
+        comments: role === 'family' ? 'Compte famille automatiquement validé' : null,
+        processed_by: role === 'family' ? 'system' : null,
+        processed_at: role === 'family' ? new Date().toISOString() : null,
       });
-    console.log('✅ Inscription créée avec statut: en_attente');
+    console.log(`✅ Inscription créée avec statut: ${inscriptionStatus}`);
 
     // =============================================
-    // 5. ENVOI EMAIL AVEC RETRY
+    // 5. ENVOI EMAIL
     // =============================================
     let emailSent = false;
     let emailError = null;
@@ -381,10 +390,12 @@ router.post('/register', async (req, res) => {
     console.log('✅ ===== INSCRIPTION RÉUSSIE =====');
     
     let message = '';
-    if (hasPatient) {
-      message = 'Inscription réussie. Votre demande est en attente de validation.';
+    if (role === 'aidant') {
+      message = 'Votre candidature a été envoyée. Elle sera examinée par notre équipe sous 48h.';
+    } else if (hasPatient) {
+      message = 'Inscription réussie. Votre compte est actif.';
     } else {
-      message = 'Compte créé avec succès. Votre demande est en attente de validation.';
+      message = 'Compte créé avec succès. Votre compte est actif.';
     }
 
     if (!emailSent) {
@@ -402,10 +413,12 @@ router.post('/register', async (req, res) => {
         full_name,
         role: role || 'family',
         is_active: isActive,
+        requires_validation: role === 'aidant',
+        is_validated: role !== 'aidant',
       },
       patient: patient || null,
-      isAidant: false,
-      requiresValidation: false,
+      isAidant: role === 'aidant',
+      requiresValidation: role === 'aidant',
     });
 
   } catch (error) {
@@ -417,7 +430,6 @@ router.post('/register', async (req, res) => {
     });
   }
 });
-
 // =============================================
 // CONNEXION - AVEC VÉRIFICATION AIDANT
 // =============================================
