@@ -6,6 +6,13 @@ const { getLogoForEmail } = require('../config/emailAssets');
 const BREVO_API_KEY = process.env.BREVO_API_KEY;
 const BREVO_URL = 'https://api.brevo.com/v3';
 
+// ✅ URL DU SITE - Utiliser Vercel en priorité
+const SITE_URL = process.env.VERCEL_URL 
+  ? `https://${process.env.VERCEL_URL}`
+  : process.env.CLIENT_URL || 'https://app-sante-plus-react.vercel.app';
+
+console.log('🌐 SITE_URL:', SITE_URL);
+
 const sendEmail = async ({ to, subject, htmlContent, textContent, sender = { name: 'Santé Plus Services', email: process.env.BREVO_SENDER_EMAIL } }) => {
   try {
     if (!htmlContent && !textContent) {
@@ -288,7 +295,7 @@ const getEmailStyles = (brandColor = '#1a4a3a', secondaryColor = '#c9a84c') => `
 `;
 
 // =============================================
-// GÉNÉRATEUR D'EN-TÊTE - UN SEUL LOGO + TEXTE
+// GÉNÉRATEUR D'EN-TÊTE
 // =============================================
 
 const generateHeader = (type = 'general', title = '', brandColor = '#1a4a3a') => {
@@ -321,6 +328,8 @@ const generateFooter = () => `
       Cotonou, Bénin<br>
       📧 <a href="mailto:contact@santeplus.bj" style="color:#6b7280;text-decoration:none;">contact@santeplus.bj</a> 
       | 📞 <a href="tel:+2290191343458" style="color:#6b7280;text-decoration:none;">+229 01 91 34 34 58</a>
+      <br>
+      <a href="${SITE_URL}" style="color:#6b7280;text-decoration:none;font-size:12px;">🌐 ${SITE_URL.replace('https://', '')}</a>
     </p>
     <p class="footer-text" style="margin-top:8px; font-size:11px; color:#d1d5db;">
       © ${new Date().getFullYear()} Santé Plus Services — Tous droits réservés
@@ -329,7 +338,7 @@ const generateFooter = () => `
 `;
 
 // =============================================
-// TEMPLATES
+// TEMPLATES - AVEC URL VERCEL
 // =============================================
 
 const templates = {
@@ -379,14 +388,14 @@ const templates = {
   },
 
   // =============================================
-  // BIENVENUE - FAMILLE
+  // BIENVENUE
   // =============================================
   welcome: (name, type = 'general') => {
     const brandColor = type === 'maman' ? '#db4a6d' : type === 'aidant' ? '#2c6e5c' : '#1a4a3a';
     const secondaryColor = type === 'maman' ? '#f5d0d8' : type === 'aidant' ? '#b8d5cc' : '#c9a84c';
     const header = generateHeader(type, `Bienvenue ${name} 👋`, brandColor);
     const styles = getEmailStyles(brandColor, secondaryColor);
-    const clientUrl = process.env.CLIENT_URL || 'https://sante-plus-services.com';
+    const loginUrl = `${SITE_URL}/login`;
     
     return {
       subject: 'Bienvenue chez Santé Plus Services 🏥',
@@ -408,64 +417,12 @@ const templates = {
                 Votre compte a été créé avec succès. Vous pouvez dès maintenant accéder à votre espace personnel.
               </p>
               <div style="text-align: center; margin: 24px 0;">
-                <a href="${clientUrl}/login" class="btn-primary">Accéder à mon compte</a>
+                <a href="${loginUrl}" class="btn-primary">Accéder à mon compte</a>
               </div>
               <div class="highlight-box" style="background:${brandColor}04;">
                 <p style="color: #4b5563; font-size: 14px; margin:0;">
                   💡 <strong>Conseil :</strong> Complétez votre profil pour une meilleure expérience.
                 </p>
-              </div>
-              ${generateFooter()}
-            </div>
-          </div>
-        </body>
-        </html>
-      `,
-    };
-  },
-
-  // =============================================
-  // AIDANT - CANDIDATURE EN ATTENTE
-  // =============================================
-  aidantPending: (name) => {
-    const brandColor = '#2c6e5c';
-    const secondaryColor = '#b8d5cc';
-    const header = generateHeader('aidant', '📋 Votre candidature a été reçue', brandColor);
-    const styles = getEmailStyles(brandColor, secondaryColor);
-    
-    return {
-      subject: '📋 Candidature aidant - En attente de validation',
-      htmlContent: `
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <meta charset="UTF-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <title>Candidature en attente</title>
-          <style>${styles}</style>
-        </head>
-        <body>
-          <div class="container">
-            <div class="card">
-              ${header}
-              <p class="subtitle">Bonjour ${name},</p>
-              <p style="color: #4b5563; font-size: 15px; line-height: 1.7; margin-top: 8px;">
-                Nous avons bien reçu votre candidature pour rejoindre l'équipe <strong>Santé Plus Services</strong> en tant qu'aidant.
-              </p>
-              <p style="color: #4b5563; font-size: 15px; line-height: 1.7;">
-                Notre équipe examine votre dossier dans les plus brefs délais. Vous recevrez une notification par email dès que votre compte sera validé.
-              </p>
-              <div class="highlight-box" style="border-color:${brandColor};">
-                <div class="info-grid">
-                  <div class="info-item">
-                    <div class="label">⏳ Délai de traitement</div>
-                    <div class="value">48h maximum</div>
-                  </div>
-                  <div class="info-item">
-                    <div class="label">📧 Notification</div>
-                    <div class="value">Par email</div>
-                  </div>
-                </div>
               </div>
               ${generateFooter()}
             </div>
@@ -484,7 +441,7 @@ const templates = {
     const secondaryColor = '#b8d5cc';
     const header = generateHeader('aidant', '✅ Compte approuvé !', brandColor);
     const styles = getEmailStyles(brandColor, secondaryColor);
-    const clientUrl = process.env.CLIENT_URL || 'https://sante-plus-services.com';
+    const loginUrl = `${SITE_URL}/login`;
     
     return {
       subject: '✅ Votre compte aidant est approuvé !',
@@ -516,7 +473,7 @@ const templates = {
                 </ul>
               </div>
               <div style="text-align: center; margin: 20px 0;">
-                <a href="${clientUrl}/login" class="btn-primary">Se connecter</a>
+                <a href="${loginUrl}" class="btn-primary">Se connecter</a>
               </div>
               ${generateFooter()}
             </div>
@@ -579,6 +536,9 @@ const templates = {
     const header = generateHeader(type, '🔑 Réinitialisation', brandColor);
     const styles = getEmailStyles(brandColor, secondaryColor);
     
+    // ✅ Utiliser le lien de réinitialisation Vercel
+    const resetUrl = resetLink || `${SITE_URL}/reset-password`;
+    
     return {
       subject: 'Réinitialisation de votre mot de passe 🔑',
       htmlContent: `
@@ -599,7 +559,7 @@ const templates = {
                 Nous avons reçu une demande de réinitialisation de votre mot de passe.
               </p>
               <div style="text-align: center; margin: 24px 0;">
-                <a href="${resetLink}" class="btn-primary">Réinitialiser mon mot de passe</a>
+                <a href="${resetUrl}" class="btn-primary">Réinitialiser mon mot de passe</a>
               </div>
               <p style="color: #9ca3af; font-size: 13px; text-align: center;">
                 ⏱️ Ce lien expire dans 1 heure.
@@ -625,7 +585,7 @@ const templates = {
     const secondaryColor = type === 'maman' ? '#f5d0d8' : type === 'aidant' ? '#b8d5cc' : '#c9a84c';
     const header = generateHeader(type, '✅ Inscription validée !', brandColor);
     const styles = getEmailStyles(brandColor, secondaryColor);
-    const clientUrl = process.env.CLIENT_URL || 'https://sante-plus-services.com';
+    const loginUrl = `${SITE_URL}/login`;
     
     return {
       subject: '✅ Votre inscription est validée !',
@@ -648,7 +608,7 @@ const templates = {
                 Vous pouvez dès maintenant accéder à tous nos services.
               </p>
               <div style="text-align: center; margin: 24px 0;">
-                <a href="${clientUrl}/login" class="btn-primary">Se connecter</a>
+                <a href="${loginUrl}" class="btn-primary">Se connecter</a>
               </div>
               ${generateFooter()}
             </div>
@@ -667,7 +627,7 @@ const templates = {
     const secondaryColor = type === 'maman' ? '#f5d0d8' : type === 'aidant' ? '#b8d5cc' : '#c9a84c';
     const header = generateHeader(type, '📅 Rappel de visite', brandColor);
     const styles = getEmailStyles(brandColor, secondaryColor);
-    const clientUrl = process.env.CLIENT_URL || 'https://sante-plus-services.com';
+    const visitsUrl = `${SITE_URL}/app/visits`;
     
     return {
       subject: 'Rappel : Visite prévue 📅',
@@ -703,7 +663,7 @@ const templates = {
                 </div>
               </div>
               <div style="text-align: center; margin: 20px 0;">
-                <a href="${clientUrl}/app/visits" class="btn-primary">Voir les détails</a>
+                <a href="${visitsUrl}" class="btn-primary">Voir les détails</a>
               </div>
               ${generateFooter()}
             </div>
@@ -722,7 +682,7 @@ const templates = {
     const secondaryColor = type === 'maman' ? '#f5d0d8' : type === 'aidant' ? '#b8d5cc' : '#c9a84c';
     const header = generateHeader(type, '✅ Paiement confirmé', brandColor);
     const styles = getEmailStyles(brandColor, secondaryColor);
-    const clientUrl = process.env.CLIENT_URL || 'https://sante-plus-services.com';
+    const billingUrl = `${SITE_URL}/app/billing`;
     
     return {
       subject: 'Paiement confirmé ✅',
@@ -747,7 +707,7 @@ const templates = {
                 Votre abonnement <strong>${data.plan_name || 'Santé Plus'}</strong> est maintenant actif.
               </p>
               <div style="text-align: center; margin: 20px 0;">
-                <a href="${clientUrl}/app/billing" class="btn-primary">Voir mes abonnements</a>
+                <a href="${billingUrl}" class="btn-primary">Voir mes abonnements</a>
               </div>
               ${generateFooter()}
             </div>
@@ -766,7 +726,7 @@ const templates = {
     const secondaryColor = type === 'maman' ? '#f5d0d8' : type === 'aidant' ? '#b8d5cc' : '#c9a84c';
     const header = generateHeader(type, '⏰ Abonnement bientôt expiré', brandColor);
     const styles = getEmailStyles(brandColor, secondaryColor);
-    const clientUrl = process.env.CLIENT_URL || 'https://sante-plus-services.com';
+    const billingUrl = `${SITE_URL}/app/billing`;
     
     return {
       subject: 'Votre abonnement arrive à expiration ⏰',
@@ -791,7 +751,7 @@ const templates = {
                 Pour continuer à bénéficier de nos services, pensez à renouveler votre abonnement.
               </p>
               <div style="text-align: center; margin: 24px 0;">
-                <a href="${clientUrl}/app/billing" class="btn-primary">Renouveler mon abonnement</a>
+                <a href="${billingUrl}" class="btn-primary">Renouveler mon abonnement</a>
               </div>
               ${generateFooter()}
             </div>
@@ -810,7 +770,7 @@ const templates = {
     const secondaryColor = type === 'maman' ? '#f5d0d8' : type === 'aidant' ? '#b8d5cc' : '#c9a84c';
     const header = generateHeader(type, '✅ Visite acceptée', brandColor);
     const styles = getEmailStyles(brandColor, secondaryColor);
-    const clientUrl = process.env.CLIENT_URL || 'https://sante-plus-services.com';
+    const visitsUrl = `${SITE_URL}/app/visits`;
     
     return {
       subject: '✅ Visite acceptée',
@@ -832,7 +792,7 @@ const templates = {
                 L'aidant a accepté la visite pour <strong>${data.patient_name}</strong> le <strong>${data.date}</strong> à <strong>${data.time}</strong>.
               </p>
               <div style="text-align: center; margin: 20px 0;">
-                <a href="${clientUrl}/app/visits" class="btn-primary">Voir les détails</a>
+                <a href="${visitsUrl}" class="btn-primary">Voir les détails</a>
               </div>
               ${generateFooter()}
             </div>
