@@ -154,4 +154,35 @@ app.listen(PORT, () => {
   console.log(`↩️ Redirection FedaPay: http://localhost:${PORT}/payment/confirm`);
 });
 
+
+// 📁 server.js - Ajouter ces endpoints avant le démarrage du serveur
+
+// =============================================
+// ✅ HEALTH CHECK - Pour Keep-Alive
+// =============================================
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'OK',
+    service: 'Santé Plus API',
+    version: '1.0.0',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+  });
+});
+
+// =============================================
+// ✅ BILLING HEALTH
+// =============================================
+app.get('/billing/health', (req, res) => {
+  res.json({
+    status: 'OK',
+    service: 'Billing API',
+    fedapay_env: process.env.FEDAPAY_ENV || 'live',
+    timestamp: new Date().toISOString(),
+  });
+});
+
+
+
 module.exports = app;
