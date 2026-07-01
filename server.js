@@ -182,7 +182,372 @@ app.listen(PORT, () => {
 });
 
 
-// 📁 server.js - Ajouter ces endpoints avant le démarrage du serveur
+// 📁 backend/server.js - AJOUTER CES ROUTES
+
+// ============================================================
+// MESSAGES - CONVERSATIONS
+// ============================================================
+
+// ✅ Récupérer les conversations de l'utilisateur
+app.get('/api/messages/conversations', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const { data, error } = await supabase
+      .from('conversations')
+      .select('*')
+      .contains('participant_ids', [userId])
+      .order('last_message_at', { ascending: false });
+
+    if (error) throw error;
+
+    // Ajouter la conversation globale par défaut
+    const hasGlobal = data?.some(c => c.id === '00000000-0000-0000-0000-000000000001');
+    if (!hasGlobal) {
+      data?.unshift({
+        id: '00000000-0000-0000-0000-000000000001',
+        participant_ids: [userId],
+        type: 'global',
+        name: '💬 Général',
+        last_message_at: new Date().toISOString(),
+        is_active: true,
+      });
+    }
+
+    // Récupérer les participants pour chaque conversation
+    const conversationsWithParticipants = await Promise.all(
+      (data || []).map(async (conv) => {
+        const participantIds = conv.participant_ids.filter((id: string) => id !== userId);
+        let participants = [];
+
+        if (participantIds.length > 0) {
+          const { data: profiles } = await supabase
+            .from('profiles')
+            .select('id, full_name, role, avatar_url')
+            .in('id', participantIds);
+          participants = profiles || [];
+        }
+
+        // Récupérer le dernier message
+        const { data: lastMessage } = await supabase
+          .from('messages')
+          .select('*')
+          .eq('conversation_id', conv.id)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        return { ...conv, participants, last_message: lastMessage };
+      })
+    );
+
+    res.json(conversationsWithParticipants);
+  } catch (error) {
+    console.error('❌ Get conversations error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ✅ Créer une nouvelle conversation
+app.post('/api/messages/conversations', authMiddleware, async (req, res) => {
+  try {
+    const { participant_ids, name, type } = req.body;
+    const userId = req.user.id;
+
+    const allParticipants = [...new Set([userId, ...(participant_ids || [])])];
+
+    const { data, error } = await supabase
+      .from('conversations')
+      .insert({
+        participant_ids: allParticipants,
+        type: type || 'direct',
+        name: name || null,
+        last_message_at: new Date().toISOString(),
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.status(201).json({ success: true, conversation: data });
+  } catch (error) {
+    console.error('❌ Create conversation error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ✅ Récupérer les messages d'une conversation
+app.get('/api/messages/:conversationId', authMiddleware, async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const userId = req.user.id;
+
+    // Vérifier que l'utilisateur est dans la conversation
+    const { data: conv, error: convError } = await supabase
+      .from('conversations')
+      .select('participant_ids')
+      .eq('id', conversationId)
+      .single();
+
+    if (convError) {
+      if (convError.code === 'PGRST116') {
+        return res.status(404).json({ error: 'Conversation non trouvée' });
+      }
+      throw convError;
+    }
+
+    if (!conv.participant_ids.includes(userId) && conversationId !== '00000000-0000-0000-0000-000000000001') {
+      return res.status(403).json({ error: 'Accès non autorisé' });
+    }
+
+    const { data, error } = await supabase
+      .from('messages')
+      .select('*')
+      .eq('conversation_id', conversationId)
+      .order('created_at', { ascending: true })
+      .limit(200);
+
+    if (error) throw error;
+
+    // Récupérer les profils des expéditeurs
+    const senderIds = [...new Set(data?.map(m => m.sender_id).filter(Boolean))];
+    let profilesMap = {};
+
+    if (senderIds.length > 0) {
+      const { data: profiles } = await supabase
+        .from('profiles')
+        .select('id, full_name, role, avatar_url')
+        .in('id', senderIds);
+
+      if (profiles) {
+        profilesMap = profiles.reduce((acc, p) => {
+          acc[p.id] = p;
+          return acc;
+        }, {});
+      }
+    }
+
+    const messagesWithSenders = (data || []).map(message => ({
+      ...message,
+      sender: profilesMap[message.sender_id] || null,
+    }));
+
+    res.json(messagesWithSenders);
+  } catch (error) {
+    console.error('❌ Get messages error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ✅ Envoyer un message avec pièces jointes
+app.post('/api/messages', authMiddleware, async (req, res) => {
+  try {
+    const { conversation_id, content, attachment_url, attachment_type } = req.body;
+    const userId = req.user.id;
+
+    if (!conversation_id) {
+      return res.status(400).json({ error: 'conversation_id est requis' });
+    }
+
+    if (!content && !attachment_url) {
+      return res.status(400).json({ error: 'content ou attachment_url est requis' });
+    }
+
+    const { data, error } = await supabase
+      .from('messages')
+      .insert({
+        conversation_id,
+        sender_id: userId,
+        content: content || null,
+        is_read: false,
+        attachment_url: attachment_url || null,
+        attachment_type: attachment_type || null,
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    // Mettre à jour last_message_at
+    await supabase
+      .from('conversations')
+      .update({ last_message_at: new Date().toISOString() })
+      .eq('id', conversation_id);
+
+    // Récupérer le sender
+    const { data: sender } = await supabase
+      .from('profiles')
+      .select('id, full_name, role, avatar_url')
+      .eq('id', userId)
+      .single();
+
+    // Notifier les autres participants
+    const { data: conv } = await supabase
+      .from('conversations')
+      .select('participant_ids')
+      .eq('id', conversation_id)
+      .single();
+
+    if (conv) {
+      const otherParticipants = conv.participant_ids.filter((id: string) => id !== userId);
+      for (const participantId of otherParticipants) {
+        await supabase.from('notifications').insert({
+          user_id: participantId,
+          title: `📨 ${sender?.full_name || 'Utilisateur'}`,
+          body: content?.substring(0, 100) || 'Pièce jointe',
+          type: 'message',
+          data: {
+            conversation_id,
+            message_id: data.id,
+            sender_id: userId,
+          },
+        });
+      }
+    }
+
+    res.status(201).json({ success: true, message: data });
+  } catch (error) {
+    console.error('❌ Send message error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ✅ Marquer un message comme lu
+app.put('/api/messages/:messageId/read', authMiddleware, async (req, res) => {
+  try {
+    const { messageId } = req.params;
+
+    const { error } = await supabase
+      .from('messages')
+      .update({ is_read: true })
+      .eq('id', messageId);
+
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Mark read error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ✅ Tout marquer comme lu dans une conversation
+app.put('/api/messages/:conversationId/read-all', authMiddleware, async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const userId = req.user.id;
+
+    const { error } = await supabase
+      .from('messages')
+      .update({ is_read: true })
+      .eq('conversation_id', conversationId)
+      .neq('sender_id', userId)
+      .eq('is_read', false);
+
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Mark all read error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ✅ Épingler/Désépingler un message (admin seulement)
+app.put('/api/messages/:messageId/pin', authMiddleware, roleMiddleware(['admin', 'coordinator']), async (req, res) => {
+  try {
+    const { messageId } = req.params;
+    const { pinned } = req.body;
+
+    const { error } = await supabase
+      .from('messages')
+      .update({ is_pinned: pinned })
+      .eq('id', messageId);
+
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Pin message error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ✅ Marquer comme important (admin seulement)
+app.put('/api/messages/:messageId/important', authMiddleware, roleMiddleware(['admin', 'coordinator']), async (req, res) => {
+  try {
+    const { messageId } = req.params;
+    const { important } = req.body;
+
+    const { error } = await supabase
+      .from('messages')
+      .update({ is_important: important })
+      .eq('id', messageId);
+
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Important message error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ✅ Supprimer un message (admin seulement)
+app.delete('/api/messages/:messageId', authMiddleware, roleMiddleware(['admin', 'coordinator']), async (req, res) => {
+  try {
+    const { messageId } = req.params;
+
+    const { error } = await supabase
+      .from('messages')
+      .delete()
+      .eq('id', messageId);
+
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Delete message error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ✅ Upload de fichier pour messages
+app.post('/api/messages/upload', authMiddleware, async (req, res) => {
+  try {
+    const { file } = req.files || {};
+    if (!file) {
+      return res.status(400).json({ error: 'Fichier requis' });
+    }
+
+    const userId = req.user.id;
+    const fileExt = file.name.split('.').pop();
+    const fileName = `${Date.now()}_${Math.random().toString(36).slice(2, 6)}.${fileExt}`;
+    const filePath = `messages/${userId}/${fileName}`;
+
+    const { data, error } = await supabase.storage
+      .from('messages')
+      .upload(filePath, file.data, {
+        contentType: file.mimetype,
+        upsert: false,
+      });
+
+    if (error) throw error;
+
+    const { data: { publicUrl } } = supabase.storage
+      .from('messages')
+      .getPublicUrl(filePath);
+
+    res.json({
+      success: true,
+      url: publicUrl,
+      type: file.mimetype.startsWith('image/') ? 'image' : 'document',
+    });
+  } catch (error) {
+    console.error('❌ Upload error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // =============================================
 // ✅ HEALTH CHECK - Pour Keep-Alive
