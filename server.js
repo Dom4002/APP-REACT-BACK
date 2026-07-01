@@ -14,6 +14,7 @@ const { errorHandler, notFoundHandler } = require('./src/utils/errorHandler');
 const { logRequest } = require('./src/config/logger');
 const { setupSwagger } = require('./src/config/swagger');
 const aidantCatalogRoutes = require('./src/routes/aidantCatalog.routes');
+const fileUpload = require('express-fileupload');
 
 const app = express();
 
@@ -32,7 +33,6 @@ app.get('/logos/:filename', (req, res) => {
   const filename = req.params.filename;
   const filePath = path.join(__dirname, 'src/assets/emails', filename);
   
-  // Vérifier si le fichier existe
   if (fs.existsSync(filePath)) {
     res.sendFile(filePath);
   } else {
@@ -59,12 +59,13 @@ const supabase = createClient(
 app.use(helmet());
 app.set('trust proxy', true);
 
-app.use(logRequest); // ✅ Logger
+app.use(logRequest);
 
 app.use(cors({
   origin: [
     'http://localhost:5173',
-    'https://app-sante-plus-react-front.vercel.app'
+    'https://app-sante-plus-react-front.vercel.app',
+    'https://app-sante-plus-react-front-git-main-abouamhster-cmyks-projects.vercel.app'
   ],
   credentials: true,
 }));
@@ -76,6 +77,12 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('dev'));
 
+// ✅ File upload pour les messages
+app.use(fileUpload({
+  limits: { fileSize: 5 * 1024 * 1024 },
+  abortOnLimit: true,
+}));
+
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
@@ -86,6 +93,12 @@ const limiter = rateLimit({
   },
 });
 app.use('/api', limiter);
+
+// =============================================
+// MIDDLEWARES D'AUTH (IMPORTÉS)
+// =============================================
+const authMiddleware = require('./src/middleware/auth.middleware');
+const roleMiddleware = require('./src/middleware/role.middleware');
 
 // =============================================
 // ROUTES
@@ -121,71 +134,10 @@ app.use('/api/contract', contractRoutes);
 app.use('/api/admin-setup', adminSetupRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/offers', offerRoutes);
-app.use('/api/aidants', aidantCatalogRoutes); 
-
-
-// =============================================
-// ✅ REDIRECTION FEDAPAY
-// =============================================
-app.post('/payment/confirm', express.json(), async (req, res) => {
-  console.log('📥 Redirection FedaPay reçue:', req.body);
-  
-  const { transaction_id, status } = req.body;
-  
-  if (status === 'approved' || status === 'paid') {
-    await supabase
-      .from('paiements')
-      .update({ status: 'valide', paid_at: new Date().toISOString() })
-      .eq('reference', transaction_id);
-  }
-  
-  res.redirect(`${process.env.CLIENT_URL}/payment/confirm?status=${status}&transaction_id=${transaction_id}`);
-});
-
-// =============================================
-// HEALTH CHECK
-// =============================================
-app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'OK',
-    service: 'Santé Plus API',
-    version: '1.0.0',
-    timestamp: new Date().toISOString(),
-  });
-});
-
-// =============================================
-// SWAGGER DOCUMENTATION
-// =============================================
-setupSwagger(app);
-
-// =============================================
-// 404 - Route non trouvée (UN SEUL)
-// =============================================
-app.use(notFoundHandler);
-
-// =============================================
-// GESTIONNAIRE D'ERREURS GLOBAL (UN SEUL)
-// =============================================
-app.use(errorHandler);
-
-// =============================================
-// START SERVER
-// =============================================
-app.listen(PORT, () => {
-  console.log(`🚀 Santé Plus API running on port ${PORT}`);
-  console.log(`📊 Health: http://localhost:${PORT}/api/health`);
-  console.log(`📝 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`📚 Swagger: http://localhost:${PORT}/api/docs`);
-  console.log(`💳 Webhook FedaPay: http://localhost:${PORT}/api/billing/webhook`);
-  console.log(`↩️ Redirection FedaPay: http://localhost:${PORT}/payment/confirm`);
-});
-
-
-// 📁 backend/server.js - AJOUTER CES ROUTES
+app.use('/api/aidants', aidantCatalogRoutes);
 
 // ============================================================
-// MESSAGES - CONVERSATIONS
+// MESSAGES - CONVERSATIONS (ROUTES AJOUTÉES DIRECTEMENT)
 // ============================================================
 
 // ✅ Récupérer les conversations de l'utilisateur
@@ -199,25 +151,30 @@ app.get('/api/messages/conversations', authMiddleware, async (req, res) => {
       .contains('participant_ids', [userId])
       .order('last_message_at', { ascending: false });
 
-    if (error) throw error;
+    if (error) {
+      console.error('❌ Conversations error:', error);
+      return res.json([]);
+    }
 
-    // Ajouter la conversation globale par défaut
-    const hasGlobal = data?.some(c => c.id === '00000000-0000-0000-0000-000000000001');
+    let conversations = data || [];
+
+    const hasGlobal = conversations.some(c => c.id === '00000000-0000-0000-0000-000000000001');
     if (!hasGlobal) {
-      data?.unshift({
+      conversations.unshift({
         id: '00000000-0000-0000-0000-000000000001',
         participant_ids: [userId],
         type: 'global',
         name: '💬 Général',
         last_message_at: new Date().toISOString(),
         is_active: true,
+        participants: [],
+        last_message: null,
       });
     }
 
-    // Récupérer les participants pour chaque conversation
     const conversationsWithParticipants = await Promise.all(
-      (data || []).map(async (conv) => {
-        const participantIds = conv.participant_ids.filter((id: string) => id !== userId);
+      conversations.map(async (conv) => {
+        const participantIds = (conv.participant_ids || []).filter((id) => id !== userId);
         let participants = [];
 
         if (participantIds.length > 0) {
@@ -225,10 +182,12 @@ app.get('/api/messages/conversations', authMiddleware, async (req, res) => {
             .from('profiles')
             .select('id, full_name, role, avatar_url')
             .in('id', participantIds);
-          participants = profiles || [];
+
+          if (profiles) {
+            participants = profiles;
+          }
         }
 
-        // Récupérer le dernier message
         const { data: lastMessage } = await supabase
           .from('messages')
           .select('*')
@@ -237,7 +196,7 @@ app.get('/api/messages/conversations', authMiddleware, async (req, res) => {
           .limit(1)
           .maybeSingle();
 
-        return { ...conv, participants, last_message: lastMessage };
+        return { ...conv, participants, last_message: lastMessage || null };
       })
     );
 
@@ -267,7 +226,12 @@ app.post('/api/messages/conversations', authMiddleware, async (req, res) => {
       .select()
       .single();
 
-    if (error) throw error;
+    if (error) {
+      if (error.code === '42P01') {
+        return res.status(501).json({ error: 'Table conversations non disponible' });
+      }
+      throw error;
+    }
 
     res.status(201).json({ success: true, conversation: data });
   } catch (error) {
@@ -282,22 +246,16 @@ app.get('/api/messages/:conversationId', authMiddleware, async (req, res) => {
     const { conversationId } = req.params;
     const userId = req.user.id;
 
-    // Vérifier que l'utilisateur est dans la conversation
-    const { data: conv, error: convError } = await supabase
-      .from('conversations')
-      .select('participant_ids')
-      .eq('id', conversationId)
-      .single();
+    if (conversationId !== '00000000-0000-0000-0000-000000000001') {
+      const { data: conv } = await supabase
+        .from('conversations')
+        .select('participant_ids')
+        .eq('id', conversationId)
+        .maybeSingle();
 
-    if (convError) {
-      if (convError.code === 'PGRST116') {
-        return res.status(404).json({ error: 'Conversation non trouvée' });
+      if (conv && !conv.participant_ids?.includes(userId)) {
+        return res.status(403).json({ error: 'Accès non autorisé' });
       }
-      throw convError;
-    }
-
-    if (!conv.participant_ids.includes(userId) && conversationId !== '00000000-0000-0000-0000-000000000001') {
-      return res.status(403).json({ error: 'Accès non autorisé' });
     }
 
     const { data, error } = await supabase
@@ -307,9 +265,11 @@ app.get('/api/messages/:conversationId', authMiddleware, async (req, res) => {
       .order('created_at', { ascending: true })
       .limit(200);
 
-    if (error) throw error;
+    if (error) {
+      console.error('❌ Messages error:', error);
+      return res.json([]);
+    }
 
-    // Récupérer les profils des expéditeurs
     const senderIds = [...new Set(data?.map(m => m.sender_id).filter(Boolean))];
     let profilesMap = {};
 
@@ -366,43 +326,51 @@ app.post('/api/messages', authMiddleware, async (req, res) => {
       .select()
       .single();
 
-    if (error) throw error;
+    if (error) {
+      console.error('❌ Insert message error:', error);
+      return res.status(500).json({ error: error.message });
+    }
 
-    // Mettre à jour last_message_at
-    await supabase
-      .from('conversations')
-      .update({ last_message_at: new Date().toISOString() })
-      .eq('id', conversation_id);
+    try {
+      await supabase
+        .from('conversations')
+        .update({ last_message_at: new Date().toISOString() })
+        .eq('id', conversation_id);
+    } catch (updateError) {
+      console.log('ℹ️ Conversation update skipped');
+    }
 
-    // Récupérer le sender
     const { data: sender } = await supabase
       .from('profiles')
       .select('id, full_name, role, avatar_url')
       .eq('id', userId)
       .single();
 
-    // Notifier les autres participants
-    const { data: conv } = await supabase
-      .from('conversations')
-      .select('participant_ids')
-      .eq('id', conversation_id)
-      .single();
+    try {
+      const { data: conv } = await supabase
+        .from('conversations')
+        .select('participant_ids')
+        .eq('id', conversation_id)
+        .maybeSingle();
 
-    if (conv) {
-      const otherParticipants = conv.participant_ids.filter((id: string) => id !== userId);
-      for (const participantId of otherParticipants) {
-        await supabase.from('notifications').insert({
-          user_id: participantId,
-          title: `📨 ${sender?.full_name || 'Utilisateur'}`,
-          body: content?.substring(0, 100) || 'Pièce jointe',
-          type: 'message',
-          data: {
-            conversation_id,
-            message_id: data.id,
-            sender_id: userId,
-          },
-        });
+      if (conv && conv.participant_ids) {
+        const otherParticipants = conv.participant_ids.filter((id) => id !== userId);
+        for (const participantId of otherParticipants) {
+          await supabase.from('notifications').insert({
+            user_id: participantId,
+            title: `📨 ${sender?.full_name || 'Utilisateur'}`,
+            body: content?.substring(0, 100) || 'Pièce jointe',
+            type: 'message',
+            data: {
+              conversation_id,
+              message_id: data.id,
+              sender_id: userId,
+            },
+          });
+        }
       }
+    } catch (notifError) {
+      console.log('ℹ️ Notification skipped');
     }
 
     res.status(201).json({ success: true, message: data });
@@ -422,7 +390,10 @@ app.put('/api/messages/:messageId/read', authMiddleware, async (req, res) => {
       .update({ is_read: true })
       .eq('id', messageId);
 
-    if (error) throw error;
+    if (error) {
+      console.error('❌ Mark read error:', error);
+      return res.status(500).json({ error: error.message });
+    }
 
     res.json({ success: true });
   } catch (error) {
@@ -444,7 +415,10 @@ app.put('/api/messages/:conversationId/read-all', authMiddleware, async (req, re
       .neq('sender_id', userId)
       .eq('is_read', false);
 
-    if (error) throw error;
+    if (error) {
+      console.error('❌ Mark all read error:', error);
+      return res.status(500).json({ error: error.message });
+    }
 
     res.json({ success: true });
   } catch (error) {
@@ -464,7 +438,10 @@ app.put('/api/messages/:messageId/pin', authMiddleware, roleMiddleware(['admin',
       .update({ is_pinned: pinned })
       .eq('id', messageId);
 
-    if (error) throw error;
+    if (error) {
+      console.error('❌ Pin error:', error);
+      return res.status(500).json({ error: error.message });
+    }
 
     res.json({ success: true });
   } catch (error) {
@@ -484,7 +461,10 @@ app.put('/api/messages/:messageId/important', authMiddleware, roleMiddleware(['a
       .update({ is_important: important })
       .eq('id', messageId);
 
-    if (error) throw error;
+    if (error) {
+      console.error('❌ Important error:', error);
+      return res.status(500).json({ error: error.message });
+    }
 
     res.json({ success: true });
   } catch (error) {
@@ -503,7 +483,10 @@ app.delete('/api/messages/:messageId', authMiddleware, roleMiddleware(['admin', 
       .delete()
       .eq('id', messageId);
 
-    if (error) throw error;
+    if (error) {
+      console.error('❌ Delete error:', error);
+      return res.status(500).json({ error: error.message });
+    }
 
     res.json({ success: true });
   } catch (error) {
@@ -515,7 +498,7 @@ app.delete('/api/messages/:messageId', authMiddleware, roleMiddleware(['admin', 
 // ✅ Upload de fichier pour messages
 app.post('/api/messages/upload', authMiddleware, async (req, res) => {
   try {
-    const { file } = req.files || {};
+    const file = req.files?.file;
     if (!file) {
       return res.status(400).json({ error: 'Fichier requis' });
     }
@@ -532,7 +515,10 @@ app.post('/api/messages/upload', authMiddleware, async (req, res) => {
         upsert: false,
       });
 
-    if (error) throw error;
+    if (error) {
+      console.error('❌ Upload error:', error);
+      return res.status(500).json({ error: error.message });
+    }
 
     const { data: { publicUrl } } = supabase.storage
       .from('messages')
@@ -550,8 +536,35 @@ app.post('/api/messages/upload', authMiddleware, async (req, res) => {
 });
 
 // =============================================
-// ✅ HEALTH CHECK - Pour Keep-Alive
+// ✅ REDIRECTION FEDAPAY
 // =============================================
+app.post('/payment/confirm', express.json(), async (req, res) => {
+  console.log('📥 Redirection FedaPay reçue:', req.body);
+  
+  const { transaction_id, status } = req.body;
+  
+  if (status === 'approved' || status === 'paid') {
+    await supabase
+      .from('paiements')
+      .update({ status: 'valide', paid_at: new Date().toISOString() })
+      .eq('reference', transaction_id);
+  }
+  
+  res.redirect(`${process.env.CLIENT_URL}/payment/confirm?status=${status}&transaction_id=${transaction_id}`);
+});
+
+// =============================================
+// HEALTH CHECK
+// =============================================
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'OK',
+    service: 'Santé Plus API',
+    version: '1.0.0',
+    timestamp: new Date().toISOString(),
+  });
+});
+
 app.get('/health', (req, res) => {
   res.json({
     status: 'OK',
@@ -563,9 +576,6 @@ app.get('/health', (req, res) => {
   });
 });
 
-// =============================================
-// ✅ BILLING HEALTH
-// =============================================
 app.get('/billing/health', (req, res) => {
   res.json({
     status: 'OK',
@@ -575,6 +585,31 @@ app.get('/billing/health', (req, res) => {
   });
 });
 
+// =============================================
+// SWAGGER DOCUMENTATION
+// =============================================
+setupSwagger(app);
 
+// =============================================
+// 404 - Route non trouvée
+// =============================================
+app.use(notFoundHandler);
+
+// =============================================
+// GESTIONNAIRE D'ERREURS GLOBAL
+// =============================================
+app.use(errorHandler);
+
+// =============================================
+// START SERVER
+// =============================================
+app.listen(PORT, () => {
+  console.log(`🚀 Santé Plus API running on port ${PORT}`);
+  console.log(`📊 Health: http://localhost:${PORT}/api/health`);
+  console.log(`📝 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`📚 Swagger: http://localhost:${PORT}/api/docs`);
+  console.log(`💳 Webhook FedaPay: http://localhost:${PORT}/api/billing/webhook`);
+  console.log(`↩️ Redirection FedaPay: http://localhost:${PORT}/payment/confirm`);
+});
 
 module.exports = app;
