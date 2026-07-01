@@ -130,18 +130,35 @@ router.get('/stats', async (req, res) => {
   }
 });
 
+ 
+
 // =============================================
-// INSCRIPTIONS
+// INSCRIPTIONS - CORRIGÉ POUR NE AFFICHER QUE LES EN ATTENTE
 // =============================================
 router.get('/registrations', async (req, res) => {
   try {
+    // ✅ Récupérer UNIQUEMENT les inscriptions en attente (aidants)
     const { data, error } = await supabase
       .from('inscriptions')
       .select(`
-        *,
-        user:profiles(*),
-        offre:offres(*)
+        id,
+        user_id,
+        patient_data,
+        offre_id,
+        status,
+        comments,
+        source,
+        created_at,
+        updated_at,
+        user:profiles!user_id (
+          id,
+          full_name,
+          email,
+          phone,
+          role
+        )
       `)
+      .eq('status', 'en_attente')  
       .order('created_at', { ascending: false });
 
     if (error) throw error;
@@ -151,7 +168,6 @@ router.get('/registrations', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
 // =============================================
 // TRAITER UNE INSCRIPTION
 // =============================================
