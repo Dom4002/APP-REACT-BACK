@@ -37,8 +37,10 @@ router.delete('/users/:id', authMiddleware, roleMiddleware(['admin']), async (re
   }
 });
 
+
+
 // =============================================
-// STATISTIQUES - AVEC NOUVEAUX STATUTS
+// STATISTIQUES - CORRIGÉ
 // =============================================
 router.get('/stats', async (req, res) => {
   try {
@@ -67,12 +69,13 @@ router.get('/stats', async (req, res) => {
       .select('*', { count: 'exact', head: true })
       .eq('status', 'en_cours');
 
-    // ✅ Nouveaux statuts pour les alertes
+    // ✅ UNIQUEMENT LES AIDANTS EN ATTENTE
     const { count: pendingRegistrations } = await supabase
       .from('inscriptions')
       .select('*', { count: 'exact', head: true })
       .eq('status', 'en_attente');
 
+   
     // ✅ Visites en attente d'approbation (24-48h)
     const { count: visitsWaitingApproval } = await supabase
       .from('visites')
@@ -80,6 +83,7 @@ router.get('/stats', async (req, res) => {
       .eq('status', 'planifiee')
       .is('approved_at', null)
       .is('refused_at', null);
+
 
     // ✅ Visites expirées (sans réponse)
     const { count: visitsExpired } = await supabase
