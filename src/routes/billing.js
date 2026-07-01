@@ -1,5 +1,5 @@
 // 📁 backend/src/routes/billing.js
- 
+
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 const { FedaPay, Transaction } = require('fedapay');
@@ -92,42 +92,10 @@ function isValidUUID(uuid) {
   return UUID_REGEX.test(uuid);
 }
 
-async function getOrCreatePatientId(userId) {
-  try {
-    const { data: link, error: linkError } = await supabase
-      .from('patient_family_links')
-      .select('patient_id, patients!inner(id, first_name, last_name, status)')
-      .eq('family_id', userId)
-      .eq('patients.status', 'active')
-      .limit(1)
-      .maybeSingle();
-
-    if (!linkError && link) {
-      return link.patient_id;
-    }
-
-    const { data: patient, error: patientError } = await supabase
-      .from('patients')
-      .select('id')
-      .eq('created_by', userId)
-      .eq('status', 'active')
-      .limit(1)
-      .maybeSingle();
-
-    if (!patientError && patient) {
-      return patient.id;
-    }
-
-    console.log('ℹ️ Aucun patient trouvé pour l\'utilisateur:', userId);
-    return null;
-
-  } catch (error) {
-    console.error('❌ Erreur getOrCreatePatientId:', error.message);
-    return null;
-  }
-}
-
-async function createPendingSubscription(userId, offerId, offer) {
+// ============================================================
+// ✅ CRÉER UN ABONNEMENT EN ATTENTE - SANS PATIENT OBLIGATOIRE
+// ============================================================
+async function createPendingSubscription(userId, offerId, offer, patientId = null) {
   try {
     const startDate = new Date();
     const endDate = new Date();
@@ -148,10 +116,11 @@ async function createPendingSubscription(userId, offerId, offer) {
     const totalVisits = offer.total_visits || offer.visits_per_week * 4 || 0;
     const totalOrders = offer.total_orders || 0;
 
-    const patientId = await getOrCreatePatientId(userId);
+    console.log('📝 Création abonnement pour user_id:', userId);
+    console.log('📝 patient_id (optionnel):', patientId);
 
-    console.log('📝 Création abonnement avec patient_id:', patientId);
-
+    // ✅ L'abonnement est toujours lié au compte (user_id)
+    // ✅ patient_id est optionnel
     const subscriptionData = {
       user_id: userId,
       offre_id: offer.id,
@@ -169,6 +138,7 @@ async function createPendingSubscription(userId, offerId, offer) {
       updated_at: new Date().toISOString(),
     };
 
+    // ✅ patient_id n'est ajouté que s'il est fourni
     if (patientId) {
       subscriptionData.patient_id = patientId;
     }
@@ -180,6 +150,9 @@ async function createPendingSubscription(userId, offerId, offer) {
       .single();
 
     if (error) {
+      console.error('❌ Erreur création abonnement:', error.message);
+      
+      // Si l'erreur est liée à patient_id null
       if (error.code === '23502' && error.message.includes('patient_id')) {
         console.log('⚠️ patient_id null non accepté, tentative sans patient...');
         delete subscriptionData.patient_id;
@@ -199,7 +172,6 @@ async function createPendingSubscription(userId, offerId, offer) {
         return retrySubscription;
       }
 
-      console.error('❌ Erreur création abonnement:', error.message);
       return null;
     }
 
@@ -212,12 +184,16 @@ async function createPendingSubscription(userId, offerId, offer) {
   }
 }
 
+// ============================================================
+// ✅ CRÉER UNE COMMANDE PONCTUELLE - AVEC TARGET_TYPE
+// ============================================================
 async function createPonctualOrder(paymentRecord, transactionId, orderData) {
   try {
+    // Vérifier si la commande existe déjà
     const { data: existingOrders, error: checkError } = await supabase
       .from('commandes')
       .select('id')
-      .eq('family_id', paymentRecord.user_id)
+      .eq('user_id', paymentRecord.user_id)
       .eq('order_type', 'ponctual')
       .eq('is_paid', true)
       .eq('metadata->>transaction_id', transactionId)
@@ -235,6 +211,10 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
 
     const orderDataToInsert = orderData || {};
 
+    // ✅ Déterminer target_type et target_name
+    const targetType = orderDataToInsert.target_type || 'personal';
+    const targetName = orderDataToInsert.target_name || 'Commande personnelle';
+
     if (!orderDataToInsert.description) {
       orderDataToInsert.description = 'Commande ponctuelle';
     }
@@ -248,7 +228,10 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
     const { data: newOrder, error: orderError } = await supabase
       .from('commandes')
       .insert({
+        user_id: paymentRecord.user_id,           // ✅ COMPTE QUI PASSE LA COMMANDE
         patient_id: orderDataToInsert.patient_id || null,
+        target_type: targetType,
+        target_name: targetName,
         family_id: paymentRecord.user_id,
         type: orderDataToInsert.type,
         description: orderDataToInsert.description,
@@ -279,11 +262,13 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
     await supabase.from('notifications').insert({
       user_id: paymentRecord.user_id,
       title: '✅ Commande confirmée !',
-      body: `Votre commande "${orderDataToInsert.description}" a été enregistrée avec succès. Vous serez notifié de son avancement.`,
+      body: `Votre commande "${orderDataToInsert.description}" pour ${targetName} a été enregistrée avec succès.`,
       type: 'commande',
       data: {
         order_id: newOrder.id,
         status: 'creee',
+        target_type: targetType,
+        target_name: targetName,
       },
     });
 
@@ -295,6 +280,9 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
   }
 }
 
+// ============================================================
+// ✅ ACTIVER UN ABONNEMENT
+// ============================================================
 async function activateSubscription(paymentRecord, subscriptionId) {
   try {
     if (!isValidUUID(subscriptionId)) {
@@ -405,10 +393,16 @@ router.post('/generate-payment', async (req, res) => {
       order_id = null,
       is_ponctual = false,
       order_data = null,
+      patient_id = null,        // ✅ NOUVEAU - patient_id optionnel
+      target_type = 'personal', // ✅ NOUVEAU - 'personal' | 'patient'
+      target_name = null,       // ✅ NOUVEAU - nom affiché
     } = req.body;
 
     console.log('📥 is_ponctual reçu du frontend:', is_ponctual);
     console.log('📥 abonnement_id reçu:', abonnement_id);
+    console.log('📥 patient_id reçu:', patient_id);
+    console.log('📥 target_type reçu:', target_type);
+    console.log('📥 target_name reçu:', target_name);
 
     const finalAmount = Number(montant || amount || 0);
 
@@ -447,6 +441,7 @@ router.post('/generate-payment', async (req, res) => {
     let subscriptionRecord = null;
     let actualAbonnementId = null;
 
+    // ✅ Créer l'abonnement en attente (si ce n'est pas ponctuel)
     if (!is_ponctual && abonnement_id) {
       const { data: offer, error: offerError } = await supabase
         .from('offres')
@@ -462,7 +457,14 @@ router.post('/generate-payment', async (req, res) => {
         });
       }
 
-      subscriptionRecord = await createPendingSubscription(user.id, offer.id, offer);
+      // ✅ patient_id est optionnel - peut être null pour compte personnel
+      subscriptionRecord = await createPendingSubscription(
+        user.id,
+        offer.id,
+        offer,
+        patient_id || null
+      );
+
       if (!subscriptionRecord) {
         console.error('❌ Échec création abonnement');
         return res.status(500).json({
@@ -487,6 +489,7 @@ router.post('/generate-payment', async (req, res) => {
       abonnement_id: actualAbonnementId || null,
     });
 
+    // ✅ Métadonnées avec les nouvelles informations
     const metadata = {
       user_id: user.id,
       plan_id: plan_id || null,
@@ -495,6 +498,9 @@ router.post('/generate-payment', async (req, res) => {
       is_ponctual: is_ponctual || false,
       source: 'sante_plus_services',
       order_data: is_ponctual ? order_data : null,
+      patient_id: patient_id || null,
+      target_type: target_type || 'personal',
+      target_name: target_name || finalName,
     };
 
     if (is_ponctual) {
@@ -535,6 +541,7 @@ router.post('/generate-payment', async (req, res) => {
       });
     }
 
+    // ✅ Enregistrement du paiement
     const paymentData = {
       user_id: user.id,
       amount: finalAmount,
@@ -552,6 +559,9 @@ router.post('/generate-payment', async (req, res) => {
         transaction_id: String(transaction.id),
         payment_url: paymentUrl,
         order_data: is_ponctual ? order_data : null,
+        patient_id: patient_id || null,
+        target_type: target_type || 'personal',
+        target_name: target_name || finalName,
       },
     };
 
