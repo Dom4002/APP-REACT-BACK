@@ -16,6 +16,33 @@ const { setupSwagger } = require('./src/config/swagger');
 const aidantCatalogRoutes = require('./src/routes/aidantCatalog.routes');
 
 const app = express();
+
+const path = require('path');
+const fs = require('fs');
+
+// =============================================
+// ✅ SERVIR LES FICHIERS STATIQUES (LOGOS)
+// =============================================
+
+// 1. Servir tout le dossier assets
+app.use('/assets', express.static(path.join(__dirname, 'src/assets')));
+
+// 2. Route spécifique pour les logos
+app.get('/logos/:filename', (req, res) => {
+  const filename = req.params.filename;
+  const filePath = path.join(__dirname, 'src/assets/emails', filename);
+  
+  // Vérifier si le fichier existe
+  if (fs.existsSync(filePath)) {
+    res.sendFile(filePath);
+  } else {
+    res.status(404).json({ error: 'Logo non trouvé' });
+  }
+});
+
+console.log('📁 Assets servis depuis /assets');
+console.log('📁 Logos disponibles sur /logos/:filename');
+
 const PORT = process.env.PORT || 5000;
 
 // =============================================
