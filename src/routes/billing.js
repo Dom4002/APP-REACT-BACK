@@ -119,8 +119,6 @@ async function createPendingSubscription(userId, offerId, offer, patientId = nul
     console.log('📝 Création abonnement pour user_id:', userId);
     console.log('📝 patient_id (optionnel):', patientId);
 
-    // ✅ L'abonnement est toujours lié au compte (user_id)
-    // ✅ patient_id est optionnel
     const subscriptionData = {
       user_id: userId,
       offre_id: offer.id,
@@ -138,7 +136,6 @@ async function createPendingSubscription(userId, offerId, offer, patientId = nul
       updated_at: new Date().toISOString(),
     };
 
-    // ✅ patient_id n'est ajouté que s'il est fourni
     if (patientId) {
       subscriptionData.patient_id = patientId;
     }
@@ -152,7 +149,6 @@ async function createPendingSubscription(userId, offerId, offer, patientId = nul
     if (error) {
       console.error('❌ Erreur création abonnement:', error.message);
       
-      // Si l'erreur est liée à patient_id null
       if (error.code === '23502' && error.message.includes('patient_id')) {
         console.log('⚠️ patient_id null non accepté, tentative sans patient...');
         delete subscriptionData.patient_id;
@@ -189,7 +185,6 @@ async function createPendingSubscription(userId, offerId, offer, patientId = nul
 // ============================================================
 async function createPonctualOrder(paymentRecord, transactionId, orderData) {
   try {
-    // Vérifier si la commande existe déjà
     const { data: existingOrders, error: checkError } = await supabase
       .from('commandes')
       .select('id')
@@ -211,7 +206,6 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
 
     const orderDataToInsert = orderData || {};
 
-    // ✅ Déterminer target_type et target_name
     const targetType = orderDataToInsert.target_type || 'personal';
     const targetName = orderDataToInsert.target_name || 'Commande personnelle';
 
@@ -228,7 +222,7 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
     const { data: newOrder, error: orderError } = await supabase
       .from('commandes')
       .insert({
-        user_id: paymentRecord.user_id,           // ✅ COMPTE QUI PASSE LA COMMANDE
+        user_id: paymentRecord.user_id,
         patient_id: orderDataToInsert.patient_id || null,
         target_type: targetType,
         target_name: targetName,
@@ -276,6 +270,99 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
 
   } catch (error) {
     console.error('❌ Erreur createPonctualOrder:', error.message);
+    return null;
+  }
+}
+
+// ============================================================
+// ✅ TRAITER UNE VISITE PONCTUELLE
+// ============================================================
+async function processPonctualVisit(paymentRecord, transactionId, visitId, metadata) {
+  try {
+    console.log('🔄 Traitement d\'une visite ponctuelle:', visitId);
+
+    // ✅ Récupérer la visite
+    const { data: visit, error: visitError } = await supabase
+      .from('visites')
+      .select('*')
+      .eq('id', visitId)
+      .single();
+
+    if (visitError) {
+      console.error('❌ Visite non trouvée:', visitError.message);
+      return null;
+    }
+
+    // ✅ Vérifier que la visite est en brouillon
+    if (visit.status !== 'brouillon') {
+      console.log(`ℹ️ La visite ${visitId} n'est pas en brouillon (status: ${visit.status})`);
+      return null;
+    }
+
+    // ✅ Passer la visite de brouillon à planifiee
+    const { data: updatedVisit, error: updateError } = await supabase
+      .from('visites')
+      .update({
+        status: 'planifiee',
+        metadata: {
+          ...(visit.metadata || {}),
+          payment_confirmed_at: new Date().toISOString(),
+          transaction_id: transactionId,
+          scheduled_from_draft: true,
+          payment_completed: true,
+          webhook_processed: true,
+          webhook_processed_at: new Date().toISOString(),
+        }
+      })
+      .eq('id', visitId)
+      .select()
+      .single();
+
+    if (updateError) {
+      console.error('❌ Erreur mise à jour visite:', updateError.message);
+      return null;
+    }
+
+    console.log('✅ Visite passée de brouillon à planifiee:', visitId);
+
+    // ✅ Notifier l'aidant assigné
+    if (updatedVisit.aidant_id) {
+      await supabase.from('notifications').insert({
+        user_id: updatedVisit.aidant_id,
+        title: '📅 Nouvelle visite à valider',
+        body: `Visite pour ${updatedVisit.target_name || 'le patient'} le ${updatedVisit.scheduled_date} à ${updatedVisit.scheduled_time}`,
+        type: 'visite',
+        data: { visit_id: visitId, action: 'approve' },
+      });
+    }
+
+    // ✅ Notification à la famille
+    const targetDisplay = updatedVisit.target_name || (updatedVisit.patient ? `${updatedVisit.patient.first_name} ${updatedVisit.patient.last_name}` : 'Personnel');
+
+    await supabase.from('notifications').insert({
+      user_id: updatedVisit.user_id,
+      title: '✅ Visite planifiée !',
+      body: `Votre visite pour ${targetDisplay} a été planifiée avec succès après paiement.`,
+      type: 'visite',
+      data: { visit_id: visitId, status: 'planifiee' },
+    });
+
+    // ✅ Mettre à jour le paiement avec la référence de la visite
+    await supabase
+      .from('paiements')
+      .update({
+        metadata: {
+          ...(paymentRecord.metadata || {}),
+          visit_processed: true,
+          visit_processed_at: new Date().toISOString(),
+        }
+      })
+      .eq('id', paymentRecord.id);
+
+    return updatedVisit;
+
+  } catch (error) {
+    console.error('❌ Erreur processPonctualVisit:', error.message);
     return null;
   }
 }
@@ -393,9 +480,11 @@ router.post('/generate-payment', async (req, res) => {
       order_id = null,
       is_ponctual = false,
       order_data = null,
-      patient_id = null,        // ✅ NOUVEAU - patient_id optionnel
-      target_type = 'personal', // ✅ NOUVEAU - 'personal' | 'patient'
-      target_name = null,       // ✅ NOUVEAU - nom affiché
+      patient_id = null,
+      target_type = 'personal',
+      target_name = null,
+      visit_id = null,              // ✅ NOUVEAU - pour les visites
+      is_visit = false,             // ✅ NOUVEAU - pour les visites
     } = req.body;
 
     console.log('📥 is_ponctual reçu du frontend:', is_ponctual);
@@ -403,6 +492,8 @@ router.post('/generate-payment', async (req, res) => {
     console.log('📥 patient_id reçu:', patient_id);
     console.log('📥 target_type reçu:', target_type);
     console.log('📥 target_name reçu:', target_name);
+    console.log('📥 visit_id reçu:', visit_id);
+    console.log('📥 is_visit reçu:', is_visit);
 
     const finalAmount = Number(montant || amount || 0);
 
@@ -457,7 +548,6 @@ router.post('/generate-payment', async (req, res) => {
         });
       }
 
-      // ✅ patient_id est optionnel - peut être null pour compte personnel
       subscriptionRecord = await createPendingSubscription(
         user.id,
         offer.id,
@@ -484,12 +574,14 @@ router.post('/generate-payment', async (req, res) => {
       env: FEDAPAY_ENV === 'sandbox' ? 'sandbox' : 'live',
       amount: Math.round(finalAmount),
       email: finalEmail,
-      description: description || 'Abonnement Santé Plus',
+      description: description || 'Santé Plus',
       is_ponctual: is_ponctual || false,
+      is_visit: is_visit || false,
+      visit_id: visit_id || null,
       abonnement_id: actualAbonnementId || null,
     });
 
-    // ✅ Métadonnées avec les nouvelles informations
+    // ✅ Métadonnées avec toutes les informations
     const metadata = {
       user_id: user.id,
       plan_id: plan_id || null,
@@ -501,6 +593,10 @@ router.post('/generate-payment', async (req, res) => {
       patient_id: patient_id || null,
       target_type: target_type || 'personal',
       target_name: target_name || finalName,
+      // ✅ NOUVEAU - pour les visites
+      is_visit: is_visit || false,
+      visit_id: visit_id || null,
+      type: is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription'),
     };
 
     if (is_ponctual) {
@@ -562,6 +658,10 @@ router.post('/generate-payment', async (req, res) => {
         patient_id: patient_id || null,
         target_type: target_type || 'personal',
         target_name: target_name || finalName,
+        // ✅ NOUVEAU - pour les visites
+        is_visit: is_visit || false,
+        visit_id: visit_id || null,
+        type: is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription'),
       },
     };
 
@@ -570,6 +670,8 @@ router.post('/generate-payment', async (req, res) => {
       user_id: user.id,
       amount: finalAmount,
       is_ponctual: is_ponctual,
+      is_visit: is_visit,
+      visit_id: visit_id,
       abonnement_id: actualAbonnementId || null,
     });
 
@@ -759,12 +861,19 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     const subscriptionId = metadata.abonnement_id || null;
     const orderData = metadata.order_data || null;
 
+    // ✅ NOUVEAU - Vérifier si c'est une visite
+    const isVisit = metadata.is_visit === true || metadata.type === 'visit';
+    const visitId = metadata.visit_id || null;
+
     console.log('📦 Métadonnées extraites:', {
       isPonctual,
+      isVisit,
+      visitId,
       subscriptionId,
       hasOrderData: !!orderData,
     });
 
+    // ✅ Mettre à jour le paiement
     const { data: updatedPayment, error: updateError } = await supabase
       .from('paiements')
       .update({
@@ -783,7 +892,19 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     const paymentRecord = updatedPayment || payment;
     let result = null;
 
-    if (isPonctual) {
+    // ✅ TRAITEMENT PRIORITAIRE : VISITE PONCTUELLE
+    if (isVisit && visitId) {
+      console.log('🔄 Traitement d\'une visite ponctuelle:', visitId);
+      result = await processPonctualVisit(paymentRecord, transactionId, visitId, metadata);
+
+      if (result) {
+        console.log('✅ Visite ponctuelle traitée avec succès');
+      } else {
+        console.warn('⚠️ La visite ponctuelle n\'a pas pu être traitée, mais le paiement est validé');
+      }
+
+    // ✅ TRAITEMENT : COMMANDE PONCTUELLE
+    } else if (isPonctual) {
       console.log('📦 Traitement commande ponctuelle...');
       result = await createPonctualOrder(paymentRecord, transactionId, orderData);
 
@@ -793,6 +914,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         console.warn('⚠️ La commande ponctuelle n\'a pas pu être créée, mais le paiement est validé');
       }
 
+    // ✅ TRAITEMENT : ABONNEMENT
     } else if (subscriptionId) {
       console.log('📦 Activation de l\'abonnement:', subscriptionId);
       result = await activateSubscription(paymentRecord, subscriptionId);
@@ -803,16 +925,35 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         console.warn('⚠️ L\'abonnement n\'a pas pu être activé, mais le paiement est validé');
       }
     } else {
-      console.warn('⚠️ Aucun abonnement ni commande ponctuelle à traiter');
+      console.warn('⚠️ Aucun traitement spécifique trouvé pour ce paiement');
     }
 
+    // ✅ Notification de confirmation de paiement
     try {
+      let notificationTitle = '✅ Paiement confirmé';
+      let notificationBody = `Votre paiement de ${paymentRecord.amount} FCFA a été confirmé.`;
+
+      if (isVisit && result) {
+        notificationTitle = '✅ Visite planifiée !';
+        notificationBody = `Votre visite a été planifiée avec succès après paiement.`;
+      } else if (isPonctual && result) {
+        notificationTitle = '✅ Commande confirmée !';
+        notificationBody = `Votre commande a été enregistrée avec succès après paiement.`;
+      } else if (subscriptionId && result) {
+        notificationTitle = '✅ Abonnement activé !';
+        notificationBody = `Votre abonnement est maintenant actif.`;
+      }
+
       await supabase.from('notifications').insert({
         user_id: paymentRecord.user_id,
-        title: '✅ Paiement confirmé',
-        body: `Votre paiement de ${paymentRecord.amount} FCFA a été confirmé.`,
+        title: notificationTitle,
+        body: notificationBody,
         type: 'paiement',
-        data: { payment_id: paymentRecord.id },
+        data: { 
+          payment_id: paymentRecord.id,
+          type: isVisit ? 'visit' : (isPonctual ? 'order' : 'subscription'),
+          processed: !!result,
+        },
       });
     } catch (notifError) {
       console.error('❌ Erreur notification paiement:', notifError.message);
@@ -825,7 +966,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       success: true,
       message: 'Paiement traité avec succès',
       payment_id: paymentRecord.id,
-      type: isPonctual ? 'ponctual' : 'subscription',
+      type: isVisit ? 'visit' : (isPonctual ? 'ponctual' : 'subscription'),
       processed: !!result,
     });
 
