@@ -6,28 +6,23 @@ const path = require('path');
 // CONFIGURATION DES LOGOS POUR EMAILS
 // ============================================================
 
-// 🔥 En production, utiliser les URLs publiques (hébergées sur Supabase Storage)
-// En développement, utiliser les fichiers locaux
+// 📌 URL DU BACKEND - Utiliser l'URL de production ou localhost
+const BACKEND_URL = process.env.BACKEND_URL || 'https://app-react-back.onrender.com';
 
-const IS_PRODUCTION = process.env.NODE_ENV === 'production';
-
-// 📌 Base URL pour les assets 
-const BASE_URL = process.env.ASSETS_URL || 'https://mrsrogkjthtnppecndyc.supabase.co/storage/v1/object/public/assets/emails';
-
-// 📌 URLs publiques des logos
+// 📌 URLs des logos - Servis par le backend
 const PUBLIC_URLS = {
   // Logo principal (général)
-  logoGeneralIcon: `${BASE_URL}/logo-general-icon.png`,
-  logoGeneralText: `${BASE_URL}/logo-general-text.png`,
-  logoGeneralWhite: `${BASE_URL}/logo-general-white-bg.png`,
+  logoGeneralIcon: `${BACKEND_URL}/assets/emails/logo-general-icon.png`,
+  logoGeneralText: `${BACKEND_URL}/assets/emails/logo-general-text.png`,
+  logoGeneralWhite: `${BACKEND_URL}/assets/emails/logo-general-white-bg.png`,
   
   // Logo Maman & Bébé
-  logoMamanIcon: `${BASE_URL}/logo-maman-icon.png`,
-  logoMamanText: `${BASE_URL}/logo-maman-text.png`,
-  logoMamanWhite: `${BASE_URL}/logo-maman-white-bg.jpeg`,
+  logoMamanIcon: `${BACKEND_URL}/assets/emails/logo-maman-icon.png`,
+  logoMamanText: `${BACKEND_URL}/assets/emails/logo-maman-text.png`,
+  logoMamanWhite: `${BACKEND_URL}/assets/emails/logo-maman-white-bg.jpeg`,
 };
 
-// 📌 URLs de fallback (en cas d'échec)
+// 📌 URLs de fallback (si le backend est hors ligne)
 const FALLBACK_URLS = {
   logoGeneral: 'https://via.placeholder.com/200x60/1a4a3a/ffffff?text=Sant%C3%A9+Plus',
   logoMaman: 'https://via.placeholder.com/200x60/db4a6d/ffffff?text=Maman+%26+B%C3%A9b%C3%A9',
@@ -35,11 +30,10 @@ const FALLBACK_URLS = {
 };
 
 // ============================================================
-// FONCTION POUR OBTENIR LE LOGO SELON LE CONTEXTE
+// FONCTIONS
 // ============================================================
 
 const getLogoForEmail = (type = 'general', variant = 'default') => {
-  // Déterminer le type de logo
   let logoKey;
   
   if (type === 'maman') {
@@ -50,7 +44,13 @@ const getLogoForEmail = (type = 'general', variant = 'default') => {
     logoKey = variant === 'white' ? 'logoGeneralWhite' : 'logoGeneralIcon';
   }
   
-  return PUBLIC_URLS[logoKey] || FALLBACK_URLS.logoGeneral;
+  const url = PUBLIC_URLS[logoKey];
+  if (!url) {
+    console.warn(`⚠️ Logo non trouvé pour ${logoKey}, utilisation du fallback`);
+    return FALLBACK_URLS.logoGeneral;
+  }
+  
+  return url;
 };
 
 const getLogoTextForEmail = (type = 'general') => {
@@ -69,5 +69,5 @@ module.exports = {
   FALLBACK_URLS,
   getLogoForEmail,
   getLogoTextForEmail,
-  IS_PRODUCTION,
+  IS_PRODUCTION: process.env.NODE_ENV === 'production',
 };
