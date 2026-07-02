@@ -209,7 +209,7 @@ const getAidantById = async (aidantId) => {
 };
 
 // ============================================================
-// ✅ ASSIGNER UN AIDANT - PERSONNEL OU PATIENT (CORRIGÉ)
+// ✅ ASSIGNER UN AIDANT - PERSONNEL OU PATIENT
 // ============================================================
 const assignAidantToPatient = async (aidantId, familyId, patientId = null, assignmentType = 'permanente') => {
   try {
@@ -244,9 +244,8 @@ const assignAidantToPatient = async (aidantId, familyId, patientId = null, assig
     // ✅ 3. Déterminer target_type et target_name
     let targetType = 'personal';
     let targetName = null;
-    let assignToId = familyId;
-    let patient = null;
     let isPersonal = true;
+    let patient = null;
 
     // ✅ Si patientId est fourni → assignation à un patient
     if (patientId) {
@@ -263,7 +262,6 @@ const assignAidantToPatient = async (aidantId, familyId, patientId = null, assig
       patient = patientData;
       targetType = 'patient';
       targetName = `${patient.first_name} ${patient.last_name}`;
-      assignToId = patientId;
       isPersonal = false;
     } else {
       // ✅ Assignation personnelle (au compte)
@@ -282,7 +280,7 @@ const assignAidantToPatient = async (aidantId, familyId, patientId = null, assig
       isPersonal = true;
     }
 
-    // ✅ 4. Vérifier que l'assignation n'existe pas déjà (pour le même type)
+    // ✅ 4. Vérifier que l'assignation n'existe pas déjà
     let query = supabase
       .from('patient_family_links')
       .select('id')
@@ -295,6 +293,10 @@ const assignAidantToPatient = async (aidantId, familyId, patientId = null, assig
     }
 
     const { data: existing, error: existingError } = await query.maybeSingle();
+
+    if (existingError) {
+      console.error('❌ Erreur vérification assignation existante:', existingError);
+    }
 
     if (existing) {
       throw new Error('Cet aidant est déjà assigné à ce destinataire');
@@ -349,7 +351,7 @@ const assignAidantToPatient = async (aidantId, familyId, patientId = null, assig
       console.error('❌ Erreur récupération aidant mis à jour:', updateError);
     }
 
-    // ✅ 8. Notifications avec le bon type
+    // ✅ 8. Notifications
     const targetDisplay = isPersonal 
       ? `${targetName} (compte personnel)` 
       : `le patient ${targetName}`;
@@ -386,6 +388,9 @@ const assignAidantToPatient = async (aidantId, familyId, patientId = null, assig
         target_name: targetName,
       },
     });
+
+    // ✅ 9. Mettre à jour le cache de l'aidant
+    profileCache.delete(aidant.user_id);
 
     return {
       assignment: link,
@@ -561,12 +566,18 @@ const revokeAssignment = async (assignmentId, familyId) => {
       data: { assignment_id: assignmentId },
     });
 
+    // ✅ Mettre à jour le cache de l'aidant
+    profileCache.delete(familyId);
+
     return updatedAidant || { success: true };
   } catch (error) {
     console.error('❌ Revoke assignment error:', error);
     throw error;
   }
 };
+
+// ✅ Cache pour les profils (pour éviter les appels répétés)
+const profileCache = new Map();
 
 // ============================================================
 // EXPORTS
