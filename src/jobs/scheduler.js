@@ -12,6 +12,8 @@ const {
   checkMissedVisits,
 } = require('../services/reminder.service');
 
+// ✅ IMPORTER le job de nettoyage des assignations
+const { cleanExpiredAssignments } = require('./clean-expired-assignments.job');
 
 // =============================================
 // CRON JOB - TOUTES LES HEURES - Nettoyage des brouillons
@@ -60,6 +62,21 @@ cron.schedule('0 * * * *', () => {
 });
 
 // =============================================
+// CRON JOB - TOUS LES JOURS À 1H
+// =============================================
+
+// ✅ Nettoyage des assignations expirées (tous les jours à 1h)
+cron.schedule('0 1 * * *', async () => {
+  console.log(`[${new Date().toISOString()}] 🔄 Nettoyage des assignations expirées...`);
+  try {
+    const result = await cleanExpiredAssignments();
+    console.log(`✅ Nettoyage terminé: ${result.expired || 0} expirées, ${result.expiring_soon || 0} bientôt expirantes`);
+  } catch (error) {
+    console.error('❌ Erreur nettoyage assignations expirées:', error);
+  }
+});
+
+// =============================================
 // CRON JOB - TOUS LES JOURS À 8H
 // =============================================
 cron.schedule('0 8 * * *', () => {
@@ -100,6 +117,7 @@ console.log('  - Vérification des visites non approuvées (toutes les heures)')
 console.log('  - Vérification des commandes sans réponse (toutes les 15min)');
 console.log('  - Vérification des visites manquées (toutes les heures)');
 console.log('  - Rappel 1h avant les visites (toutes les heures)');
+console.log('  - Nettoyage des assignations expirées (tous les jours à 1h)');
 console.log('  - Rappel des visites (8h et 20h)');
 console.log('  - Vérification des abonnements expirés (23h)');
 console.log('  - Vérification des abonnements à expirer (3h)');
@@ -117,4 +135,5 @@ module.exports = {
   checkSubscriptionExpiry,
   checkExpiredSubscriptions,
   checkMissedVisits,
+  cleanExpiredAssignments,  // ✅ EXPORTÉ POUR LES TESTS
 };
