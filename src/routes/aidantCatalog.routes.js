@@ -10,6 +10,7 @@ const {
   assignAidant,
   getMyAssignments,
   revokeAssignmentController,
+  getActiveAidant,          // ✅ NOUVEAU
 } = require('../controllers/aidantCatalog.controller');
 
 // Toutes les routes nécessitent une authentification
@@ -24,6 +25,13 @@ router.use(authMiddleware);
 // Récupère la liste des aidants disponibles avec filtres
 // ============================================================
 router.get('/catalog', getCatalog);
+
+// ============================================================
+// GET /api/aidants/active
+// Récupère l'aidant actif pour une cible (patient, compte, famille)
+// ✅ NOUVELLE ROUTE - DOIT ÊTRE AVANT /:id
+// ============================================================
+router.get('/active', getActiveAidant);
 
 // ============================================================
 // GET /api/aidants/my-assignments
