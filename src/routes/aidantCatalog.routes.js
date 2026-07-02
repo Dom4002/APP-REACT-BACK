@@ -16,16 +16,21 @@ const {
 router.use(authMiddleware);
 
 // ============================================================
+// ⚠️ IMPORTANT : ROUTES SPÉCIFIQUES AVANT LES ROUTES AVEC PARAMÈTRES
+// ============================================================
+
+// ============================================================
 // GET /api/aidants/catalog
 // Récupère la liste des aidants disponibles avec filtres
 // ============================================================
 router.get('/catalog', getCatalog);
 
 // ============================================================
-// GET /api/aidants/:id
-// Récupère les détails d'un aidant
+// GET /api/aidants/my-assignments
+// Récupère les assignations de la famille connectée
+// ✅ DOIT ÊTRE AVANT /:id POUR ÉVITER QUE "my-assignments" SOIT INTERPRÉTÉ COMME UN ID
 // ============================================================
-router.get('/:id', getAidant);
+router.get('/my-assignments', roleMiddleware(['family']), getMyAssignments);
 
 // ============================================================
 // POST /api/aidants/assign
@@ -35,15 +40,17 @@ router.get('/:id', getAidant);
 router.post('/assign', roleMiddleware(['family']), assignAidant);
 
 // ============================================================
-// GET /api/aidants/my-assignments
-// Récupère les assignations de la famille connectée
-// ============================================================
-router.get('/my-assignments', roleMiddleware(['family']), getMyAssignments);
-
-// ============================================================
 // DELETE /api/aidants/assignments/:id
 // Révoquer une assignation (famille uniquement)
 // ============================================================
 router.delete('/assignments/:id', roleMiddleware(['family']), revokeAssignmentController);
+
+// ============================================================
+// ⚠️ ROUTE AVEC PARAMÈTRE - DOIT ÊTRE APRÈS TOUTES LES ROUTES SPÉCIFIQUES
+// ============================================================
+// GET /api/aidants/:id
+// Récupère les détails d'un aidant
+// ============================================================
+router.get('/:id', getAidant);
 
 module.exports = router;
