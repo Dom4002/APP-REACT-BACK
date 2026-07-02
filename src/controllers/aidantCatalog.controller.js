@@ -10,6 +10,72 @@ const {
 const { asyncWrapper } = require('../utils/errorHandler');
 
 // ============================================================
+// RÉCUPÉRER LE CATALOGUE DES AIDANTS
+// ============================================================
+const getCatalog = asyncWrapper(async (req, res) => {
+  try {
+    const filters = {
+      zone: req.query.zone,
+      specialty: req.query.specialty,
+      minRating: req.query.minRating ? parseFloat(req.query.minRating) : undefined,
+      onlyAvailable: req.query.onlyAvailable !== 'false',
+      minExperience: req.query.minExperience ? parseInt(req.query.minExperience) : undefined,
+      sortBy: req.query.sortBy || 'rating',
+      sortOrder: req.query.sortOrder || 'desc',
+      limit: req.query.limit ? parseInt(req.query.limit) : 20,
+      offset: req.query.offset ? parseInt(req.query.offset) : 0,
+    };
+
+    console.log('📋 Récupération du catalogue avec filtres:', filters);
+
+    const aidants = await getAvailableAidants(filters);
+
+    console.log(`✅ ${aidants.length} aidants récupérés`);
+    res.json({
+      success: true,
+      data: aidants,
+      count: aidants.length,
+    });
+  } catch (error) {
+    console.error('❌ Erreur getCatalog:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erreur lors de la récupération des aidants',
+    });
+  }
+});
+
+// ============================================================
+// RÉCUPÉRER UN AIDANT PAR ID
+// ============================================================
+const getAidant = asyncWrapper(async (req, res) => {
+  try {
+    const { id } = req.params;
+    console.log('📋 Récupération de l\'aidant:', id);
+
+    const aidant = await getAidantById(id);
+
+    if (!aidant) {
+      return res.status(404).json({
+        success: false,
+        error: 'Aidant non trouvé',
+      });
+    }
+
+    res.json({
+      success: true,
+      data: aidant,
+    });
+  } catch (error) {
+    console.error('❌ Erreur getAidant:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erreur lors de la récupération de l\'aidant',
+    });
+  }
+});
+
+// ============================================================
 // RÉCUPÉRER LES ASSIGNATIONS DE LA FAMILLE
 // ============================================================
 const getMyAssignments = asyncWrapper(async (req, res) => {
@@ -55,7 +121,7 @@ const assignAidant = asyncWrapper(async (req, res) => {
     const result = await assignAidantToPatient(
       aidantId,
       familyId,
-      patientId || null,  // ✅ null autorisé
+      patientId || null,   
       assignmentType
     );
 
@@ -76,12 +142,38 @@ const assignAidant = asyncWrapper(async (req, res) => {
 });
 
 // ============================================================
+// RÉVOQUER UNE ASSIGNATION
+// ============================================================
+const revokeAssignmentController = asyncWrapper(async (req, res) => {
+  try {
+    const { id } = req.params;
+    const familyId = req.user.id;
+
+    console.log('📤 Révocation assignation:', id, 'pour la famille:', familyId);
+
+    const result = await revokeAssignment(id, familyId);
+
+    res.json({
+      success: true,
+      message: 'Assignation révoquée avec succès',
+      data: result,
+    });
+  } catch (error) {
+    console.error('❌ Erreur revokeAssignment:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erreur lors de la révocation',
+    });
+  }
+});
+
+// ============================================================
 // EXPORTS
 // ============================================================
 module.exports = {
-  getCatalog,
-  getAidant,
-  assignAidant,
-  getMyAssignments,
-  revokeAssignmentController: revokeAssignment,
+  getCatalog,                       
+  getAidant,                       
+  assignAidant,                    
+  getMyAssignments,               
+  revokeAssignmentController,       
 };
