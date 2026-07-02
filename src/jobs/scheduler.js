@@ -12,6 +12,15 @@ const {
   checkMissedVisits,
 } = require('../services/reminder.service');
 
+
+// =============================================
+// CRON JOB - TOUTES LES HEURES - Nettoyage des brouillons
+// =============================================
+cron.schedule('0 * * * *', () => {
+  console.log(`[${new Date().toISOString()}] 🔄 Nettoyage des brouillons expirés...`);
+  cleanExpiredDrafts();
+});
+
 // =============================================
 // CRON JOB - TOUTES LES 15 MINUTES
 // =============================================
