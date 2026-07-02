@@ -5,7 +5,7 @@ const {
   getActiveAidantForTarget,
   getAllAidantsForTarget,
   assignAidantToTarget,
-  revokeAssignment,
+  revokeAssignment: revokeAssignmentNew,
   TARGET_TYPES,
   ASSIGNMENT_TYPES,
 } = require('./aidantAssignment.service');
@@ -64,7 +64,6 @@ const getAvailableAidants = async (filters = {}) => {
     const { data, error } = await query;
     if (error) throw error;
 
-    // ✅ Utiliser les nouvelles assignations pour les statistiques
     const aidantsWithStats = await Promise.all((data || []).map(async (aidant) => {
       // ✅ Compter les assignations actives (nouvelle table)
       const { count: activeAssignments, error: countError } = await supabase
@@ -86,7 +85,6 @@ const getAvailableAidants = async (filters = {}) => {
         };
       }
 
-      // ✅ Récupérer les avis
       const { data: reviews, error: reviewsError } = await supabase
         .from('aidant_reviews')
         .select('rating')
@@ -141,7 +139,6 @@ const getAidantById = async (aidantId) => {
 
     if (aidantError) throw aidantError;
 
-    // ✅ Compter les assignations actives (nouvelle table)
     const { count: activeAssignments, error: countError } = await supabase
       .from('aidant_assignments')
       .select('id', { count: 'exact', head: true })
@@ -152,7 +149,6 @@ const getAidantById = async (aidantId) => {
       console.error('❌ Erreur comptage assignations:', countError);
     }
 
-    // ✅ Récupérer les patients assignés (via la nouvelle table)
     const { data: assignments, error: assignmentsError } = await supabase
       .from('aidant_assignments')
       .select(`
@@ -186,7 +182,6 @@ const getAidantById = async (aidantId) => {
       console.error('❌ Erreur récupération assignations:', assignmentsError);
     }
 
-    // ✅ Transformer les assignations en format compatible
     const patients = (assignments || [])
       .filter(a => a.target_type === 'patient' && a.target_patient)
       .map(a => ({
@@ -198,7 +193,6 @@ const getAidantById = async (aidantId) => {
         target_type: a.target_type,
       }));
 
-    // ✅ Récupérer les avis
     const { data: reviews, error: reviewsError } = await supabase
       .from('aidant_reviews')
       .select(`
@@ -247,11 +241,10 @@ const getAidantById = async (aidantId) => {
 };
 
 // ============================================================
-// ✅ ASSIGNER UN AIDANT - PERSONNEL OU PATIENT (NOUVELLE VERSION)
+// ✅ ASSIGNER UN AIDANT (NOUVELLE VERSION)
 // ============================================================
 const assignAidantToPatient = async (aidantId, familyId, patientId = null, assignmentType = 'permanente') => {
   try {
-    // ✅ 1. Récupérer l'aidant
     const { data: aidant, error: aidantError } = await supabase
       .from('aidants')
       .select('id, user_id, available, max_assignments, current_assignments')
@@ -262,12 +255,10 @@ const assignAidantToPatient = async (aidantId, familyId, patientId = null, assig
       throw new Error('Aidant non trouvé');
     }
 
-    // ✅ 2. Déterminer la cible
     let targetType = TARGET_TYPES.PERSONAL_ACCOUNT;
     let targetId = familyId;
 
     if (patientId) {
-      // Vérifier que le patient existe
       const { data: patient, error: patientError } = await supabase
         .from('patients')
         .select('id, first_name, last_name')
@@ -282,7 +273,6 @@ const assignAidantToPatient = async (aidantId, familyId, patientId = null, assig
       targetId = patientId;
     }
 
-    // ✅ 3. Vérifier que l'assignation n'existe pas déjà
     const { data: existing, error: existingError } = await supabase
       .from('aidant_assignments')
       .select('id')
@@ -299,7 +289,6 @@ const assignAidantToPatient = async (aidantId, familyId, patientId = null, assig
       throw new Error('Cet aidant est déjà assigné à ce destinataire');
     }
 
-    // ✅ 4. Convertir le type d'assignation
     const assignmentTypeMap = {
       'permanente': ASSIGNMENT_TYPES.PRIMARY,
       'temporaire': ASSIGNMENT_TYPES.TEMPORARY,
@@ -307,14 +296,13 @@ const assignAidantToPatient = async (aidantId, familyId, patientId = null, assig
     };
     const newAssignmentType = assignmentTypeMap[assignmentType] || ASSIGNMENT_TYPES.PRIMARY;
 
-    // ✅ 5. Appeler le nouveau service d'assignation
     const result = await assignAidantToTarget({
       aidantUserId: aidant.user_id,
       targetType,
       targetId,
       familyId: familyId,
       assignmentType: newAssignmentType,
-      createdBy: familyId, // La famille qui assigne
+      createdBy: familyId,
       reason: patientId ? `Assignation au patient ${patientId}` : 'Assignation personnelle',
       expiresAt: null,
     });
@@ -323,7 +311,6 @@ const assignAidantToPatient = async (aidantId, familyId, patientId = null, assig
       throw new Error(result.error);
     }
 
-    // ✅ 6. Récupérer les informations pour la réponse
     const targetName = patientId 
       ? (await supabase.from('patients').select('first_name, last_name').eq('id', patientId).single()).data
       : (await supabase.from('profiles').select('full_name').eq('id', familyId).single()).data;
@@ -344,11 +331,10 @@ const assignAidantToPatient = async (aidantId, familyId, patientId = null, assig
 };
 
 // ============================================================
-// RÉCUPÉRER LES ASSIGNATIONS D'UNE FAMILLE (NOUVELLE VERSION)
+// RÉCUPÉRER LES ASSIGNATIONS D'UNE FAMILLE
 // ============================================================
 const getFamilyAssignments = async (familyId) => {
   try {
-    // ✅ Récupérer les assignations de la famille via la nouvelle table
     const { data: assignments, error: assignmentsError } = await supabase
       .from('aidant_assignments')
       .select(`
@@ -389,11 +375,9 @@ const getFamilyAssignments = async (familyId) => {
 
     if (assignmentsError) {
       console.error('❌ Erreur récupération assignations:', assignmentsError);
-      // Fallback sur l'ancienne table
       return getFamilyAssignmentsLegacy(familyId);
     }
 
-    // ✅ Transformer en format compatible avec l'ancien système
     const formattedAssignments = (assignments || []).map((item) => {
       const isPatient = item.target_type === 'patient';
       const isPersonal = item.target_type === 'personal_account';
@@ -425,7 +409,6 @@ const getFamilyAssignments = async (familyId) => {
     return formattedAssignments;
   } catch (error) {
     console.error('❌ Get family assignments error:', error);
-    // Fallback sur l'ancienne table
     return getFamilyAssignmentsLegacy(familyId);
   }
 };
@@ -497,7 +480,7 @@ const getFamilyAssignmentsLegacy = async (familyId) => {
 };
 
 // ============================================================
-// RÉCUPÉRER LES ASSIGNATIONS D'UN AIDANT (NOUVELLE VERSION)
+// RÉCUPÉRER LES ASSIGNATIONS D'UN AIDANT
 // ============================================================
 const getAidantAssignments = async (aidantUserId) => {
   try {
@@ -535,7 +518,6 @@ const getAidantAssignments = async (aidantUserId) => {
       return getAidantAssignmentsLegacy(aidantUserId);
     }
 
-    // ✅ Transformer en format compatible
     const formattedAssignments = (data || []).map((item) => {
       const isPatient = item.target_type === 'patient';
       const isPersonal = item.target_type === 'personal_account';
@@ -608,11 +590,11 @@ const getAidantAssignmentsLegacy = async (aidantUserId) => {
 };
 
 // ============================================================
-// RÉVOQUER UNE ASSIGNATION (NOUVELLE VERSION)
+// ✅ RÉVOQUER UNE ASSIGNATION - NOUVELLE VERSION
 // ============================================================
 const revokeAssignment = async (assignmentId, familyId) => {
   try {
-    // ✅ 1. Récupérer l'assignation
+    // Vérifier l'assignation
     const { data: assignment, error: fetchError } = await supabase
       .from('aidant_assignments')
       .select('*')
@@ -620,76 +602,22 @@ const revokeAssignment = async (assignmentId, familyId) => {
       .single();
 
     if (fetchError || !assignment) {
-      // Fallback sur l'ancienne table
       return revokeAssignmentLegacy(assignmentId, familyId);
     }
 
-    // ✅ 2. Vérifier les permissions
-    const isAdmin = ['admin', 'coordinator'].includes(req?.profile?.role);
-    const isOwner = assignment.target_id === familyId || assignment.target_type === 'family';
-
-    if (!isAdmin && !isOwner) {
-      throw new Error('Non autorisé à révoquer cette assignation');
-    }
-
-    // ✅ 3. Récupérer les informations pour les notifications
-    const { data: aidant, error: aidantError } = await supabase
-      .from('profiles')
-      .select('id, full_name, email')
-      .eq('id', assignment.aidant_user_id)
-      .single();
-
-    let targetName = 'cible';
-    if (assignment.target_type === 'patient') {
-      const { data: patient } = await supabase
-        .from('patients')
-        .select('first_name, last_name')
-        .eq('id', assignment.target_id)
-        .single();
-      if (patient) {
-        targetName = `${patient.first_name} ${patient.last_name}`;
-      }
-    } else {
-      const { data: profile } = await supabase
-        .from('profiles')
-        .select('full_name')
-        .eq('id', assignment.target_id)
-        .single();
-      if (profile) {
-        targetName = profile.full_name;
-      }
-    }
-
-    const isPersonal = assignment.target_type === 'personal_account';
-
-    // ✅ 4. Appeler la fonction de révocation
-    const result = await revokeAssignment(assignmentId, familyId, 'Révoqué par l\'utilisateur');
+    // Utiliser la nouvelle fonction
+    const result = await revokeAssignmentNew(assignmentId, familyId, 'Révoqué par l\'utilisateur');
 
     if (!result.success) {
       throw new Error(result.error);
     }
 
-    // ✅ 5. Notifications
-    await supabase.from('notifications').insert({
-      user_id: assignment.aidant_user_id,
-      title: '🔄 Assignation révoquée',
-      body: `Votre assignation à ${targetName} a été révoquée.`,
-      type: 'system',
-      data: {
-        assignment_id: assignmentId,
-        target_type: assignment.target_type,
-        target_id: assignment.target_id,
-        is_personal: isPersonal,
-      },
-    });
-
-    // ✅ 6. Mettre à jour le cache
+    // Mettre à jour le cache
     profileCache.delete(assignment.aidant_user_id);
 
     return result;
   } catch (error) {
     console.error('❌ Revoke assignment error:', error);
-    // Fallback sur l'ancienne méthode
     return revokeAssignmentLegacy(assignmentId, familyId);
   }
 };
