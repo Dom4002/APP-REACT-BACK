@@ -2,6 +2,9 @@
 
 const { supabase } = require('./supabase.service');
 
+// ✅ Cache pour les profils (pour éviter les appels répétés)
+const profileCache = new Map();
+
 // ============================================================
 // RÉCUPÉRER LES AIDANTS DISPONIBLES AVEC FILTRES
 // ============================================================
@@ -514,14 +517,27 @@ const getAidantAssignments = async (aidantUserId) => {
 };
 
 // ============================================================
-// RÉVOQUER UNE ASSIGNATION
+// RÉVOQUER UNE ASSIGNATION - AVEC NOTIFICATIONS COMPLÈTES
 // ============================================================
 const revokeAssignment = async (assignmentId, familyId) => {
   try {
-    // ✅ Vérifier que l'assignation existe et appartient à la famille
+    // ✅ 1. Récupérer l'assignation avec toutes les relations
     const { data: link, error: linkError } = await supabase
       .from('patient_family_links')
-      .select('id, family_id, patient_id, relationship, target_type')
+      .select(`
+        id, 
+        family_id, 
+        patient_id, 
+        relationship, 
+        target_type,
+        created_at,
+        family:profiles!family_id(
+          id,
+          full_name,
+          email,
+          role
+        )
+      `)
       .eq('id', assignmentId)
       .eq('family_id', familyId)
       .single();
@@ -530,7 +546,77 @@ const revokeAssignment = async (assignmentId, familyId) => {
       throw new Error('Assignation non trouvée ou non autorisée');
     }
 
-    // ✅ Supprimer l'assignation
+    // ✅ 2. Récupérer l'aidant
+    const { data: aidant, error: aidantError } = await supabase
+      .from('aidants')
+      .select(`
+        id,
+        user_id,
+        specialties,
+        available,
+        rating,
+        user:profiles!user_id(
+          id,
+          full_name,
+          email,
+          phone,
+          avatar_url,
+          role
+        )
+      `)
+      .eq('user_id', link.family_id)
+      .single();
+
+    if (aidantError) {
+      console.error('❌ Erreur récupération aidant:', aidantError);
+    }
+
+    // ✅ 3. Récupérer le patient si existant
+    let patient = null;
+    let isPersonal = false;
+    let targetDisplay = 'compte personnel';
+    let targetType = link.target_type || 'personal';
+
+    if (link.patient_id) {
+      const { data: patientData, error: patientError } = await supabase
+        .from('patients')
+        .select('id, first_name, last_name, address, category')
+        .eq('id', link.patient_id)
+        .single();
+
+      if (!patientError && patientData) {
+        patient = patientData;
+        targetDisplay = `${patient.first_name} ${patient.last_name}`;
+        targetType = 'patient';
+      }
+    } else {
+      // ✅ C'est un compte personnel
+      isPersonal = true;
+      // ✅ Récupérer les infos du compte personnel
+      const { data: personalAccount, error: personalError } = await supabase
+        .from('profiles')
+        .select('id, full_name, email')
+        .eq('id', link.family_id)
+        .single();
+
+      if (!personalError && personalAccount) {
+        targetDisplay = `${personalAccount.full_name} (compte personnel)`;
+        targetType = 'personal';
+      }
+    }
+
+    // ✅ 4. Récupérer le propriétaire du compte (la famille)
+    const { data: accountOwner, error: ownerError } = await supabase
+      .from('profiles')
+      .select('id, full_name, email, role')
+      .eq('id', familyId)
+      .single();
+
+    if (ownerError) {
+      console.error('❌ Erreur récupération propriétaire:', ownerError);
+    }
+
+    // ✅ 5. Supprimer l'assignation
     const { error: deleteError } = await supabase
       .from('patient_family_links')
       .delete()
@@ -540,44 +626,169 @@ const revokeAssignment = async (assignmentId, familyId) => {
       throw new Error('Erreur lors de la révocation');
     }
 
-    // ✅ Mettre à jour current_assignments de l'aidant
-    await new Promise(resolve => setTimeout(resolve, 100));
-
+    // ✅ 6. Mettre à jour current_assignments de l'aidant
     const { data: updatedAidant, error: updateError } = await supabase
       .from('aidants')
       .select('*')
-      .eq('user_id', familyId)
+      .eq('user_id', link.family_id)
       .single();
 
     if (updateError) {
       console.error('❌ Erreur récupération aidant mis à jour:', updateError);
     }
 
-    // ✅ Notification
-    const targetDisplay = link.target_type === 'patient' 
-      ? 'patient' 
-      : 'personnel';
+    // ✅ 7. Déterminer les cibles pour les notifications
+    const aidantName = aidant?.user?.full_name || 'un aidant';
+    const ownerName = accountOwner?.full_name || 'un utilisateur';
+    const assignmentType = link.relationship || 'permanente';
+    const now = new Date().toISOString();
 
+    // ✅ 8. Récupérer les membres de la famille du patient (si patient)
+    let familyMembers = [];
+    if (link.patient_id) {
+      const { data: familyLinks, error: familyError } = await supabase
+        .from('patient_family_links')
+        .select('family_id, profiles!inner(full_name, email, role)')
+        .eq('patient_id', link.patient_id)
+        .neq('family_id', link.family_id);
+
+      if (!familyError && familyLinks) {
+        familyMembers = familyLinks.map(f => ({
+          id: f.family_id,
+          name: f.profiles?.full_name || 'Membre de la famille',
+          email: f.profiles?.email,
+          role: f.profiles?.role || 'family',
+        }));
+      }
+    }
+
+    // ✅ 9. ENVOI DES NOTIFICATIONS
+
+    // ✅ 9a. Notification à l'AIDANT
+    if (aidant?.user_id) {
+      await supabase.from('notifications').insert({
+        user_id: aidant.user_id,
+        title: '🔄 Assignation révoquée',
+        body: isPersonal
+          ? `Votre assignation au compte personnel de ${targetDisplay.replace(' (compte personnel)', '')} (${assignmentType}) a été révoquée.`
+          : `Votre assignation pour "${targetDisplay}" (${assignmentType}) a été révoquée.`,
+        type: 'system',
+        data: { 
+          assignment_id: assignmentId,
+          target_type: targetType,
+          target_name: targetDisplay,
+          is_personal: isPersonal,
+          assignment_type: assignmentType,
+          revoked_by: familyId,
+          revoked_by_name: ownerName,
+          revoked_at: now,
+          action: 'assignment_revoked',
+        },
+      });
+    }
+
+    // ✅ 9b. Notification au PROPRIÉTAIRE DU COMPTE (la famille qui a révoqué)
     await supabase.from('notifications').insert({
       user_id: familyId,
-      title: '🔄 Assignation révoquée',
-      body: `L'assignation ${targetDisplay} (${link.relationship || 'permanente'}) a été révoquée.`,
+      title: isPersonal ? '🔄 Aidant retiré de votre compte personnel' : '🔄 Assignation révoquée',
+      body: isPersonal
+        ? `L'aidant ${aidantName} n'est plus assigné à votre compte personnel (${assignmentType}).`
+        : `L'aidant ${aidantName} n'est plus assigné à "${targetDisplay}" (${assignmentType}).`,
       type: 'system',
-      data: { assignment_id: assignmentId },
+      data: { 
+        assignment_id: assignmentId,
+        aidant_id: aidant?.id || null,
+        aidant_name: aidantName,
+        target_type: targetType,
+        target_name: targetDisplay,
+        is_personal: isPersonal,
+        assignment_type: assignmentType,
+        revoked_at: now,
+        action: 'assignment_revoked',
+      },
     });
 
-    // ✅ Mettre à jour le cache de l'aidant
-    profileCache.delete(familyId);
+    // ✅ 9c. Notification aux MEMBRES DE LA FAMILLE (si patient)
+    if (familyMembers.length > 0) {
+      const notifications = familyMembers.map(member => ({
+        user_id: member.id,
+        title: '🔄 Changement d\'assignation',
+        body: `L'aidant ${aidantName} n'est plus assigné à "${targetDisplay}" (${assignmentType}).`,
+        type: 'system',
+        data: { 
+          assignment_id: assignmentId,
+          patient_id: link.patient_id,
+          aidant_id: aidant?.id || null,
+          aidant_name: aidantName,
+          target_name: targetDisplay,
+          assignment_type: assignmentType,
+          revoked_by: familyId,
+          revoked_by_name: ownerName,
+          revoked_at: now,
+          action: 'assignment_revoked',
+        },
+      }));
 
-    return updatedAidant || { success: true };
+      await supabase.from('notifications').insert(notifications);
+    }
+
+    // ✅ 9d. Notification aux ADMINISTRATEURS (pour suivi)
+    const { data: admins } = await supabase
+      .from('profiles')
+      .select('id')
+      .in('role', ['admin', 'coordinator']);
+
+    if (admins && admins.length > 0) {
+      const adminNotifications = admins.map(admin => ({
+        user_id: admin.id,
+        title: isPersonal ? '🔄 Aidant retiré d\'un compte personnel' : '🔄 Assignation révoquée',
+        body: isPersonal
+          ? `${aidantName} a été retiré du compte personnel de ${targetDisplay.replace(' (compte personnel)', '')} par ${ownerName}. (${assignmentType})`
+          : `${aidantName} a été retiré de "${targetDisplay}" par ${ownerName}. (${assignmentType})`,
+        type: 'alert',
+        data: { 
+          assignment_id: assignmentId,
+          aidant_id: aidant?.id || null,
+          aidant_name: aidantName,
+          patient_id: link.patient_id || null,
+          target_name: targetDisplay,
+          is_personal: isPersonal,
+          family_id: familyId,
+          family_name: ownerName,
+          assignment_type: assignmentType,
+          revoked_at: now,
+          action: 'assignment_revoked_admin',
+        },
+      }));
+
+      await supabase.from('notifications').insert(adminNotifications);
+    }
+
+    // ✅ 10. Mettre à jour le cache
+    profileCache.delete(link.family_id);
+    if (link.patient_id) {
+      profileCache.delete(`patient_${link.patient_id}`);
+    }
+
+    console.log(`✅ Assignation ${assignmentId} révoquée - Notifications envoyées (${isPersonal ? 'personnel' : 'patient'})`);
+
+    return { 
+      success: true, 
+      assignment: { 
+        id: assignmentId, 
+        target: targetDisplay, 
+        aidant: aidantName,
+        is_personal: isPersonal,
+        revoked_at: now,
+      },
+      aidant: updatedAidant || null,
+    };
+
   } catch (error) {
     console.error('❌ Revoke assignment error:', error);
     throw error;
   }
 };
-
-// ✅ Cache pour les profils (pour éviter les appels répétés)
-const profileCache = new Map();
 
 // ============================================================
 // EXPORTS
