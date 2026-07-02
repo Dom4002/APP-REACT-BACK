@@ -29,7 +29,8 @@ router.get('/:id', getAidant);
 
 // ============================================================
 // POST /api/aidants/assign
-// Assigner un aidant à un patient (famille uniquement)
+// Assigner un aidant à un patient ou à un compte personnel (famille uniquement)
+// ✅ patientId est OPTIONNEL - peut être null pour assignation personnelle
 // ============================================================
 router.post('/assign', roleMiddleware(['family']), assignAidant);
 
