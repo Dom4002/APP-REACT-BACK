@@ -5,6 +5,7 @@ const router = express.Router();
 const { supabase } = require('../services/supabase.service');
 const authMiddleware = require('../middleware/auth.middleware');
 const { createNotification } = require('../services/notification.service');
+const { getActiveAidantForTarget } = require('../services/aidantAssignment.service');
 
 router.use(authMiddleware);
 
@@ -50,7 +51,7 @@ router.get('/', async (req, res) => {
 });
 
 // =============================================
-// ✅ CRÉER UNE COMMANDE - AVEC TARGET_TYPE
+// ✅ CRÉER UNE COMMANDE - AVEC ASSIGNATION AUTOMATIQUE DE L'AIDANT
 // =============================================
 router.post('/', async (req, res) => {
   try {
@@ -92,6 +93,7 @@ router.post('/', async (req, res) => {
     // ✅ Déterminer target_type et target_name
     const finalTargetType = target_type || (patient_id ? 'patient' : 'personal');
     const finalTargetName = target_name || (patient_id ? null : profile.full_name);
+    const familyId = user.id;
 
     // ✅ Déterminer le statut initial
     let status = 'creee';
@@ -118,6 +120,27 @@ router.post('/', async (req, res) => {
       }
     }
 
+    // ✅ DÉTERMINER L'AIDANT À ASSIGNER (si pas ponctuel et pas en attente paiement)
+    let finalAidantId = null;
+
+    if (status !== 'attente_paiement') {
+      // Utiliser le service d'assignation pour trouver l'aidant actif
+      const targetTypeForAidant = patient_id ? 'patient' : 'personal_account';
+      const targetIdForAidant = patient_id || user.id;
+      
+      finalAidantId = await getActiveAidantForTarget(
+        targetTypeForAidant,
+        targetIdForAidant,
+        familyId
+      );
+
+      if (finalAidantId) {
+        console.log(`✅ Aidant automatique trouvé pour la commande: ${finalAidantId}`);
+      } else {
+        console.log(`ℹ️ Aucun aidant actif trouvé pour la cible ${targetTypeForAidant}/${targetIdForAidant}`);
+      }
+    }
+
     const orderData = {
       user_id: user.id,              // ✅ COMPTE QUI PASSE LA COMMANDE
       patient_id: patient_id || null, // ✅ NULL si personnel
@@ -133,10 +156,12 @@ router.post('/', async (req, res) => {
       status: status,
       order_type: order_type || (is_ponctual ? 'ponctual' : 'subscription'),
       is_paid: is_paid || false,
+      aidant_id: finalAidantId,  // ✅ Aidant automatique ou null
       metadata: {
         requires_payment: requiresPayment,
         created_by: user.id,
         created_at: new Date().toISOString(),
+        auto_assigned_aidant: !!finalAidantId,
       }
     };
 
@@ -193,14 +218,14 @@ router.post('/', async (req, res) => {
         data: { order_id: data.id, status: 'attente_paiement' },
       });
     } else {
-      // ✅ Notifier l'aidant assigné ou tous les aidants disponibles
-      if (data.aidant_id) {
+      // ✅ Si un aidant a été assigné automatiquement
+      if (finalAidantId) {
         await createNotification({
-          userId: data.aidant_id,
-          title: '🛒 Nouvelle commande à prendre',
+          userId: finalAidantId,
+          title: '🛒 Nouvelle commande assignée automatiquement',
           body: `Commande de ${targetDisplay} - ${description}`,
           type: 'commande',
-          data: { order_id: data.id, action: 'take' },
+          data: { order_id: data.id, action: 'take', auto_assigned: true },
         });
       } else {
         // ✅ Notifier tous les aidants disponibles
@@ -224,7 +249,11 @@ router.post('/', async (req, res) => {
       }
     }
 
-    res.status(201).json({ success: true, order: fullOrder });
+    res.status(201).json({
+      success: true,
+      order: fullOrder,
+      auto_assigned_aidant: !!finalAidantId,
+    });
   } catch (error) {
     console.error('❌ Create order error:', error);
     res.status(500).json({ error: error.message });
@@ -326,15 +355,28 @@ router.post('/:id/confirm-payment', async (req, res) => {
       return res.status(400).json({ error: 'Cette commande n\'est pas en attente de paiement' });
     }
 
+    // ✅ Récupérer l'aidant actif après paiement
+    const targetType = order.patient_id ? 'patient' : 'personal_account';
+    const targetId = order.patient_id || order.user_id;
+    const familyId = order.family_id || order.user_id;
+
+    let aidantId = order.aidant_id || null;
+    if (!aidantId) {
+      aidantId = await getActiveAidantForTarget(targetType, targetId, familyId);
+      console.log(`✅ Aidant trouvé après paiement de la commande: ${aidantId}`);
+    }
+
     const { data, error } = await supabase
       .from('commandes')
       .update({
         status: 'creee',
         is_paid: true,
+        aidant_id: aidantId,  // ✅ Assigner l'aidant si trouvé
         metadata: {
           ...(order.metadata || {}),
           payment_confirmed_at: new Date().toISOString(),
           transaction_id,
+          aidant_assigned_after_payment: !!aidantId,
         }
       })
       .eq('id', id)
@@ -343,22 +385,33 @@ router.post('/:id/confirm-payment', async (req, res) => {
 
     if (error) throw error;
 
-    // ✅ Notifier les aidants disponibles
-    const { data: aidants } = await supabase
-      .from('aidants')
-      .select('user_id')
-      .eq('available', true)
-      .eq('is_verified', true);
+    // ✅ Si un aidant a été trouvé, le notifier directement
+    if (aidantId) {
+      await createNotification({
+        userId: aidantId,
+        title: '🛒 Nouvelle commande à prendre',
+        body: `Commande de ${order.target_name || 'un client'} - ${order.description}`,
+        type: 'commande',
+        data: { order_id: id, action: 'take', assigned_after_payment: true },
+      });
+    } else {
+      // ✅ Notifier tous les aidants disponibles
+      const { data: aidants } = await supabase
+        .from('aidants')
+        .select('user_id')
+        .eq('available', true)
+        .eq('is_verified', true);
 
-    if (aidants && aidants.length > 0) {
-      for (const aidant of aidants) {
-        await createNotification({
-          userId: aidant.user_id,
-          title: '🛒 Nouvelle commande disponible',
-          body: `Commande de ${order.target_name || 'un client'} - ${order.description}`,
-          type: 'commande',
-          data: { order_id: id, action: 'take' },
-        });
+      if (aidants && aidants.length > 0) {
+        for (const aidant of aidants) {
+          await createNotification({
+            userId: aidant.user_id,
+            title: '🛒 Nouvelle commande disponible',
+            body: `Commande de ${order.target_name || 'un client'} - ${order.description}`,
+            type: 'commande',
+            data: { order_id: id, action: 'take' },
+          });
+        }
       }
     }
 
