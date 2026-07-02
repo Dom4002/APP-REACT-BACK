@@ -66,31 +66,50 @@ const getAidant = asyncWrapper(async (req, res) => {
 });
 
 // ============================================================
-// ASSIGNER UN AIDANT
+// ✅ ASSIGNER UN AIDANT - CORRIGÉ (patientId OPTIONNEL)
 // ============================================================
 const assignAidant = asyncWrapper(async (req, res) => {
   const { aidantId, patientId, assignmentType = 'permanente' } = req.body;
   const familyId = req.user.id;
 
-  if (!aidantId || !patientId) {
+  // ✅ Seul aidantId est requis - patientId est OPTIONNEL
+  if (!aidantId) {
     return res.status(400).json({
       success: false,
-      error: 'aidantId et patientId sont requis',
+      error: 'aidantId est requis',
     });
   }
 
-  const result = await assignAidantToPatient(
+  console.log('📤 Assignation aidant:', {
     aidantId,
+    patientId: patientId || null,
     familyId,
-    patientId,
-    assignmentType
-  );
-
-  res.status(201).json({
-    success: true,
-    message: 'Aidant assigné avec succès',
-    data: result,
+    assignmentType,
   });
+
+  try {
+    // ✅ patientId peut être null (assignation personnelle)
+    const result = await assignAidantToPatient(
+      aidantId,
+      familyId,
+      patientId || null,  // ✅ null autorisé
+      assignmentType
+    );
+
+    res.status(201).json({
+      success: true,
+      message: patientId 
+        ? 'Aidant assigné au patient avec succès'
+        : 'Aidant assigné à votre compte personnel avec succès',
+      data: result,
+    });
+  } catch (error) {
+    console.error('❌ Erreur assignation:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erreur lors de l\'assignation',
+    });
+  }
 });
 
 // ============================================================
@@ -98,12 +117,23 @@ const assignAidant = asyncWrapper(async (req, res) => {
 // ============================================================
 const getMyAssignments = asyncWrapper(async (req, res) => {
   const familyId = req.user.id;
-  const assignments = await getFamilyAssignments(familyId);
+  
+  console.log('📤 Récupération assignations pour:', familyId);
 
-  res.json({
-    success: true,
-    data: assignments,
-  });
+  try {
+    const assignments = await getFamilyAssignments(familyId);
+
+    res.json({
+      success: true,
+      data: assignments || [],
+    });
+  } catch (error) {
+    console.error('❌ Erreur récupération assignations:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erreur lors de la récupération des assignations',
+    });
+  }
 });
 
 // ============================================================
