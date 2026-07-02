@@ -6,6 +6,7 @@ const { supabase } = require('../services/supabase.service');
 const authMiddleware = require('../middleware/auth.middleware');
 const roleMiddleware = require('../middleware/role.middleware');
 const { createNotification } = require('../services/notification.service');
+const { getActiveAidantForTarget } = require('../services/aidantAssignment.service');
 
 router.use(authMiddleware);
 
@@ -179,15 +180,15 @@ router.get('/:id', async (req, res) => {
 });
 
 // =============================================
-// ✅ CRÉER UNE VISITE - AVEC GESTION DES COMPTES PERSONNELS
+// ✅ CRÉER UNE VISITE - AVEC ASSIGNATION AUTOMATIQUE DE L'AIDANT
 // =============================================
 router.post('/', async (req, res) => {
   try {
     const { user, profile } = req;
     const { 
       patient_id,
-      target_user_id,        // ✅ NOUVEAU - ID du compte cible
-      target_type,           // 'personal' | 'patient' | 'account'
+      target_user_id,
+      target_type,
       target_name,
       scheduled_date,
       scheduled_time,
@@ -210,6 +211,7 @@ router.post('/', async (req, res) => {
     let finalTargetName = target_name || null;
     let finalUserId = null;
     let targetHasPatient = false;
+    let familyId = null;
 
     // ✅ Cas 1: L'admin planifie pour un patient
     if (patient_id) {
@@ -236,8 +238,10 @@ router.post('/', async (req, res) => {
       
       if (familyLinks && familyLinks.length > 0) {
         finalUserId = familyLinks[0].family_id;
+        familyId = familyLinks[0].family_id;
       } else {
         finalUserId = patient.created_by || patient_id;
+        familyId = patient.created_by || patient_id;
       }
       targetHasPatient = true;
     }
@@ -264,7 +268,6 @@ router.post('/', async (req, res) => {
       const hasPatient = links && links.length > 0;
 
       if (hasPatient) {
-        // Le compte a des patients, on pourrait soit refuser, soit proposer de choisir un patient
         return res.status(400).json({ 
           error: 'Ce compte a des patients. Veuillez choisir un patient spécifique ou utiliser target_type "account" pour planifier pour le compte lui-même.',
           hasPatient: true,
@@ -275,6 +278,7 @@ router.post('/', async (req, res) => {
       finalTargetType = 'personal';
       finalTargetName = account.full_name || 'Compte personnel';
       finalUserId = target_user_id;
+      familyId = target_user_id;
       targetHasPatient = false;
     }
 
@@ -294,6 +298,7 @@ router.post('/', async (req, res) => {
       finalTargetType = 'personal';
       finalTargetName = `${account.full_name} (compte)`;
       finalUserId = target_user_id;
+      familyId = target_user_id;
       targetHasPatient = false;
     }
 
@@ -303,6 +308,7 @@ router.post('/', async (req, res) => {
       finalTargetType = 'personal';
       finalTargetName = profile.full_name || 'Personnel';
       finalUserId = user.id;
+      familyId = user.id;
       targetHasPatient = false;
     }
 
@@ -312,6 +318,7 @@ router.post('/', async (req, res) => {
       finalTargetType = 'personal';
       finalTargetName = profile.full_name || 'Utilisateur';
       finalUserId = user.id;
+      familyId = user.id;
       targetHasPatient = false;
     }
 
@@ -353,13 +360,35 @@ router.post('/', async (req, res) => {
       }
     }
 
+    // ✅ DÉTERMINER L'AIDANT À ASSIGNER
+    let finalAidantId = aidant_id || null;
+
+    // Si aucun aidant spécifié et la visite n'est pas un brouillon
+    if (!finalAidantId && status !== 'brouillon') {
+      // Utiliser le service d'assignation pour trouver l'aidant actif
+      const targetTypeForAidant = finalPatientId ? 'patient' : 'personal_account';
+      const targetIdForAidant = finalPatientId || finalUserId;
+      
+      finalAidantId = await getActiveAidantForTarget(
+        targetTypeForAidant,
+        targetIdForAidant,
+        familyId
+      );
+
+      if (finalAidantId) {
+        console.log(`✅ Aidant automatique trouvé pour la visite: ${finalAidantId}`);
+      } else {
+        console.log(`ℹ️ Aucun aidant actif trouvé pour la cible ${targetTypeForAidant}/${targetIdForAidant}`);
+      }
+    }
+
     // ✅ CRÉATION DE LA VISITE
     const visitData = {
       user_id: finalUserId,
       patient_id: finalPatientId,
       target_type: finalTargetType,
       target_name: finalTargetName,
-      aidant_id: aidant_id || null,
+      aidant_id: finalAidantId,  // ✅ Aidant automatique ou null
       coordinator_id: ['admin', 'coordinator'].includes(profile.role) ? user.id : null,
       scheduled_date,
       scheduled_time,
@@ -382,8 +411,18 @@ router.post('/', async (req, res) => {
         scheduled_from_draft: false,
         target_user_id: finalUserId,
         target_has_patient: targetHasPatient,
+        auto_assigned_aidant: !!finalAidantId && !aidant_id,
       }
     };
+
+    console.log('📤 Création visite avec données:', {
+      finalUserId,
+      finalPatientId,
+      finalTargetType,
+      finalAidantId,
+      status,
+      requiresPayment,
+    });
 
     const { data: visit, error: insertError } = await supabase
       .from('visites')
@@ -454,9 +493,10 @@ router.post('/', async (req, res) => {
       data: { visit_id: visit.id, status: 'planifiee' },
     });
 
-    if (aidant_id) {
+    // ✅ Si un aidant a été assigné (auto ou manuel), le notifier
+    if (finalAidantId) {
       await createNotification({
-        userId: aidant_id,
+        userId: finalAidantId,
         title: '📅 Nouvelle visite à valider',
         body: `Visite pour ${targetDisplay} le ${visit.scheduled_date} à ${visit.scheduled_time}`,
         type: 'visite',
@@ -485,6 +525,7 @@ router.post('/', async (req, res) => {
       success: true,
       visit,
       requires_payment: false,
+      auto_assigned_aidant: !!finalAidantId && !aidant_id,
     });
   } catch (error) {
     console.error('❌ Create visit error:', error);
@@ -519,16 +560,29 @@ router.post('/:id/confirm-payment', async (req, res) => {
       return res.status(400).json({ error: 'Cette visite n\'est pas en attente de paiement' });
     }
 
+    // ✅ Récupérer l'aidant actif après paiement
+    const familyId = visit.user_id;
+    const targetType = visit.patient_id ? 'patient' : 'personal_account';
+    const targetId = visit.patient_id || visit.user_id;
+
+    let aidantId = visit.aidant_id || null;
+    if (!aidantId) {
+      aidantId = await getActiveAidantForTarget(targetType, targetId, familyId);
+      console.log(`✅ Aidant trouvé après paiement: ${aidantId}`);
+    }
+
     const { data: updatedVisit, error: updateError } = await supabase
       .from('visites')
       .update({
         status: 'planifiee',
+        aidant_id: aidantId,  // ✅ Assigner l'aidant si trouvé
         metadata: {
           ...(visit.metadata || {}),
           payment_confirmed_at: new Date().toISOString(),
           transaction_id: transaction_id,
           scheduled_from_draft: true,
           payment_completed: true,
+          aidant_assigned_after_payment: !!aidantId,
         }
       })
       .eq('id', id)
@@ -543,17 +597,18 @@ router.post('/:id/confirm-payment', async (req, res) => {
       return res.status(500).json({ error: updateError.message });
     }
 
-    if (updatedVisit.aidant_id) {
+    const targetDisplay = updatedVisit.target_name || (updatedVisit.patient ? `${updatedVisit.patient.first_name} ${updatedVisit.patient.last_name}` : 'Personnel');
+
+    // ✅ Si un aidant a été assigné, le notifier
+    if (aidantId) {
       await createNotification({
-        userId: updatedVisit.aidant_id,
+        userId: aidantId,
         title: '📅 Nouvelle visite à valider',
-        body: `Visite pour ${updatedVisit.target_name || 'le patient'} le ${updatedVisit.scheduled_date} à ${updatedVisit.scheduled_time}`,
+        body: `Visite pour ${targetDisplay} le ${updatedVisit.scheduled_date} à ${updatedVisit.scheduled_time}`,
         type: 'visite',
         data: { visit_id: id, action: 'approve' },
       });
     }
-
-    const targetDisplay = updatedVisit.target_name || (updatedVisit.patient ? `${updatedVisit.patient.first_name} ${updatedVisit.patient.last_name}` : 'Personnel');
 
     await createNotification({
       userId: userId,
@@ -566,7 +621,7 @@ router.post('/:id/confirm-payment', async (req, res) => {
     res.json({ 
       success: true, 
       visit: updatedVisit,
-      message: 'Visite planifiée avec succès après paiement',
+      message: `Visite planifiée avec succès après paiement${aidantId ? ' et aidant assigné' : ''}`,
     });
   } catch (error) {
     console.error('❌ Confirm payment error:', error);
