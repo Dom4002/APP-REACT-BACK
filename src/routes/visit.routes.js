@@ -30,6 +30,50 @@ const getPonctualPrice = (durationMinutes) => {
 };
 
 // =============================================
+// ✅ RÉCUPÉRER LES COMPTES DISPONIBLES POUR L'ADMIN
+// =============================================
+router.get('/accounts', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
+  try {
+    // Récupérer tous les comptes family
+    const { data: accounts, error: accountsError } = await supabase
+      .from('profiles')
+      .select('id, full_name, email, phone, role, patient_category, is_active')
+      .eq('role', 'family')
+      .order('full_name');
+
+    if (accountsError) throw accountsError;
+
+    // Pour chaque compte, vérifier s'il a des patients
+    const accountsWithPatients = await Promise.all((accounts || []).map(async (account) => {
+      const { data: links, error: linksError } = await supabase
+        .from('patient_family_links')
+        .select('patient_id, patient:patients(id, first_name, last_name, address, category)')
+        .eq('family_id', account.id);
+
+      const patients = links?.map(l => l.patient).filter(Boolean) || [];
+
+      return {
+        ...account,
+        has_patient: patients.length > 0,
+        patients: patients,
+        display_name: patients.length > 0 
+          ? `${account.full_name} (${patients.length} proche${patients.length > 1 ? 's' : ''})` 
+          : `${account.full_name} (👤 Compte personnel)`,
+        type: patients.length > 0 ? 'account_with_patients' : 'personal_account',
+      };
+    }));
+
+    res.json({
+      success: true,
+      data: accountsWithPatients,
+    });
+  } catch (error) {
+    console.error('❌ Get accounts error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =============================================
 // LISTE DES VISITES
 // =============================================
 router.get('/', async (req, res) => {
@@ -135,14 +179,15 @@ router.get('/:id', async (req, res) => {
 });
 
 // =============================================
-// ✅ CRÉER UNE VISITE - AVEC GESTION DU PAIEMENT
+// ✅ CRÉER UNE VISITE - AVEC GESTION DES COMPTES PERSONNELS
 // =============================================
 router.post('/', async (req, res) => {
   try {
     const { user, profile } = req;
     const { 
       patient_id,
-      target_type,
+      target_user_id,        // ✅ NOUVEAU - ID du compte cible
+      target_type,           // 'personal' | 'patient' | 'account'
       target_name,
       scheduled_date,
       scheduled_time,
@@ -159,9 +204,118 @@ router.post('/', async (req, res) => {
       return res.status(403).json({ error: 'Non autorisé à créer une visite' });
     }
 
-    const finalTargetType = target_type || (patient_id ? 'patient' : 'personal');
-    const finalTargetName = target_name || (patient_id ? null : profile.full_name);
+    // ✅ DÉTERMINER LA CIBLE
+    let finalPatientId = null;
+    let finalTargetType = 'personal';
+    let finalTargetName = target_name || null;
+    let finalUserId = null;
+    let targetHasPatient = false;
 
+    // ✅ Cas 1: L'admin planifie pour un patient
+    if (patient_id) {
+      const { data: patient, error: patientError } = await supabase
+        .from('patients')
+        .select('id, first_name, last_name, category, created_by')
+        .eq('id', patient_id)
+        .single();
+
+      if (patientError || !patient) {
+        return res.status(404).json({ error: 'Patient non trouvé' });
+      }
+
+      // Récupérer la famille liée au patient
+      const { data: familyLinks } = await supabase
+        .from('patient_family_links')
+        .select('family_id')
+        .eq('patient_id', patient_id)
+        .limit(1);
+
+      finalPatientId = patient_id;
+      finalTargetType = 'patient';
+      finalTargetName = `${patient.first_name} ${patient.last_name}`;
+      
+      if (familyLinks && familyLinks.length > 0) {
+        finalUserId = familyLinks[0].family_id;
+      } else {
+        finalUserId = patient.created_by || patient_id;
+      }
+      targetHasPatient = true;
+    }
+
+    // ✅ Cas 2: L'admin planifie pour un compte personnel (sans patient)
+    else if (target_user_id) {
+      const { data: account, error: accountError } = await supabase
+        .from('profiles')
+        .select('id, full_name, email, role, patient_category')
+        .eq('id', target_user_id)
+        .single();
+
+      if (accountError || !account) {
+        return res.status(404).json({ error: 'Compte non trouvé' });
+      }
+
+      // Vérifier si le compte a des patients
+      const { data: links, error: linksError } = await supabase
+        .from('patient_family_links')
+        .select('patient_id')
+        .eq('family_id', target_user_id)
+        .limit(1);
+
+      const hasPatient = links && links.length > 0;
+
+      if (hasPatient) {
+        // Le compte a des patients, on pourrait soit refuser, soit proposer de choisir un patient
+        return res.status(400).json({ 
+          error: 'Ce compte a des patients. Veuillez choisir un patient spécifique ou utiliser target_type "account" pour planifier pour le compte lui-même.',
+          hasPatient: true,
+        });
+      }
+
+      finalPatientId = null;
+      finalTargetType = 'personal';
+      finalTargetName = account.full_name || 'Compte personnel';
+      finalUserId = target_user_id;
+      targetHasPatient = false;
+    }
+
+    // ✅ Cas 3: L'admin planifie pour un compte AVEC patients (planification personnelle du compte)
+    else if (target_type === 'account' && target_user_id) {
+      const { data: account, error: accountError } = await supabase
+        .from('profiles')
+        .select('id, full_name, email, role, patient_category')
+        .eq('id', target_user_id)
+        .single();
+
+      if (accountError || !account) {
+        return res.status(404).json({ error: 'Compte non trouvé' });
+      }
+
+      finalPatientId = null;
+      finalTargetType = 'personal';
+      finalTargetName = `${account.full_name} (compte)`;
+      finalUserId = target_user_id;
+      targetHasPatient = false;
+    }
+
+    // ✅ Cas 4: Une famille crée pour elle-même
+    else if (profile.role === 'family' && !patient_id) {
+      finalPatientId = null;
+      finalTargetType = 'personal';
+      finalTargetName = profile.full_name || 'Personnel';
+      finalUserId = user.id;
+      targetHasPatient = false;
+    }
+
+    // ✅ Fallback
+    else {
+      finalPatientId = null;
+      finalTargetType = 'personal';
+      finalTargetName = profile.full_name || 'Utilisateur';
+      finalUserId = user.id;
+      targetHasPatient = false;
+    }
+
+    // ✅ VÉRIFICATION DES PERMISSIONS POUR LA FAMILLE
     if (profile.role === 'family' && patient_id) {
       const { data: link } = await supabase
         .from('patient_family_links')
@@ -188,7 +342,7 @@ router.post('/', async (req, res) => {
       const { data: subscription } = await supabase
         .from('abonnements')
         .select('id, remaining_visits, status')
-        .eq('user_id', user.id)
+        .eq('user_id', finalUserId)
         .eq('status', 'actif')
         .maybeSingle();
 
@@ -201,8 +355,8 @@ router.post('/', async (req, res) => {
 
     // ✅ CRÉATION DE LA VISITE
     const visitData = {
-      user_id: user.id,
-      patient_id: patient_id || null,
+      user_id: finalUserId,
+      patient_id: finalPatientId,
       target_type: finalTargetType,
       target_name: finalTargetName,
       aidant_id: aidant_id || null,
@@ -214,9 +368,10 @@ router.post('/', async (req, res) => {
       actions: [],
       notes: notes || null,
       is_urgent: is_urgent || false,
-      visit_type: patient_id ? 'patient' : 'personal',
+      visit_type: finalPatientId ? 'patient' : 'personal',
       assignment_type: assignment_type || 'ponctuelle',
       requested_by: user.id,
+      draft_expires_at: requiresPayment ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() : null,
       metadata: {
         created_by: user.id,
         created_at: new Date().toISOString(),
@@ -225,6 +380,8 @@ router.post('/', async (req, res) => {
         is_draft: requiresPayment,
         payment_amount: requiresPayment ? paymentAmount : null,
         scheduled_from_draft: false,
+        target_user_id: finalUserId,
+        target_has_patient: targetHasPatient,
       }
     };
 
@@ -245,10 +402,10 @@ router.post('/', async (req, res) => {
 
     const targetDisplay = finalTargetName || (visit.patient ? `${visit.patient.first_name} ${visit.patient.last_name}` : 'Personnel');
 
-    // ✅ SI PAIEMENT REQUIS → RETOUR AVEC requires_payment: true
+    // ✅ SI PAIEMENT REQUIS
     if (requiresPayment) {
       await createNotification({
-        userId: user.id,
+        userId: finalUserId,
         title: '💳 Paiement requis pour planifier la visite',
         body: `Un paiement de ${paymentAmount} FCFA est requis pour planifier la visite de ${targetDisplay}.`,
         type: 'visite',
@@ -261,6 +418,24 @@ router.post('/', async (req, res) => {
         },
       });
 
+      // Notification aux admins
+      const { data: admins } = await supabase
+        .from('profiles')
+        .select('id')
+        .in('role', ['admin', 'coordinator']);
+
+      if (admins) {
+        for (const admin of admins) {
+          await createNotification({
+            userId: admin.id,
+            title: '📅 Visite créée en brouillon',
+            body: `Visite pour ${targetDisplay} - En attente de paiement.`,
+            type: 'system',
+            data: { visit_id: visit.id, status: 'brouillon' },
+          });
+        }
+      }
+
       return res.status(201).json({
         success: true,
         visit,
@@ -270,11 +445,11 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // ✅ PAS DE PAIEMENT REQUIS → VISITE PLANIFIÉE DIRECTEMENT
+    // ✅ PAS DE PAIEMENT REQUIS
     await createNotification({
-      userId: user.id,
+      userId: finalUserId,
       title: '📅 Nouvelle visite planifiée',
-      body: `Visite pour ${targetDisplay} le ${visit.scheduled_date} à ${visit.scheduled_time}`,
+      body: `Une visite pour ${targetDisplay} a été planifiée le ${visit.scheduled_date} à ${visit.scheduled_time}.`,
       type: 'visite',
       data: { visit_id: visit.id, status: 'planifiee' },
     });
@@ -368,7 +543,6 @@ router.post('/:id/confirm-payment', async (req, res) => {
       return res.status(500).json({ error: updateError.message });
     }
 
-    // ✅ Notifier l'aidant
     if (updatedVisit.aidant_id) {
       await createNotification({
         userId: updatedVisit.aidant_id,
