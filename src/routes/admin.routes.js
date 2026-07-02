@@ -5,11 +5,17 @@ const router = express.Router();
 const { supabase } = require('../services/supabase.service');
 const authMiddleware = require('../middleware/auth.middleware');
 const roleMiddleware = require('../middleware/role.middleware');
+const {
+  assignAidantToTarget,
+  revokeAssignment,
+  getAssignmentsByTarget,
+  getAssignmentsByAidant,
+  TARGET_TYPES,
+  ASSIGNMENT_TYPES,
+} = require('../services/aidantAssignment.service');
 
 router.use(authMiddleware);
 router.use(roleMiddleware(['admin', 'coordinator']));
-
-
 
 // =============================================
 // ✅ SUPPRIMER UN UTILISATEUR (ADMIN)
@@ -18,14 +24,17 @@ router.delete('/users/:id', authMiddleware, roleMiddleware(['admin']), async (re
   try {
     const { id } = req.params;
 
-    // 1. Supprimer les données associées
+    // 1. Supprimer les assignations de l'utilisateur
+    await supabase.from('aidant_assignments').delete().or(`aidant_user_id.eq.${id}, target_id.eq.${id}`);
+    
+    // 2. Supprimer les données associées
     await supabase.from('patient_family_links').delete().eq('family_id', id);
     await supabase.from('patient_aidant_assignments').delete().eq('family_id', id);
     await supabase.from('inscriptions').delete().eq('user_id', id);
     await supabase.from('notifications').delete().eq('user_id', id);
     await supabase.from('profiles').delete().eq('id', id);
 
-    // 2. Supprimer l'utilisateur Auth (via Service Role)
+    // 3. Supprimer l'utilisateur Auth (via Service Role)
     const { error } = await supabase.auth.admin.deleteUser(id);
     
     if (error) throw error;
@@ -36,8 +45,6 @@ router.delete('/users/:id', authMiddleware, roleMiddleware(['admin']), async (re
     res.status(500).json({ error: error.message });
   }
 });
-
-
 
 // =============================================
 // STATISTIQUES - CORRIGÉ
@@ -75,7 +82,6 @@ router.get('/stats', async (req, res) => {
       .select('*', { count: 'exact', head: true })
       .eq('status', 'en_attente');
 
-   
     // ✅ Visites en attente d'approbation (24-48h)
     const { count: visitsWaitingApproval } = await supabase
       .from('visites')
@@ -83,7 +89,6 @@ router.get('/stats', async (req, res) => {
       .eq('status', 'planifiee')
       .is('approved_at', null)
       .is('refused_at', null);
-
 
     // ✅ Visites expirées (sans réponse)
     const { count: visitsExpired } = await supabase
@@ -102,6 +107,18 @@ router.get('/stats', async (req, res) => {
       .from('commandes')
       .select('*', { count: 'exact', head: true })
       .eq('status', 'disponible');
+
+    // ✅ STATS ASSIGNATIONS (NOUVEAU)
+    const { count: totalAssignments } = await supabase
+      .from('aidant_assignments')
+      .select('*', { count: 'exact', head: true })
+      .eq('status', 'active');
+
+    const { count: primaryAssignments } = await supabase
+      .from('aidant_assignments')
+      .select('*', { count: 'exact', head: true })
+      .eq('status', 'active')
+      .eq('assignment_type', 'primary');
 
     const startOfMonth = new Date();
     startOfMonth.setDate(1);
@@ -127,14 +144,17 @@ router.get('/stats', async (req, res) => {
       ordersWaiting: ordersWaiting || 0,
       ordersAvailable: ordersAvailable || 0,
       revenue,
+      // ✅ NOUVEAUX STATS
+      assignments: {
+        total: totalAssignments || 0,
+        primary: primaryAssignments || 0,
+      },
     });
   } catch (error) {
     console.error('❌ Get stats error:', error);
     res.status(500).json({ error: error.message });
   }
 });
-
- 
 
 // =============================================
 // INSCRIPTIONS - CORRIGÉ POUR NE AFFICHER QUE LES EN ATTENTE
@@ -172,6 +192,7 @@ router.get('/registrations', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
 // =============================================
 // TRAITER UNE INSCRIPTION
 // =============================================
@@ -275,91 +296,152 @@ router.post('/aidants', async (req, res) => {
 });
 
 // =============================================
-// ✅ ASSIGNER UN AIDANT À UNE FAMILLE
+// ✅ ASSIGNER UN AIDANT (NOUVELLE VERSION ADMIN)
 // =============================================
 router.post('/assign-aidant', async (req, res) => {
   try {
-    const { familyId, aidantId, assignmentType = 'permanente', expiresAt = null } = req.body;
+    const { 
+      familyId,          // ID du compte ou de la famille
+      aidantId,          // ID de l'aidant (UUID)
+      targetType,        // 'patient' | 'personal_account' | 'family'
+      targetId,          // ID de la cible
+      assignmentType = 'primary',
+      reason = null,
+      expiresAt = null,
+      force = false,
+    } = req.body;
 
-    // Vérifier que la famille existe
-    const { data: family, error: familyError } = await supabase
-      .from('profiles')
-      .select('id')
-      .eq('id', familyId)
-      .eq('role', 'family')
-      .single();
+    // ✅ Si on utilise l'ancien format (familyId + aidantId)
+    // on le convertit en nouveau format
+    let finalTargetType = targetType;
+    let finalTargetId = targetId;
+    let finalFamilyId = familyId;
 
-    if (familyError || !family) {
-      return res.status(404).json({ error: 'Famille non trouvée' });
+    if (!targetType && familyId) {
+      // Si c'est une assignation à une famille
+      finalTargetType = TARGET_TYPES.FAMILY;
+      finalTargetId = familyId;
+      finalFamilyId = familyId;
+    } else if (targetType === TARGET_TYPES.PATIENT && !targetId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Pour un patient, targetId est requis',
+      });
+    } else if (targetType === TARGET_TYPES.PERSONAL_ACCOUNT && !targetId) {
+      finalTargetId = familyId;
     }
 
-    // Vérifier que l'aidant existe et est approuvé
+    if (!aidantId) {
+      return res.status(400).json({
+        success: false,
+        error: 'aidantId est requis',
+      });
+    }
+
+    if (!finalTargetType || !finalTargetId) {
+      return res.status(400).json({
+        success: false,
+        error: 'targetType et targetId sont requis, ou familyId',
+      });
+    }
+
+    // ✅ Vérifier que l'aidant existe
     const { data: aidant, error: aidantError } = await supabase
       .from('aidants')
-      .select('id, user_id, is_verified, status')
+      .select('id, user_id, is_verified, status, max_assignments')
       .eq('id', aidantId)
       .single();
 
     if (aidantError || !aidant) {
-      return res.status(404).json({ error: 'Aidant non trouvé' });
+      return res.status(404).json({
+        success: false,
+        error: 'Aidant non trouvé',
+      });
     }
 
     if (!aidant.is_verified || aidant.status !== 'approved') {
-      return res.status(400).json({ error: 'Cet aidant n\'est pas approuvé' });
+      return res.status(400).json({
+        success: false,
+        error: 'Cet aidant n\'est pas approuvé',
+      });
     }
 
-    // Vérifier si un lien existe déjà
-    const { data: existingLink } = await supabase
-      .from('patient_family_links')
-      .select('id')
-      .eq('family_id', familyId)
-      .eq('family_id', aidant.user_id)
-      .maybeSingle();
-
-    if (!existingLink) {
-      // Créer un lien entre l'aidant et la famille
-      // Note: patient_id est null car c'est une assignation à la famille
+    // ✅ Si force = true, on ignore les quotas
+    let result;
+    if (force) {
+      // Supprimer les anciennes assignations pour libérer de la place
       await supabase
-        .from('patient_family_links')
-        .insert({
-          patient_id: null,
-          family_id: familyId,
-          is_primary: false,
-          can_manage_visits: true,
-          can_manage_orders: true,
-          can_receive_notifications: true,
-          metadata: {
-            aidant_id: aidantId,
-            assignment_type: assignmentType,
-            expires_at: expiresAt,
-            assigned_by: req.user.id,
-            assigned_at: new Date().toISOString(),
-          }
-        });
+        .from('aidant_assignments')
+        .update({
+          status: 'inactive',
+          reason: 'Supprimé pour assignation forcée',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('aidant_user_id', aidant.user_id)
+        .eq('status', 'active');
+
+      // Réessayer l'assignation
+      result = await assignAidantToTarget({
+        aidantUserId: aidant.user_id,
+        targetType: finalTargetType,
+        targetId: finalTargetId,
+        familyId: finalFamilyId || finalTargetId,
+        assignmentType: assignmentType,
+        createdBy: req.user.id,
+        reason: reason || `Assignation forcée par admin (${req.user.id})`,
+        expiresAt: expiresAt || null,
+      });
+    } else {
+      result = await assignAidantToTarget({
+        aidantUserId: aidant.user_id,
+        targetType: finalTargetType,
+        targetId: finalTargetId,
+        familyId: finalFamilyId || finalTargetId,
+        assignmentType: assignmentType,
+        createdBy: req.user.id,
+        reason: reason || `Assignation par admin (${req.user.id})`,
+        expiresAt: expiresAt || null,
+      });
     }
 
-    // Notification à l'aidant
-    await supabase.from('notifications').insert({
-      user_id: aidant.user_id,
-      title: '📋 Nouvelle famille assignée',
-      body: `Vous avez été assigné à une nouvelle famille. Type: ${assignmentType}`,
-      type: 'system',
-      data: { family_id: familyId, assignment_type: assignmentType },
-    });
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        error: result.error,
+        code: result.code,
+      });
+    }
 
-    // Notification à la famille
-    await supabase.from('notifications').insert({
-      user_id: familyId,
-      title: '🦸 Aidant assigné',
-      body: `Un aidant a été assigné à votre famille.`,
-      type: 'system',
-      data: { aidant_id: aidantId },
-    });
+    // ✅ Notification supplémentaire pour les admins
+    const { data: admins } = await supabase
+      .from('profiles')
+      .select('id')
+      .in('role', ['admin', 'coordinator']);
 
-    res.json({ 
-      success: true, 
-      message: 'Aidant assigné avec succès',
-      assignment: { family_id: familyId, aidant_id: aidantId, assignment_type: assignmentType }
+    if (admins && admins.length > 0) {
+      const adminNotifications = admins.map((admin) => ({
+        user_id: admin.id,
+        title: `📋 Assignation ${force ? 'forcée' : ''} effectuée`,
+        body: `Un aidant a été assigné par ${req.user.id} à ${finalTargetType} ${finalTargetId}`,
+        type: 'alert',
+        data: {
+          assignment_id: result.assignment?.id,
+          aidant_id: aidantId,
+          target_type: finalTargetType,
+          target_id: finalTargetId,
+          forced: force || false,
+          assigned_by: req.user.id,
+        },
+      }));
+
+      await supabase.from('notifications').insert(adminNotifications);
+    }
+
+    res.json({
+      success: true,
+      message: `Aidant assigné avec succès${force ? ' (forcé)' : ''}`,
+      data: result,
+      forced: force || false,
     });
   } catch (error) {
     console.error('❌ Assign aidant error:', error);
@@ -387,6 +469,152 @@ router.get('/aidants/available', async (req, res) => {
     res.json(data);
   } catch (error) {
     console.error('❌ Get available aidants error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =============================================
+// ✅ RÉCUPÉRER TOUTES LES ASSIGNATIONS (ADMIN)
+// =============================================
+router.get('/assignments', async (req, res) => {
+  try {
+    const { status, targetType, targetId } = req.query;
+
+    let query = supabase
+      .from('aidant_assignments')
+      .select(`
+        *,
+        aidant:profiles!aidant_user_id(
+          id,
+          full_name,
+          email,
+          phone,
+          avatar_url
+        ),
+        target_patient:patients!target_id(
+          id,
+          first_name,
+          last_name,
+          address,
+          category
+        ),
+        target_profile:profiles!target_id(
+          id,
+          full_name,
+          email,
+          phone
+        )
+      `);
+
+    if (status) {
+      query = query.eq('status', status);
+    }
+    if (targetType) {
+      query = query.eq('target_type', targetType);
+    }
+    if (targetId) {
+      query = query.eq('target_id', targetId);
+    }
+
+    const { data, error } = await query.order('created_at', { ascending: false });
+
+    if (error) throw error;
+
+    res.json({
+      success: true,
+      data: data || [],
+      count: data?.length || 0,
+    });
+  } catch (error) {
+    console.error('❌ Get assignments error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =============================================
+// ✅ RÉVOQUER UNE ASSIGNATION (ADMIN)
+// =============================================
+router.delete('/assignments/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    const result = await revokeAssignment(id, req.user.id, reason || `Révoqué par admin (${req.user.id})`);
+
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        error: result.error,
+        code: result.code,
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Assignation révoquée avec succès',
+      data: result,
+    });
+  } catch (error) {
+    console.error('❌ Revoke assignment error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =============================================
+// ✅ STATISTIQUES DES ASSIGNATIONS (ADMIN)
+// =============================================
+router.get('/assignments/stats', async (req, res) => {
+  try {
+    const [
+      { count: total },
+      { count: active },
+      { count: inactive },
+      { count: expired },
+      { count: primary },
+      { count: secondary },
+      { count: temporary },
+    ] = await Promise.all([
+      supabase.from('aidant_assignments').select('*', { count: 'exact', head: true }),
+      supabase.from('aidant_assignments').select('*', { count: 'exact', head: true }).eq('status', 'active'),
+      supabase.from('aidant_assignments').select('*', { count: 'exact', head: true }).eq('status', 'inactive'),
+      supabase.from('aidant_assignments').select('*', { count: 'exact', head: true }).eq('status', 'expired'),
+      supabase.from('aidant_assignments').select('*', { count: 'exact', head: true }).eq('assignment_type', 'primary'),
+      supabase.from('aidant_assignments').select('*', { count: 'exact', head: true }).eq('assignment_type', 'secondary'),
+      supabase.from('aidant_assignments').select('*', { count: 'exact', head: true }).eq('assignment_type', 'temporary'),
+    ]);
+
+    // Répartition par target_type
+    const [
+      { count: patients },
+      { count: personalAccounts },
+      { count: families },
+    ] = await Promise.all([
+      supabase.from('aidant_assignments').select('*', { count: 'exact', head: true }).eq('target_type', 'patient'),
+      supabase.from('aidant_assignments').select('*', { count: 'exact', head: true }).eq('target_type', 'personal_account'),
+      supabase.from('aidant_assignments').select('*', { count: 'exact', head: true }).eq('target_type', 'family'),
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        total,
+        active,
+        inactive,
+        expired,
+        by_type: {
+          primary,
+          secondary,
+          temporary,
+        },
+        by_target: {
+          patient: patients,
+          personal_account: personalAccounts,
+          family: families,
+        },
+      },
+    });
+  } catch (error) {
+    console.error('❌ Get assignment stats error:', error);
     res.status(500).json({ error: error.message });
   }
 });
