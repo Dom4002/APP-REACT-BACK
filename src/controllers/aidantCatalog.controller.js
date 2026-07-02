@@ -121,7 +121,7 @@ const assignAidant = asyncWrapper(async (req, res) => {
     const result = await assignAidantToPatient(
       aidantId,
       familyId,
-      patientId || null,   
+      patientId || null,   // ✅ null autorisé
       assignmentType
     );
 
@@ -142,7 +142,7 @@ const assignAidant = asyncWrapper(async (req, res) => {
 });
 
 // ============================================================
-// RÉVOQUER UNE ASSIGNATION
+// RÉVOQUER UNE ASSIGNATION - AVEC NOTIFICATIONS COMPLÈTES
 // ============================================================
 const revokeAssignmentController = asyncWrapper(async (req, res) => {
   try {
@@ -171,9 +171,9 @@ const revokeAssignmentController = asyncWrapper(async (req, res) => {
 // EXPORTS
 // ============================================================
 module.exports = {
-  getCatalog,                       
-  getAidant,                       
-  assignAidant,                    
-  getMyAssignments,               
-  revokeAssignmentController,       
+  getCatalog,                      // ✅ Définie
+  getAidant,                       // ✅ Définie
+  assignAidant,                    // ✅ Définie
+  getMyAssignments,                // ✅ Définie
+  revokeAssignmentController,      // ✅ Définie
 };
