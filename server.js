@@ -14,6 +14,7 @@ const { errorHandler, notFoundHandler } = require('./src/utils/errorHandler');
 const { logRequest } = require('./src/config/logger');
 const { setupSwagger } = require('./src/config/swagger');
 const aidantCatalogRoutes = require('./src/routes/aidantCatalog.routes');
+const aidantAssignmentsRoutes = require('./src/routes/aidantAssignments.routes'); // ✅ AJOUTÉ
 const fileUpload = require('express-fileupload');
 
 const app = express();
@@ -118,7 +119,12 @@ const contractRoutes = require('./src/routes/contract.routes');
 const adminSetupRoutes = require('./src/routes/adminSetup.routes');
 const settingsRoutes = require('./src/routes/settings.routes');
 const offerRoutes = require('./src/routes/offers.routes');
+const aidantCatalogRoutes = require('./src/routes/aidantCatalog.routes');
+const aidantAssignmentsRoutes = require('./src/routes/aidantAssignments.routes');  
 
+// =============================================
+// ✅ APPLICATION DES ROUTES
+// =============================================
 app.use('/api/auth', authRoutes);
 app.use('/api/patients', patientRoutes);
 app.use('/api/visits', visitRoutes);
@@ -135,6 +141,7 @@ app.use('/api/admin-setup', adminSetupRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/offers', offerRoutes);
 app.use('/api/aidants', aidantCatalogRoutes);
+app.use('/api/assignments', aidantAssignmentsRoutes); 
 
 // ============================================================
 // MESSAGES - CONVERSATIONS (ROUTES AJOUTÉES DIRECTEMENT)
@@ -610,6 +617,7 @@ app.listen(PORT, () => {
   console.log(`📚 Swagger: http://localhost:${PORT}/api/docs`);
   console.log(`💳 Webhook FedaPay: http://localhost:${PORT}/api/billing/webhook`);
   console.log(`↩️ Redirection FedaPay: http://localhost:${PORT}/payment/confirm`);
+  console.log(`📋 Routes d'assignation: http://localhost:${PORT}/api/assignments`);
 });
 
 module.exports = app;
