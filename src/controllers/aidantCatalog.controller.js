@@ -8,6 +8,7 @@ const {
   revokeAssignment,
 } = require('../services/aidantCatalog.service');
 const { asyncWrapper } = require('../utils/errorHandler');
+const { getActiveAidantForTarget } = require('../services/aidantAssignment.service');
 
 // ============================================================
 // RÉCUPÉRER LE CATALOGUE DES AIDANTS
@@ -89,6 +90,7 @@ const getMyAssignments = asyncWrapper(async (req, res) => {
     res.json({
       success: true,
       data: assignments,
+      count: assignments.length,
     });
   } catch (error) {
     console.error('❌ Erreur getMyAssignments:', error);
@@ -168,12 +170,91 @@ const revokeAssignmentController = asyncWrapper(async (req, res) => {
 });
 
 // ============================================================
+// ✅ NOUVEAU : RÉCUPÉRER L'AIDANT ACTIF POUR UNE CIBLE
+// ============================================================
+const getActiveAidant = asyncWrapper(async (req, res) => {
+  try {
+    const { targetType, targetId, familyId } = req.query;
+    const userId = req.user.id;
+
+    if (!targetType || !targetId) {
+      return res.status(400).json({
+        success: false,
+        error: 'targetType et targetId sont requis',
+      });
+    }
+
+    // ✅ Vérifier les permissions
+    const isAdmin = ['admin', 'coordinator'].includes(req.profile?.role);
+    let hasAccess = isAdmin;
+
+    if (!hasAccess) {
+      if (targetType === 'personal_account') {
+        hasAccess = targetId === userId;
+      } else if (targetType === 'patient') {
+        const { data: link } = await supabase
+          .from('patient_family_links')
+          .select('id')
+          .eq('family_id', userId)
+          .eq('patient_id', targetId)
+          .maybeSingle();
+        hasAccess = !!link;
+      }
+    }
+
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        error: 'Accès non autorisé à cette cible',
+      });
+    }
+
+    const aidantId = await getActiveAidantForTarget(
+      targetType,
+      targetId,
+      familyId || null
+    );
+
+    // Récupérer les infos de l'aidant
+    let aidant = null;
+    if (aidantId) {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('id, full_name, email, phone, avatar_url')
+        .eq('id', aidantId)
+        .single();
+
+      if (!error && data) {
+        aidant = data;
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        aidant_id: aidantId,
+        aidant: aidant,
+        target_type: targetType,
+        target_id: targetId,
+      },
+    });
+  } catch (error) {
+    console.error('❌ Erreur getActiveAidant:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erreur lors de la récupération de l\'aidant actif',
+    });
+  }
+});
+
+// ============================================================
 // EXPORTS
 // ============================================================
 module.exports = {
-  getCatalog,                      // ✅ Définie
-  getAidant,                       // ✅ Définie
-  assignAidant,                    // ✅ Définie
-  getMyAssignments,                // ✅ Définie
-  revokeAssignmentController,      // ✅ Définie
+  getCatalog,
+  getAidant,
+  assignAidant,
+  getMyAssignments,
+  revokeAssignmentController,
+  getActiveAidant,          // ✅ NOUVEAU
 };
