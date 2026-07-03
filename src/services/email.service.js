@@ -8,7 +8,7 @@ const BREVO_URL = 'https://api.brevo.com/v3';
 
 // ✅ URL DU SITE
 const SITE_URL = process.env.VERCEL_URL 
-  ? `https://${process.env.VERCEL_URL}`
+  ? `${process.env.VERCEL_URL}`
   : process.env.CLIENT_URL || 'https://app-sante-plus-react.vercel.app';
 
 console.log('🌐 SITE_URL:', SITE_URL);
@@ -207,7 +207,7 @@ const generateFooter = () => `
       📧 <a href="mailto:contact@santeplus.bj" style="color:#6b7280;text-decoration:none;">contact@santeplus.bj</a> 
       | 📞 <a href="tel:+2290191343458" style="color:#6b7280;text-decoration:none;">+229 01 91 34 34 58</a>
       <br>
-      <a href="${SITE_URL}" style="color:#6b7280;text-decoration:none;font-size:12px;">🌐 ${SITE_URL.replace('https://', '')}</a>
+      <a href="${SITE_URL}" style="color:#6b7280;text-decoration:none;font-size:12px;">🌐${SITE_URL}</a>
     </p>
     <p class="footer-text" style="margin-top:8px; font-size:11px; color:#d1d5db;">
       © ${new Date().getFullYear()} Santé Plus Services — Tous droits réservés
