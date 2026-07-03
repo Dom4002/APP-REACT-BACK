@@ -117,6 +117,72 @@ const offerRoutes = require('./src/routes/offers.routes');
 const aidantCatalogRoutes = require('./src/routes/aidantCatalog.routes');
 const aidantAssignmentsRoutes = require('./src/routes/aidantAssignments.routes');
 
+ 
+
+// ✅ Si le routeur ne fonctionne pas, ajouter cette route directe
+app.get('/api/assignments', authMiddleware, async (req, res) => {
+  try {
+    const userRole = req.profile?.role;
+
+    // Seuls les admins peuvent voir toutes les assignations
+    if (!['admin', 'coordinator'].includes(userRole)) {
+      return res.status(403).json({
+        success: false,
+        error: 'Accès non autorisé',
+      });
+    }
+
+    const { data: assignments, error } = await supabase
+      .from('aidant_assignments')
+      .select(`
+        *,
+        aidant:profiles!aidant_user_id(
+          id,
+          full_name,
+          email,
+          phone,
+          avatar_url
+        ),
+        target_patient:patients!target_id(
+          id,
+          first_name,
+          last_name,
+          address,
+          category
+        ),
+        target_profile:profiles!target_id(
+          id,
+          full_name,
+          email,
+          phone
+        )
+      `)
+      .eq('status', 'active')
+      .order('created_at', { ascending: false });
+
+    if (error) {
+      console.error('❌ Assignments error:', error);
+      return res.status(500).json({
+        success: false,
+        error: error.message,
+      });
+    }
+
+    res.json({
+      success: true,
+      data: assignments || [],
+      count: assignments?.length || 0,
+    });
+  } catch (error) {
+    console.error('❌ Get assignments error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+
 // ✅ DEBUG
 console.log('📋 === ROUTES D\'ASSIGNATION ===');
 console.log('📋 aidantAssignmentsRoutes:', !!aidantAssignmentsRoutes);
@@ -149,7 +215,7 @@ app.use('/api/admin-setup', adminSetupRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/offers', offerRoutes);
 app.use('/api/aidants', aidantCatalogRoutes);
-app.use('/api/assignments', aidantAssignmentsRoutes); // ✅ UNIQUE DÉFINITION
+app.use('/api/assignments', aidantAssignmentsRoutes);  
 
 // =============================================
 // ✅ REDIRECTION FEDAPAY
