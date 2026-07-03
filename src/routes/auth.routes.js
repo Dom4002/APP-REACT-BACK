@@ -1,5 +1,5 @@
 // 📁 backend/src/routes/auth.routes.js
- 
+
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../services/supabase.service');
@@ -128,9 +128,8 @@ router.post('/admin/test-approve', async (req, res) => {
   }
 });
 
- 
 // =============================================
-// ✅ INSCRIPTION - CORRIGÉE
+// ✅ INSCRIPTION - CORRIGÉE AVEC VALIDATION AIDANT
 // =============================================
 router.post('/register', async (req, res) => {
   console.log('📝 ===== REGISTER REQUEST =====');
@@ -150,16 +149,10 @@ router.post('/register', async (req, res) => {
     } = req.body;
 
     // =============================================
-    // ❌ BLOQUER L'INSCRIPTION DES AIDANTS
+    // ✅ PERMETTRE L'INSCRIPTION DES AIDANTS (avec validation)
     // =============================================
-    if (role === 'aidant') {
-      console.warn('⚠️ Tentative d\'inscription aidant bloquée:', email);
-      return res.status(403).json({
-        success: false,
-        error: 'Les inscriptions d\'aidants ne sont pas autorisées sur cette plateforme. Veuillez contacter l\'administration.',
-        code: 'AIDANT_REGISTRATION_BLOCKED'
-      });
-    }
+    // Les aidants peuvent s'inscrire mais leur compte sera en attente de validation
+    // is_active = false pour les aidants, true pour les familles
 
     // =============================================
     // VALIDATION DES CHAMPS COMMUNS
@@ -218,6 +211,20 @@ router.post('/register', async (req, res) => {
       }
     }
 
+    // ✅ Validation aidant (pour les aidants)
+    if (role === 'aidant') {
+      console.log('🔍 Validation aidant...');
+      if (!aidantData) {
+        return res.status(400).json({ success: false, error: 'Données aidant manquantes' });
+      }
+      if (!aidantData.specialties || aidantData.specialties.length === 0) {
+        return res.status(400).json({ success: false, error: 'Au moins une spécialité est requise' });
+      }
+      if (!aidantData.address) {
+        return res.status(400).json({ success: false, error: 'Adresse requise' });
+      }
+    }
+
     // Vérifier si l'email existe déjà
     console.log('🔍 Vérification email existant...');
     const { data: existingUser, error: checkError } = await supabase
@@ -261,7 +268,9 @@ router.post('/register', async (req, res) => {
     // 2. Créer le profil
     console.log('🔍 Création du profil...');
     
-    const isActive = true; // Toujours actif pour les familles
+    // ✅ Pour un aidant : is_active = false (en attente de validation)
+    // ✅ Pour une famille : is_active = true (validé automatiquement)
+    const isActive = role === 'aidant' ? false : true;
     
     const { error: profileError } = await supabase
       .from('profiles')
@@ -284,10 +293,42 @@ router.post('/register', async (req, res) => {
       });
     }
 
-    console.log('✅ Profil créé (is_active:', isActive, ')');
+    console.log(`✅ Profil créé (is_active: ${isActive}, role: ${role})`);
 
     // =============================================
-    // 3. Si Famille - Créer le patient
+    // 3. Si Aidant - Créer le profil aidant (en attente)
+    // =============================================
+    let aidant = null;
+    if (role === 'aidant') {
+      console.log('🔍 Création du profil aidant...');
+      const { data: aidantResult, error: aidantError } = await supabase
+        .from('aidants')
+        .insert({
+          user_id: authData.user.id,
+          specialties: aidantData.specialties || [],
+          available: false, // Pas disponible tant que non approuvé
+          bio: aidantData.bio || null,
+          address: aidantData.address || null,
+          zones: aidantData.zones || [],
+          experience_years: aidantData.experience_years ? parseInt(aidantData.experience_years) : null,
+          rating: 0,
+          total_missions: 0,
+          is_verified: false,
+          status: 'pending', 
+        })
+        .select()
+        .single();
+
+      if (aidantError) {
+        console.error('❌ Erreur création aidant:', aidantError);
+      } else {
+        aidant = aidantResult;
+        console.log('✅ Aidant créé (en attente de validation):', aidant.id);
+      }
+    }
+
+    // =============================================
+    // 4. Si Famille - Créer le patient
     // =============================================
     let patient = null;
     if (role === 'family' && hasPatient && patientData) {
@@ -330,32 +371,63 @@ router.post('/register', async (req, res) => {
     }
 
     // =============================================
-    // 4. ✅ CRÉER L'INSCRIPTION - UNIQUEMENT POUR LES AIDANTS
+    // 5. CRÉER L'INSCRIPTION
     // =============================================
-    // ✅ LES COMPTES FAMILLE SONT AUTOMATIQUEMENT VALIDÉS
-    // ✅ SEULS LES AIDANTS ONT BESOIN D'APPROBATION
     
-    // ✅ DÉTERMINER LE STATUT SELON LE RÔLE
+    // ✅ Statut selon le rôle
+    // - Famille : 'validee' (validation automatique)
+    // - Aidant : 'en_attente' (en attente d'approbation admin)
     const inscriptionStatus = role === 'aidant' ? 'en_attente' : 'validee';
     
     console.log(`🔍 Création de l'inscription avec statut: ${inscriptionStatus} pour le rôle: ${role}`);
     
-    await supabase
+    const { error: inscriptionError } = await supabase
       .from('inscriptions')
       .insert({
         user_id: authData.user.id,
         patient_data: (role === 'family' && patientData) ? patientData : null,
         offre_id: (role === 'family' && offreId) ? offreId : null,
-        status: inscriptionStatus, // ✅ 'validee' pour famille, 'en_attente' pour aidant
+        status: inscriptionStatus,
         source: 'web',
-        comments: role === 'family' ? 'Compte famille automatiquement validé' : null,
+        comments: role === 'aidant' ? 'Candidature aidant en attente de validation' : 'Compte famille automatiquement validé',
         processed_by: role === 'family' ? 'system' : null,
         processed_at: role === 'family' ? new Date().toISOString() : null,
       });
-    console.log(`✅ Inscription créée avec statut: ${inscriptionStatus}`);
+
+    if (inscriptionError) {
+      console.error('❌ Erreur création inscription:', inscriptionError);
+    } else {
+      console.log(`✅ Inscription créée avec statut: ${inscriptionStatus}`);
+    }
+
+    // ✅ Si c'est un aidant, créer une notification pour les admins
+    if (role === 'aidant') {
+      console.log('🔍 Notification aux admins pour approbation...');
+      const { data: admins } = await supabase
+        .from('profiles')
+        .select('id')
+        .in('role', ['admin', 'coordinator']);
+
+      if (admins && admins.length > 0) {
+        const notifications = admins.map((admin) => ({
+          user_id: admin.id,
+          title: '🦸 Nouvelle candidature aidant',
+          body: `${full_name} a postulé comme aidant. En attente de validation.`,
+          type: 'system',
+          data: { 
+            user_id: authData.user.id,
+            aidant_id: aidant?.id || null,
+            action: 'review',
+          },
+        }));
+
+        await supabase.from('notifications').insert(notifications);
+        console.log(`✅ ${notifications.length} notifications envoyées aux admins`);
+      }
+    }
 
     // =============================================
-    // 5. ENVOI EMAIL
+    // 6. ENVOI EMAIL
     // =============================================
     let emailSent = false;
     let emailError = null;
@@ -365,7 +437,7 @@ router.post('/register', async (req, res) => {
       
       const emailData = { 
         to: email, 
-        ...templates.welcome(full_name) 
+        ...templates.welcome(full_name, role === 'aidant' ? 'aidant' : 'general')
       };
 
       const result = await sendEmailWithLog(emailData, 'REGISTER');
@@ -391,7 +463,7 @@ router.post('/register', async (req, res) => {
     
     let message = '';
     if (role === 'aidant') {
-      message = 'Votre candidature a été envoyée. Elle sera examinée par notre équipe sous 48h.';
+      message = 'Votre candidature a été envoyée avec succès. Elle sera examinée par notre équipe sous 48h. Vous recevrez une notification dès que votre compte sera validé.';
     } else if (hasPatient) {
       message = 'Inscription réussie. Votre compte est actif.';
     } else {
@@ -417,6 +489,7 @@ router.post('/register', async (req, res) => {
         is_validated: role !== 'aidant',
       },
       patient: patient || null,
+      aidant: aidant || null,
       isAidant: role === 'aidant',
       requiresValidation: role === 'aidant',
     });
@@ -430,6 +503,7 @@ router.post('/register', async (req, res) => {
     });
   }
 });
+
 // =============================================
 // CONNEXION - AVEC VÉRIFICATION AIDANT
 // =============================================
@@ -536,12 +610,14 @@ router.post('/admin/process-registration', authMiddleware, roleMiddleware(['admi
 
     if (status === 'validee') {
       console.log('🔍 Activation du compte...');
+      
+      // ✅ Activer le profil
       await supabase
         .from('profiles')
         .update({ is_active: true })
         .eq('id', registration.user_id);
 
-      // ✅ Vérifier si c'est un aidant (cas rare, car inscription aidant bloquée)
+      // ✅ Vérifier si c'est un aidant
       const { data: aidant } = await supabase
         .from('aidants')
         .select('id')
