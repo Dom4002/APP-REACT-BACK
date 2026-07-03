@@ -1,465 +1,10 @@
-// 📁 backend/src/controllers/aidantAssignment.controller.js
+// 📁 backend/src/routes/aidantAssignments.routes.js
 
-const { supabase } = require('../services/supabase.service');
-
+const express = require('express');
+const router = express.Router();
+const authMiddleware = require('../middleware/auth.middleware');
+const roleMiddleware = require('../middleware/role.middleware');
 const {
-  getActiveAidantForTarget,
-  getAllAidantsForTarget,
-  assignAidantToTarget,
-  revokeAssignment,
-  getAssignmentsByAidant,
-  getAssignmentsByTarget,
-  isAidantAssignedToTarget,
-  TARGET_TYPES,
-  ASSIGNMENT_TYPES,
-} = require('../services/aidantAssignment.service');
-const { asyncWrapper } = require('../utils/errorHandler');
-
-// ============================================================
-// RÉCUPÉRER L'AIDANT ACTIF POUR UNE CIBLE
-// ============================================================
-const getActiveAidant = asyncWrapper(async (req, res) => {
-  try {
-    const { targetType, targetId, familyId } = req.query;
-
-    if (!targetType || !targetId) {
-      return res.status(400).json({
-        success: false,
-        error: 'targetType et targetId sont requis',
-      });
-    }
-
-    if (!Object.values(TARGET_TYPES).includes(targetType)) {
-      return res.status(400).json({
-        success: false,
-        error: 'targetType invalide. Valeurs acceptées: patient, personal_account, family',
-      });
-    }
-
-    const aidantId = await getActiveAidantForTarget(targetType, targetId, familyId || null);
-
-    // Si un aidant est trouvé, récupérer ses informations
-    let aidant = null;
-    if (aidantId) {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('id, full_name, email, phone, avatar_url')
-        .eq('id', aidantId)
-        .single();
-
-      if (!error && data) {
-        aidant = data;
-      }
-    }
-
-    res.json({
-      success: true,
-      data: {
-        aidant_id: aidantId,
-        aidant: aidant,
-        target_type: targetType,
-        target_id: targetId,
-      },
-    });
-  } catch (error) {
-    console.error('❌ Erreur getActiveAidant:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message || 'Erreur lors de la récupération de l\'aidant actif',
-    });
-  }
-});
-
-// ============================================================
-// RÉCUPÉRER TOUS LES AIDANTS POUR UNE CIBLE
-// ============================================================
-const getAllAidants = asyncWrapper(async (req, res) => {
-  try {
-    const { targetType, targetId, familyId } = req.query;
-
-    if (!targetType || !targetId) {
-      return res.status(400).json({
-        success: false,
-        error: 'targetType et targetId sont requis',
-      });
-    }
-
-    if (!Object.values(TARGET_TYPES).includes(targetType)) {
-      return res.status(400).json({
-        success: false,
-        error: 'targetType invalide. Valeurs acceptées: patient, personal_account, family',
-      });
-    }
-
-    const aidants = await getAllAidantsForTarget(targetType, targetId, familyId || null);
-
-    // Enrichir avec les profils
-    const aidantIds = aidants.map(a => a.aidant_user_id).filter(Boolean);
-    let profilesMap = {};
-
-    if (aidantIds.length > 0) {
-      const { data: profiles, error } = await supabase
-        .from('profiles')
-        .select('id, full_name, email, phone, avatar_url')
-        .in('id', aidantIds);
-
-      if (!error && profiles) {
-        profilesMap = profiles.reduce((acc, p) => {
-          acc[p.id] = p;
-          return acc;
-        }, {});
-      }
-    }
-
-    const aidantsWithProfiles = aidants.map(a => ({
-      ...a,
-      profile: profilesMap[a.aidant_user_id] || null,
-    }));
-
-    res.json({
-      success: true,
-      data: aidantsWithProfiles,
-      count: aidantsWithProfiles.length,
-    });
-  } catch (error) {
-    console.error('❌ Erreur getAllAidants:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message || 'Erreur lors de la récupération des aidants',
-    });
-  }
-});
-
-// ============================================================
-// ASSIGNER UN AIDANT À UNE CIBLE
-// ============================================================
-const assignAidant = asyncWrapper(async (req, res) => {
-  try {
-    const {
-      aidantUserId,
-      targetType,
-      targetId,
-      familyId,
-      assignmentType = ASSIGNMENT_TYPES.PRIMARY,
-      reason,
-      expiresAt,
-    } = req.body;
-
-    const userId = req.user.id;
-    const userRole = req.profile?.role;
-
-    // ✅ Validation : aidantUserId est obligatoire
-    if (!aidantUserId) {
-      return res.status(400).json({
-        success: false,
-        error: 'aidantUserId est requis',
-      });
-    }
-
-    // ✅ Validation : targetType et targetId sont obligatoires
-    if (!targetType || !targetId) {
-      return res.status(400).json({
-        success: false,
-        error: 'targetType et targetId sont requis',
-      });
-    }
-
-    if (!Object.values(TARGET_TYPES).includes(targetType)) {
-      return res.status(400).json({
-        success: false,
-        error: 'targetType invalide. Valeurs acceptées: patient, personal_account, family',
-      });
-    }
-
-    // ✅ Vérification des permissions
-    const isAdmin = ['admin', 'coordinator'].includes(userRole);
-    let hasPermission = isAdmin;
-
-    if (!hasPermission && targetType === TARGET_TYPES.PERSONAL_ACCOUNT) {
-      // Un utilisateur peut s'assigner un aidant pour son propre compte
-      hasPermission = targetId === userId;
-    }
-
-    if (!hasPermission && targetType === TARGET_TYPES.PATIENT) {
-      // Un utilisateur peut s'assigner un aidant pour ses patients
-      const { data: links, error: linksError } = await supabase
-        .from('patient_family_links')
-        .select('id')
-        .eq('family_id', userId)
-        .eq('patient_id', targetId)
-        .maybeSingle();
-
-      if (!linksError && links) {
-        hasPermission = true;
-      }
-    }
-
-    if (!hasPermission) {
-      return res.status(403).json({
-        success: false,
-        error: 'Non autorisé à effectuer cette assignation',
-      });
-    }
-
-    // ✅ Exécuter l'assignation
-    const result = await assignAidantToTarget({
-      aidantUserId,
-      targetType,
-      targetId,
-      familyId: familyId || null,
-      assignmentType,
-      createdBy: userId,
-      reason: reason || null,
-      expiresAt: expiresAt || null,
-    });
-
-    if (!result.success) {
-      return res.status(400).json({
-        success: false,
-        error: result.error,
-        code: result.code,
-      });
-    }
-
-    console.log('✅ Aidant assigné avec succès:', result);
-
-    res.status(201).json({
-      success: true,
-      message: 'Aidant assigné avec succès',
-      data: result,
-    });
-  } catch (error) {
-    console.error('❌ Erreur assignAidant:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message || 'Erreur lors de l\'assignation',
-    });
-  }
-});
-
-// ============================================================
-// RÉVOQUER UNE ASSIGNATION
-// ============================================================
-const revokeAssignmentController = asyncWrapper(async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { reason } = req.body;
-    const userId = req.user.id;
-    const userRole = req.profile?.role;
-
-    console.log('📤 Révocation assignation:', id);
-
-    // ✅ Vérifier que l'assignation existe et appartient à l'utilisateur
-    const { data: assignment, error: fetchError } = await supabase
-      .from('aidant_assignments')
-      .select('*')
-      .eq('id', id)
-      .single();
-
-    if (fetchError || !assignment) {
-      return res.status(404).json({
-        success: false,
-        error: 'Assignation non trouvée',
-      });
-    }
-
-    // ✅ Vérification des permissions
-    const isAdmin = ['admin', 'coordinator'].includes(userRole);
-    let hasPermission = isAdmin;
-
-    if (!hasPermission) {
-      // L'utilisateur peut révoquer une assignation sur son propre compte
-      if (assignment.target_type === TARGET_TYPES.PERSONAL_ACCOUNT) {
-        hasPermission = assignment.target_id === userId;
-      }
-      // L'utilisateur peut révoquer une assignation sur ses patients
-      if (assignment.target_type === TARGET_TYPES.PATIENT) {
-        const { data: links, error: linksError } = await supabase
-          .from('patient_family_links')
-          .select('id')
-          .eq('family_id', userId)
-          .eq('patient_id', assignment.target_id)
-          .maybeSingle();
-
-        if (!linksError && links) {
-          hasPermission = true;
-        }
-      }
-    }
-
-    if (!hasPermission) {
-      return res.status(403).json({
-        success: false,
-        error: 'Non autorisé à révoquer cette assignation',
-      });
-    }
-
-    const result = await revokeAssignment(id, userId, reason || null);
-
-    if (!result.success) {
-      return res.status(400).json({
-        success: false,
-        error: result.error,
-        code: result.code,
-      });
-    }
-
-    res.json({
-      success: true,
-      message: 'Assignation révoquée avec succès',
-      data: result,
-    });
-  } catch (error) {
-    console.error('❌ Erreur revokeAssignment:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message || 'Erreur lors de la révocation',
-    });
-  }
-});
-
-// ============================================================
-// RÉCUPÉRER LES ASSIGNATIONS D'UN AIDANT
-// ============================================================
-const getAidantAssignments = asyncWrapper(async (req, res) => {
-  try {
-    const { aidantUserId } = req.params;
-    const { status } = req.query;
-    const userId = req.user.id;
-    const userRole = req.profile?.role;
-
-    // ✅ Vérification des permissions
-    const isAdmin = ['admin', 'coordinator'].includes(userRole);
-    const isOwnProfile = aidantUserId === userId;
-
-    if (!isAdmin && !isOwnProfile) {
-      return res.status(403).json({
-        success: false,
-        error: 'Non autorisé à voir ces assignations',
-      });
-    }
-
-    const assignments = await getAssignmentsByAidant(aidantUserId, status || null);
-
-    res.json({
-      success: true,
-      data: assignments,
-      count: assignments.length,
-    });
-  } catch (error) {
-    console.error('❌ Erreur getAidantAssignments:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message || 'Erreur lors de la récupération des assignations',
-    });
-  }
-});
-
-// ============================================================
-// RÉCUPÉRER LES ASSIGNATIONS POUR UNE CIBLE
-// ============================================================
-const getTargetAssignments = asyncWrapper(async (req, res) => {
-  try {
-    const { targetType, targetId } = req.params;
-    const { status } = req.query;
-    const userId = req.user.id;
-    const userRole = req.profile?.role;
-
-    // ✅ Validation
-    if (!Object.values(TARGET_TYPES).includes(targetType)) {
-      return res.status(400).json({
-        success: false,
-        error: 'targetType invalide. Valeurs acceptées: patient, personal_account, family',
-      });
-    }
-
-    // ✅ Vérification des permissions
-    const isAdmin = ['admin', 'coordinator'].includes(userRole);
-    let hasPermission = isAdmin;
-
-    if (!hasPermission && targetType === TARGET_TYPES.PERSONAL_ACCOUNT) {
-      hasPermission = targetId === userId;
-    }
-
-    if (!hasPermission && targetType === TARGET_TYPES.PATIENT) {
-      const { data: links, error: linksError } = await supabase
-        .from('patient_family_links')
-        .select('id')
-        .eq('family_id', userId)
-        .eq('patient_id', targetId)
-        .maybeSingle();
-
-      if (!linksError && links) {
-        hasPermission = true;
-      }
-    }
-
-    if (!hasPermission) {
-      return res.status(403).json({
-        success: false,
-        error: 'Non autorisé à voir ces assignations',
-      });
-    }
-
-    const assignments = await getAssignmentsByTarget(targetType, targetId, status || null);
-
-    res.json({
-      success: true,
-      data: assignments,
-      count: assignments.length,
-    });
-  } catch (error) {
-    console.error('❌ Erreur getTargetAssignments:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message || 'Erreur lors de la récupération des assignations',
-    });
-  }
-});
-
-// ============================================================
-// VÉRIFIER SI UN AIDANT EST ASSIGNÉ À UNE CIBLE
-// ============================================================
-const checkAssignment = asyncWrapper(async (req, res) => {
-  try {
-    const { aidantUserId, targetType, targetId } = req.query;
-
-    if (!aidantUserId || !targetType || !targetId) {
-      return res.status(400).json({
-        success: false,
-        error: 'aidantUserId, targetType et targetId sont requis',
-      });
-    }
-
-    if (!Object.values(TARGET_TYPES).includes(targetType)) {
-      return res.status(400).json({
-        success: false,
-        error: 'targetType invalide. Valeurs acceptées: patient, personal_account, family',
-      });
-    }
-
-    const assignment = await isAidantAssignedToTarget(aidantUserId, targetType, targetId);
-
-    res.json({
-      success: true,
-      data: {
-        is_assigned: !!assignment,
-        assignment: assignment,
-      },
-    });
-  } catch (error) {
-    console.error('❌ Erreur checkAssignment:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message || 'Erreur lors de la vérification',
-    });
-  }
-});
-
-// ============================================================
-// EXPORTS
-// ============================================================
-module.exports = {
   getActiveAidant,
   getAllAidants,
   assignAidant,
@@ -467,4 +12,503 @@ module.exports = {
   getAidantAssignments,
   getTargetAssignments,
   checkAssignment,
-};
+} = require('../controllers/aidantAssignment.controller');
+const { supabase } = require('../services/supabase.service');
+const { mapTargetTypeForResponse } = require('../services/aidantAssignment.service');
+
+// Toutes les routes nécessitent une authentification
+router.use(authMiddleware);
+
+// ============================================================
+// ROUTES PUBLIQUES (pour les utilisateurs authentifiés)
+// ============================================================
+
+// GET /api/assignments/active
+// Récupère l'aidant actif pour une cible
+router.get('/active', getActiveAidant);
+
+// GET /api/assignments/all
+// Récupère tous les aidants pour une cible
+router.get('/all', getAllAidants);
+
+// GET /api/assignments/check
+// Vérifie si un aidant est assigné à une cible
+router.get('/check', checkAssignment);
+
+// ============================================================
+// ✅ ROUTE GET /api/assignments (AJOUTÉE)
+// Récupère toutes les assignations (admin uniquement)
+// ============================================================
+router.get(
+  '/',
+  roleMiddleware(['admin', 'coordinator']),
+  async (req, res) => {
+    try {
+      // ✅ Utiliser la vue pour les relations
+      const { data: assignments, error } = await supabase
+        .from('aidant_assignments_view')
+        .select('*')
+        .eq('status', 'active')
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        console.error('❌ Assignments error:', error);
+        return res.status(500).json({
+          success: false,
+          error: error.message,
+        });
+      }
+
+      // ✅ Formater les données avec mapping des types
+      const formattedAssignments = (assignments || []).map((item) => ({
+        id: item.id,
+        aidant_user_id: item.aidant_user_id,
+        target_type: mapTargetTypeForResponse(item.target_type),
+        target_id: item.target_id,
+        assignment_type: item.assignment_type,
+        status: item.status,
+        priority: item.priority,
+        expires_at: item.expires_at,
+        created_at: item.created_at,
+        updated_at: item.updated_at,
+        created_by: item.created_by,
+        reason: item.reason,
+        aidant: item.aidant_id ? {
+          id: item.aidant_id,
+          full_name: item.aidant_name,
+          email: item.aidant_email,
+          phone: item.aidant_phone,
+          avatar_url: item.aidant_avatar,
+        } : null,
+        target_patient: item.target_type === 'patient' && item.patient_id ? {
+          id: item.patient_id,
+          first_name: item.patient_first_name,
+          last_name: item.patient_last_name,
+          address: item.patient_address,
+          category: item.patient_category,
+        } : null,
+        target_profile: item.target_type !== 'patient' && item.profile_id ? {
+          id: item.profile_id,
+          full_name: item.profile_name,
+          email: item.profile_email,
+          phone: item.profile_phone,
+        } : null,
+      }));
+
+      res.json({
+        success: true,
+        data: formattedAssignments || [],
+        count: formattedAssignments?.length || 0,
+      });
+    } catch (error) {
+      console.error('❌ Erreur getAssignments:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Erreur lors de la récupération des assignations',
+      });
+    }
+  }
+);
+
+// ============================================================
+// ROUTES POUR LES ASSIGNATIONS (CRUD)
+// ============================================================
+
+// POST /api/assignments
+// Crée une nouvelle assignation
+router.post('/', assignAidant);
+
+// DELETE /api/assignments/:id
+// Révoque une assignation
+router.delete('/:id', revokeAssignmentController);
+
+// ============================================================
+// ROUTES POUR RÉCUPÉRER LES ASSIGNATIONS
+// ============================================================
+
+// GET /api/assignments/aidant/:aidantUserId
+// Récupère toutes les assignations d'un aidant
+router.get('/aidant/:aidantUserId', getAidantAssignments);
+
+// GET /api/assignments/target/:targetType/:targetId
+// Récupère toutes les assignations pour une cible
+router.get('/target/:targetType/:targetId', getTargetAssignments);
+
+// ============================================================
+// ROUTES ADMIN (avec vérification de rôle)
+// ============================================================
+
+// GET /api/assignments/admin/all
+// Récupère toutes les assignations (admin uniquement)
+router.get(
+  '/admin/all',
+  roleMiddleware(['admin', 'coordinator']),
+  async (req, res) => {
+    try {
+      // ✅ Utiliser la vue
+      const { data: assignments, error } = await supabase
+        .from('aidant_assignments_view')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        console.error('❌ Erreur getAdminAllAssignments:', error);
+        return res.status(500).json({
+          success: false,
+          error: error.message,
+        });
+      }
+
+      // ✅ Formater les données avec mapping des types
+      const formattedAssignments = (assignments || []).map((item) => ({
+        id: item.id,
+        aidant_user_id: item.aidant_user_id,
+        target_type: mapTargetTypeForResponse(item.target_type),
+        target_id: item.target_id,
+        assignment_type: item.assignment_type,
+        status: item.status,
+        priority: item.priority,
+        expires_at: item.expires_at,
+        created_at: item.created_at,
+        updated_at: item.updated_at,
+        created_by: item.created_by,
+        reason: item.reason,
+        aidant: item.aidant_id ? {
+          id: item.aidant_id,
+          full_name: item.aidant_name,
+          email: item.aidant_email,
+          phone: item.aidant_phone,
+          avatar_url: item.aidant_avatar,
+        } : null,
+        target_patient: item.target_type === 'patient' && item.patient_id ? {
+          id: item.patient_id,
+          first_name: item.patient_first_name,
+          last_name: item.patient_last_name,
+          address: item.patient_address,
+          category: item.patient_category,
+        } : null,
+        target_profile: item.target_type !== 'patient' && item.profile_id ? {
+          id: item.profile_id,
+          full_name: item.profile_name,
+          email: item.profile_email,
+          phone: item.profile_phone,
+        } : null,
+      }));
+
+      res.json({
+        success: true,
+        data: formattedAssignments || [],
+        count: formattedAssignments?.length || 0,
+      });
+    } catch (error) {
+      console.error('❌ Erreur getAdminAllAssignments:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Erreur lors de la récupération des assignations',
+      });
+    }
+  }
+);
+
+// PUT /api/assignments/admin/:id/status
+// Met à jour le statut d'une assignation (admin uniquement)
+router.put(
+  '/admin/:id/status',
+  roleMiddleware(['admin', 'coordinator']),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { status, reason } = req.body;
+
+      if (!status) {
+        return res.status(400).json({
+          success: false,
+          error: 'Le statut est requis',
+        });
+      }
+
+      const validStatuses = ['active', 'inactive', 'expired'];
+      if (!validStatuses.includes(status)) {
+        return res.status(400).json({
+          success: false,
+          error: `Statut invalide. Valeurs acceptées: ${validStatuses.join(', ')}`,
+        });
+      }
+
+      const { data, error } = await supabase
+        .from('aidant_assignments')
+        .update({
+          status,
+          reason: reason || null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', id)
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      // ✅ Formater la réponse avec mapping
+      const formattedData = {
+        ...data,
+        target_type: mapTargetTypeForResponse(data.target_type),
+      };
+
+      res.json({
+        success: true,
+        message: 'Statut mis à jour avec succès',
+        data: formattedData,
+      });
+    } catch (error) {
+      console.error('❌ Erreur updateAssignmentStatus:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Erreur lors de la mise à jour du statut',
+      });
+    }
+  }
+);
+
+// ============================================================
+// ROUTES POUR LES MÉTRIQUES (admin uniquement)
+// ============================================================
+
+// GET /api/assignments/admin/stats
+// Statistiques des assignations (admin uniquement)
+router.get(
+  '/admin/stats',
+  roleMiddleware(['admin', 'coordinator']),
+  async (req, res) => {
+    try {
+      const [
+        { count: total },
+        { count: active },
+        { count: inactive },
+        { count: expired },
+        { count: primary },
+        { count: secondary },
+        { count: temporary },
+      ] = await Promise.all([
+        supabase.from('aidant_assignments').select('*', { count: 'exact', head: true }),
+        supabase.from('aidant_assignments').select('*', { count: 'exact', head: true }).eq('status', 'active'),
+        supabase.from('aidant_assignments').select('*', { count: 'exact', head: true }).eq('status', 'inactive'),
+        supabase.from('aidant_assignments').select('*', { count: 'exact', head: true }).eq('status', 'expired'),
+        supabase.from('aidant_assignments').select('*', { count: 'exact', head: true }).eq('assignment_type', 'primary'),
+        supabase.from('aidant_assignments').select('*', { count: 'exact', head: true }).eq('assignment_type', 'secondary'),
+        supabase.from('aidant_assignments').select('*', { count: 'exact', head: true }).eq('assignment_type', 'temporary'),
+      ]);
+
+      const [
+        { count: patients },
+        { count: personalAccounts },
+        { count: families },
+      ] = await Promise.all([
+        supabase.from('aidant_assignments').select('*', { count: 'exact', head: true }).eq('target_type', 'patient'),
+        supabase.from('aidant_assignments').select('*', { count: 'exact', head: true }).eq('target_type', 'personal_account'),
+        supabase.from('aidant_assignments').select('*', { count: 'exact', head: true }).eq('target_type', 'family'),
+      ]);
+
+      res.json({
+        success: true,
+        data: {
+          total,
+          active,
+          inactive,
+          expired,
+          by_type: {
+            primary,
+            secondary,
+            temporary,
+          },
+          by_target: {
+            patient: patients,
+            personal_account: personalAccounts,
+            family: families,
+          },
+        },
+      });
+    } catch (error) {
+      console.error('❌ Erreur getAssignmentStats:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Erreur lors de la récupération des statistiques',
+      });
+    }
+  }
+);
+
+// ============================================================
+// ROUTES POUR L'ADMIN - ASSIGNATION FORCÉE
+// ============================================================
+
+// POST /api/assignments/admin/force
+// Assignation forcée par un admin (ignore les quotas)
+router.post(
+  '/admin/force',
+  roleMiddleware(['admin', 'coordinator']),
+  async (req, res) => {
+    try {
+      const {
+        aidantUserId,
+        targetType,
+        targetId,
+        familyId,
+        assignmentType = 'primary',
+        reason,
+        expiresAt,
+        force = false,
+      } = req.body;
+
+      // ✅ Validation
+      if (!aidantUserId || !targetType || !targetId) {
+        return res.status(400).json({
+          success: false,
+          error: 'aidantUserId, targetType et targetId sont requis',
+        });
+      }
+
+      // ✅ Vérifier que l'aidant existe
+      const { data: aidant, error: aidantError } = await supabase
+        .from('aidants')
+        .select('id, user_id, is_verified, status')
+        .eq('user_id', aidantUserId)
+        .single();
+
+      if (aidantError || !aidant) {
+        return res.status(404).json({
+          success: false,
+          error: 'Aidant non trouvé',
+        });
+      }
+
+      if (!aidant.is_verified || aidant.status !== 'approved') {
+        return res.status(400).json({
+          success: false,
+          error: 'Cet aidant n\'est pas approuvé',
+        });
+      }
+
+      // ✅ Vérifier que la cible existe
+      let targetExists = false;
+      let targetName = '';
+
+      switch (targetType) {
+        case 'patient':
+          const { data: patient, error: patientError } = await supabase
+            .from('patients')
+            .select('id, first_name, last_name')
+            .eq('id', targetId)
+            .single();
+
+          if (!patientError && patient) {
+            targetExists = true;
+            targetName = `${patient.first_name} ${patient.last_name}`;
+          }
+          break;
+
+        case 'personal_account':
+        case 'family':
+          const { data: profile, error: profileError } = await supabase
+            .from('profiles')
+            .select('id, full_name')
+            .eq('id', targetId)
+            .single();
+
+          if (!profileError && profile) {
+            targetExists = true;
+            targetName = profile.full_name;
+          }
+          break;
+
+        default:
+          return res.status(400).json({
+            success: false,
+            error: 'targetType invalide',
+          });
+      }
+
+      if (!targetExists) {
+        return res.status(404).json({
+          success: false,
+          error: 'Cible non trouvée',
+        });
+      }
+
+      // ✅ Appeler la fonction d'assignation
+      const { assignAidantToTarget } = require('../services/aidantAssignment.service');
+
+      const result = await assignAidantToTarget({
+        aidantUserId,
+        targetType,
+        targetId,
+        familyId: familyId || null,
+        assignmentType,
+        createdBy: req.user.id,
+        reason: reason || `Assignation forcée par admin${force ? ' (forcée)' : ''}`,
+        expiresAt: expiresAt || null,
+      });
+
+      if (!result.success && !force) {
+        return res.status(400).json({
+          success: false,
+          error: result.error,
+          code: result.code,
+        });
+      }
+
+      // Si force = true et l'assignation a échoué à cause du quota
+      if (!result.success && force && result.code === 'AIDANT_FULL') {
+        await supabase
+          .from('aidant_assignments')
+          .update({
+            status: 'inactive',
+            reason: 'Supprimé pour assignation forcée',
+            updated_at: new Date().toISOString(),
+          })
+          .eq('aidant_user_id', aidantUserId)
+          .eq('status', 'active');
+
+        const retryResult = await assignAidantToTarget({
+          aidantUserId,
+          targetType,
+          targetId,
+          familyId: familyId || null,
+          assignmentType,
+          createdBy: req.user.id,
+          reason: reason || `Assignation forcée par admin (quota réinitialisé)`,
+          expiresAt: expiresAt || null,
+        });
+
+        if (!retryResult.success) {
+          return res.status(400).json({
+            success: false,
+            error: retryResult.error,
+            code: retryResult.code,
+          });
+        }
+
+        return res.status(201).json({
+          success: true,
+          message: 'Assignation forcée réussie (quota réinitialisé)',
+          data: retryResult,
+          forced: true,
+        });
+      }
+
+      res.status(201).json({
+        success: true,
+        message: 'Assignation réussie',
+        data: result,
+        forced: force || false,
+      });
+    } catch (error) {
+      console.error('❌ Erreur forceAssignAidant:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Erreur lors de l\'assignation forcée',
+      });
+    }
+  }
+);
+
+module.exports = router;
