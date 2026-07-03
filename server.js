@@ -120,6 +120,21 @@ const adminSetupRoutes = require('./src/routes/adminSetup.routes');
 const settingsRoutes = require('./src/routes/settings.routes');
 const offerRoutes = require('./src/routes/offers.routes');
 const aidantCatalogRoutes = require('./src/routes/aidantCatalog.routes');
+
+
+// ✅ DEBUG
+console.log('📋 === ROUTES D\'ASSIGNATION ===');
+console.log('📋 aidantAssignmentsRoutes:', !!aidantAssignmentsRoutes);
+if (aidantAssignmentsRoutes) {
+  console.log('📋 Type:', typeof aidantAssignmentsRoutes);
+  console.log('📋 Routes disponibles:', aidantAssignmentsRoutes.stack?.map(r => {
+    const path = r.route?.path || r.path || '?';
+    const methods = r.route?.methods ? Object.keys(r.route.methods).join(',') : '?';
+    return `${methods.toUpperCase()} ${path}`;
+  }) || []);
+}
+console.log('📋 ================================');
+
 const aidantAssignmentsRoutes = require('./src/routes/aidantAssignments.routes');  
 
 // =============================================
