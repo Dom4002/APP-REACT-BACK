@@ -80,7 +80,7 @@ app.use(fileUpload({
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100,
+  max: 500, // ← Augmenter de 100 à 500
   message: { error: 'Trop de requêtes, veuillez réessayer plus tard' },
   validate: {
     xForwardedForHeader: false,
