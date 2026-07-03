@@ -47,6 +47,62 @@ const sendEmail = async ({ to, subject, htmlContent, textContent, sender = { nam
 };
 
 // =============================================
+// DÉTECTION DU TYPE DE BRANDING
+// =============================================
+
+const detectBrandingType = (data = {}) => {
+  // ✅ Priorité 1 : Type explicitement passé
+  if (data.type) return data.type;
+  
+  // ✅ Priorité 2 : Catégorie du patient
+  if (data.patient_category === 'maman_bebe') return 'maman';
+  if (data.patient_category === 'senior') return 'senior';
+  
+  // ✅ Priorité 3 : Rôle de l'utilisateur
+  if (data.role === 'aidant') return 'aidant';
+  
+  // ✅ Priorité 4 : Nom du plan
+  if (data.plan_name) {
+    const planName = data.plan_name.toLowerCase();
+    if (planName.includes('maman') || planName.includes('bébé') || planName.includes('bebe')) return 'maman';
+    if (planName.includes('aidant')) return 'aidant';
+  }
+  
+  // ✅ Par défaut
+  return 'general';
+};
+
+const getBrandingColors = (type) => {
+  switch (type) {
+    case 'maman':
+      return {
+        brandColor: '#db4a6d',
+        secondaryColor: '#f5d0d8',
+        accentColor: '#e8436a',
+      };
+    case 'aidant':
+      return {
+        brandColor: '#2c6e5c',
+        secondaryColor: '#b8d5cc',
+        accentColor: '#3a8a72',
+      };
+    case 'coordinator':
+    case 'admin':
+      return {
+        brandColor: '#1a4a3a',
+        secondaryColor: '#c9a84c',
+        accentColor: '#2a6a4a',
+      };
+    default: // general / senior
+      return {
+        brandColor: '#1a4a3a',
+        secondaryColor: '#c9a84c',
+        accentColor: '#2a6a4a',
+      };
+  }
+};
+
+// =============================================
 // GÉNÉRATEUR DE STYLES UNIFORMES
 // =============================================
 
@@ -309,6 +365,8 @@ const generateHeader = (type = 'general', title = '', brandColor = '#1a4a3a') =>
     <div class="header">
       <div class="logo-wrapper">
         <img src="${logoIcon}" alt="Santé Plus" class="logo-icon" />
+        <span class="brand-name">${brandName}</span>
+        <span class="brand-sub">Accompagnement & Coordination</span>
       </div>
       ${title ? `<h1 class="title">${title}</h1>` : ''}
     </div>
@@ -336,7 +394,7 @@ const generateFooter = () => `
 `;
 
 // =============================================
-// TEMPLATES - AVEC URL VERCEL
+// TEMPLATES - AVEC DÉTECTION AUTOMATIQUE
 // =============================================
 
 const templates = {
@@ -344,10 +402,9 @@ const templates = {
   // OTP - Code de vérification
   // =============================================
   otp: (otp, expiresIn = 10, type = 'general') => {
-    const brandColor = type === 'maman' ? '#db4a6d' : type === 'aidant' ? '#2c6e5c' : '#1a4a3a';
-    const secondaryColor = type === 'maman' ? '#f5d0d8' : type === 'aidant' ? '#b8d5cc' : '#c9a84c';
-    const header = generateHeader(type, '🔐 Code de vérification', brandColor);
-    const styles = getEmailStyles(brandColor, secondaryColor);
+    const colors = getBrandingColors(type);
+    const header = generateHeader(type, '🔐 Code de vérification', colors.brandColor);
+    const styles = getEmailStyles(colors.brandColor, colors.secondaryColor);
     
     return {
       subject: '🔐 Code de vérification - Santé Plus Services',
@@ -389,10 +446,9 @@ const templates = {
   // BIENVENUE
   // =============================================
   welcome: (name, type = 'general') => {
-    const brandColor = type === 'maman' ? '#db4a6d' : type === 'aidant' ? '#2c6e5c' : '#1a4a3a';
-    const secondaryColor = type === 'maman' ? '#f5d0d8' : type === 'aidant' ? '#b8d5cc' : '#c9a84c';
-    const header = generateHeader(type, `Bienvenue ${name} 👋`, brandColor);
-    const styles = getEmailStyles(brandColor, secondaryColor);
+    const colors = getBrandingColors(type);
+    const header = generateHeader(type, `Bienvenue ${name} 👋`, colors.brandColor);
+    const styles = getEmailStyles(colors.brandColor, colors.secondaryColor);
     const loginUrl = `${SITE_URL}/login`;
     
     return {
@@ -417,7 +473,7 @@ const templates = {
               <div style="text-align: center; margin: 24px 0;">
                 <a href="${loginUrl}" class="btn-primary">Accéder à mon compte</a>
               </div>
-              <div class="highlight-box" style="background:${brandColor}04;">
+              <div class="highlight-box" style="background:${colors.brandColor}04;">
                 <p style="color: #4b5563; font-size: 14px; margin:0;">
                   💡 <strong>Conseil :</strong> Complétez votre profil pour une meilleure expérience.
                 </p>
@@ -435,10 +491,10 @@ const templates = {
   // AIDANT - APPROUVÉ
   // =============================================
   aidantApproved: (name) => {
-    const brandColor = '#2c6e5c';
-    const secondaryColor = '#b8d5cc';
-    const header = generateHeader('aidant', '✅ Compte approuvé !', brandColor);
-    const styles = getEmailStyles(brandColor, secondaryColor);
+    const type = 'aidant';
+    const colors = getBrandingColors(type);
+    const header = generateHeader(type, '✅ Compte approuvé !', colors.brandColor);
+    const styles = getEmailStyles(colors.brandColor, colors.secondaryColor);
     const loginUrl = `${SITE_URL}/login`;
     
     return {
@@ -461,8 +517,8 @@ const templates = {
                 Nous avons le plaisir de vous annoncer que votre compte aidant a été <strong>approuvé</strong>.
                 Vous pouvez maintenant commencer à accepter des missions.
               </p>
-              <div class="highlight-box" style="border-color:${brandColor};">
-                <p style="font-weight:600; color:${brandColor}; margin-bottom:8px;">🚀 Ce que vous pouvez faire maintenant :</p>
+              <div class="highlight-box" style="border-color:${colors.brandColor};">
+                <p style="font-weight:600; color:${colors.brandColor}; margin-bottom:8px;">🚀 Ce que vous pouvez faire maintenant :</p>
                 <ul class="feature-list">
                   <li>📋 Consulter les missions disponibles</li>
                   <li>✅ Accepter des missions</li>
@@ -486,10 +542,10 @@ const templates = {
   // AIDANT - REFUSÉ
   // =============================================
   aidantRejected: (name) => {
-    const brandColor = '#6b7280';
-    const secondaryColor = '#d1d5db';
-    const header = generateHeader('aidant', 'Candidature - Information', brandColor);
-    const styles = getEmailStyles(brandColor, secondaryColor);
+    const type = 'aidant';
+    const colors = getBrandingColors(type);
+    const header = generateHeader(type, 'Candidature - Information', colors.brandColor);
+    const styles = getEmailStyles(colors.brandColor, colors.secondaryColor);
     
     return {
       subject: 'Candidature Santé Plus - Information',
@@ -526,15 +582,13 @@ const templates = {
   },
 
   // =============================================
-  // MOT DE PASSE OUBLIÉ
+  // MOT DE PASSE OUBLIÉ - AVEC DÉTECTION AUTOMATIQUE
   // =============================================
-  forgotPassword: (name, resetLink, type = 'general') => {
-    const brandColor = type === 'maman' ? '#db4a6d' : type === 'aidant' ? '#2c6e5c' : '#1a4a3a';
-    const secondaryColor = type === 'maman' ? '#f5d0d8' : type === 'aidant' ? '#b8d5cc' : '#c9a84c';
-    const header = generateHeader(type, '🔑 Réinitialisation', brandColor);
-    const styles = getEmailStyles(brandColor, secondaryColor);
-    
-    // ✅ Utiliser le lien de réinitialisation Vercel
+  forgotPassword: (name, resetLink, data = {}) => {
+    const type = detectBrandingType(data);
+    const colors = getBrandingColors(type);
+    const header = generateHeader(type, '🔑 Réinitialisation', colors.brandColor);
+    const styles = getEmailStyles(colors.brandColor, colors.secondaryColor);
     const resetUrl = resetLink || `${SITE_URL}/reset-password`;
     
     return {
@@ -576,13 +630,13 @@ const templates = {
   },
 
   // =============================================
-  // INSCRIPTION VALIDÉE
+  // INSCRIPTION VALIDÉE - AVEC DÉTECTION AUTOMATIQUE
   // =============================================
-  registrationValidated: (data, type = 'general') => {
-    const brandColor = type === 'maman' ? '#db4a6d' : type === 'aidant' ? '#2c6e5c' : '#1a4a3a';
-    const secondaryColor = type === 'maman' ? '#f5d0d8' : type === 'aidant' ? '#b8d5cc' : '#c9a84c';
-    const header = generateHeader(type, '✅ Inscription validée !', brandColor);
-    const styles = getEmailStyles(brandColor, secondaryColor);
+  registrationValidated: (data) => {
+    const type = detectBrandingType(data);
+    const colors = getBrandingColors(type);
+    const header = generateHeader(type, '✅ Inscription validée !', colors.brandColor);
+    const styles = getEmailStyles(colors.brandColor, colors.secondaryColor);
     const loginUrl = `${SITE_URL}/login`;
     
     return {
@@ -618,13 +672,13 @@ const templates = {
   },
 
   // =============================================
-  // RAPPEL DE VISITE
+  // RAPPEL DE VISITE - AVEC DÉTECTION AUTOMATIQUE
   // =============================================
-  visitReminder: (data, type = 'general') => {
-    const brandColor = type === 'maman' ? '#db4a6d' : type === 'aidant' ? '#2c6e5c' : '#1a4a3a';
-    const secondaryColor = type === 'maman' ? '#f5d0d8' : type === 'aidant' ? '#b8d5cc' : '#c9a84c';
-    const header = generateHeader(type, '📅 Rappel de visite', brandColor);
-    const styles = getEmailStyles(brandColor, secondaryColor);
+  visitReminder: (data) => {
+    const type = detectBrandingType(data);
+    const colors = getBrandingColors(type);
+    const header = generateHeader(type, '📅 Rappel de visite', colors.brandColor);
+    const styles = getEmailStyles(colors.brandColor, colors.secondaryColor);
     const visitsUrl = `${SITE_URL}/app/visits`;
     
     return {
@@ -646,7 +700,7 @@ const templates = {
               <p style="color: #4b5563; font-size: 15px; line-height: 1.7; margin-top: 8px;">
                 Une visite est prévue pour <strong>${data.patient_name}</strong> le <strong>${data.date}</strong> à <strong>${data.time}</strong>.
               </p>
-              <div class="highlight-box" style="border-color:${brandColor};">
+              <div class="highlight-box" style="border-color:${colors.brandColor};">
                 <div class="info-grid">
                   <div class="info-item">
                     <div class="label">📍 Adresse</div>
@@ -673,13 +727,13 @@ const templates = {
   },
 
   // =============================================
-  // PAIEMENT CONFIRMÉ
+  // PAIEMENT CONFIRMÉ - AVEC DÉTECTION AUTOMATIQUE
   // =============================================
-  paymentConfirmed: (data, type = 'general') => {
-    const brandColor = type === 'maman' ? '#db4a6d' : type === 'aidant' ? '#2c6e5c' : '#1a4a3a';
-    const secondaryColor = type === 'maman' ? '#f5d0d8' : type === 'aidant' ? '#b8d5cc' : '#c9a84c';
-    const header = generateHeader(type, '✅ Paiement confirmé', brandColor);
-    const styles = getEmailStyles(brandColor, secondaryColor);
+  paymentConfirmed: (data) => {
+    const type = detectBrandingType(data);
+    const colors = getBrandingColors(type);
+    const header = generateHeader(type, '✅ Paiement confirmé', colors.brandColor);
+    const styles = getEmailStyles(colors.brandColor, colors.secondaryColor);
     const billingUrl = `${SITE_URL}/app/billing`;
     
     return {
@@ -717,13 +771,13 @@ const templates = {
   },
 
   // =============================================
-  // ABONNEMENT EXPIRE
+  // ABONNEMENT EXPIRE - AVEC DÉTECTION AUTOMATIQUE
   // =============================================
-  subscriptionExpired: (data, type = 'general') => {
-    const brandColor = type === 'maman' ? '#db4a6d' : type === 'aidant' ? '#2c6e5c' : '#1a4a3a';
-    const secondaryColor = type === 'maman' ? '#f5d0d8' : type === 'aidant' ? '#b8d5cc' : '#c9a84c';
-    const header = generateHeader(type, '⏰ Abonnement bientôt expiré', brandColor);
-    const styles = getEmailStyles(brandColor, secondaryColor);
+  subscriptionExpired: (data) => {
+    const type = detectBrandingType(data);
+    const colors = getBrandingColors(type);
+    const header = generateHeader(type, '⏰ Abonnement bientôt expiré', colors.brandColor);
+    const styles = getEmailStyles(colors.brandColor, colors.secondaryColor);
     const billingUrl = `${SITE_URL}/app/billing`;
     
     return {
@@ -761,13 +815,13 @@ const templates = {
   },
 
   // =============================================
-  // VISITE APPROUVÉE
+  // VISITE APPROUVÉE - AVEC DÉTECTION AUTOMATIQUE
   // =============================================
-  visitApproved: (data, type = 'general') => {
-    const brandColor = type === 'maman' ? '#db4a6d' : type === 'aidant' ? '#2c6e5c' : '#1a4a3a';
-    const secondaryColor = type === 'maman' ? '#f5d0d8' : type === 'aidant' ? '#b8d5cc' : '#c9a84c';
-    const header = generateHeader(type, '✅ Visite acceptée', brandColor);
-    const styles = getEmailStyles(brandColor, secondaryColor);
+  visitApproved: (data) => {
+    const type = detectBrandingType(data);
+    const colors = getBrandingColors(type);
+    const header = generateHeader(type, '✅ Visite acceptée', colors.brandColor);
+    const styles = getEmailStyles(colors.brandColor, colors.secondaryColor);
     const visitsUrl = `${SITE_URL}/app/visits`;
     
     return {
@@ -802,13 +856,13 @@ const templates = {
   },
 
   // =============================================
-  // VISITE REFUSÉE
+  // VISITE REFUSÉE - AVEC DÉTECTION AUTOMATIQUE
   // =============================================
-  visitRefused: (data, type = 'general') => {
-    const brandColor = '#dc2626';
-    const secondaryColor = '#fca5a5';
-    const header = generateHeader(type, '❌ Visite refusée', brandColor);
-    const styles = getEmailStyles(brandColor, secondaryColor);
+  visitRefused: (data) => {
+    const type = detectBrandingType(data);
+    const colors = getBrandingColors(type);
+    const header = generateHeader(type, '❌ Visite refusée', colors.brandColor);
+    const styles = getEmailStyles(colors.brandColor, colors.secondaryColor);
     
     return {
       subject: '❌ Visite refusée',
@@ -845,4 +899,4 @@ const templates = {
   },
 };
 
-module.exports = { sendEmail, templates };
+module.exports = { sendEmail, templates, detectBrandingType, getBrandingColors };
