@@ -338,10 +338,6 @@ router.get(
 );
 
 
-
-// 📁 backend/src/routes/aidantAssignments.routes.js
-
-// ✅ Route pour les familles - Assigner un aidant
 router.post('/family/assign', authMiddleware, async (req, res) => {
   try {
     const { aidantUserId, targetType, targetId, assignmentType, patientId } = req.body;
