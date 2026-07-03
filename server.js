@@ -151,8 +151,8 @@ app.use('/api/offers', offerRoutes);
 app.use('/api/aidants', aidantCatalogRoutes);
 app.use('/api/assignments', aidantAssignmentsRoutes);  // ← Routeur
 
-// ✅ AJOUTER LA ROUTE DIRECTE ICI (APRÈS le routeur)
-// Pour GET /api/assignments - admin seulement
+ 
+
 app.get('/api/assignments', authMiddleware, async (req, res) => {
   try {
     const userRole = req.profile?.role;
@@ -164,31 +164,10 @@ app.get('/api/assignments', authMiddleware, async (req, res) => {
       });
     }
 
+    // ✅ Utiliser la vue avec toutes les relations
     const { data: assignments, error } = await supabase
-      .from('aidant_assignments')
-      .select(`
-        *,
-        aidant:profiles!aidant_user_id(
-          id,
-          full_name,
-          email,
-          phone,
-          avatar_url
-        ),
-        target_patient:patients!target_id(
-          id,
-          first_name,
-          last_name,
-          address,
-          category
-        ),
-        target_profile:profiles!target_id(
-          id,
-          full_name,
-          email,
-          phone
-        )
-      `)
+      .from('aidant_assignments_view')
+      .select('*')
       .eq('status', 'active')
       .order('created_at', { ascending: false });
 
@@ -200,10 +179,46 @@ app.get('/api/assignments', authMiddleware, async (req, res) => {
       });
     }
 
+    // ✅ Formater les données
+    const formattedAssignments = (assignments || []).map((item) => ({
+      id: item.id,
+      aidant_user_id: item.aidant_user_id,
+      target_type: item.target_type,
+      target_id: item.target_id,
+      assignment_type: item.assignment_type,
+      status: item.status,
+      priority: item.priority,
+      expires_at: item.expires_at,
+      created_at: item.created_at,
+      updated_at: item.updated_at,
+      created_by: item.created_by,
+      reason: item.reason,
+      aidant: item.aidant_id ? {
+        id: item.aidant_id,
+        full_name: item.aidant_name,
+        email: item.aidant_email,
+        phone: item.aidant_phone,
+        avatar_url: item.aidant_avatar,
+      } : null,
+      target_patient: item.target_type === 'patient' && item.patient_id ? {
+        id: item.patient_id,
+        first_name: item.patient_first_name,
+        last_name: item.patient_last_name,
+        address: item.patient_address,
+        category: item.patient_category,
+      } : null,
+      target_profile: item.target_type !== 'patient' && item.profile_id ? {
+        id: item.profile_id,
+        full_name: item.profile_name,
+        email: item.profile_email,
+        phone: item.profile_phone,
+      } : null,
+    }));
+
     res.json({
       success: true,
-      data: assignments || [],
-      count: assignments?.length || 0,
+      data: formattedAssignments || [],
+      count: formattedAssignments?.length || 0,
     });
   } catch (error) {
     console.error('❌ Get assignments error:', error);
@@ -213,6 +228,7 @@ app.get('/api/assignments', authMiddleware, async (req, res) => {
     });
   }
 });
+
 
 // =============================================
 // ✅ REDIRECTION FEDAPAY
