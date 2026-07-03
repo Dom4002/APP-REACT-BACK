@@ -337,6 +337,103 @@ router.get(
   }
 );
 
+
+
+// 📁 backend/src/routes/aidantAssignments.routes.js
+
+// ✅ Route pour les familles - Assigner un aidant
+router.post('/family/assign', authMiddleware, async (req, res) => {
+  try {
+    const { aidantUserId, targetType, targetId, assignmentType, patientId } = req.body;
+    const userId = req.user.id;
+    const userRole = req.profile?.role;
+
+    // ✅ Vérifier que l'utilisateur est une famille
+    if (userRole !== 'family') {
+      return res.status(403).json({
+        success: false,
+        error: 'Seules les familles peuvent effectuer cette action'
+      });
+    }
+
+    // ✅ Déterminer la cible
+    let finalTargetType = targetType || 'personal_account';
+    let finalTargetId = targetId || userId;
+    let finalFamilyId = userId;
+
+    // ✅ Si c'est pour un patient, vérifier que le patient appartient à la famille
+    if (targetType === 'patient' && patientId) {
+      const { data: link, error: linkError } = await supabase
+        .from('patient_family_links')
+        .select('id')
+        .eq('family_id', userId)
+        .eq('patient_id', patientId)
+        .maybeSingle();
+
+      if (linkError || !link) {
+        return res.status(403).json({
+          success: false,
+          error: 'Ce patient ne vous appartient pas'
+        });
+      }
+      finalTargetId = patientId;
+    }
+
+    // ✅ Vérifier que l'aidant existe et est disponible
+    const { data: aidant, error: aidantError } = await supabase
+      .from('aidants')
+      .select('id, user_id, is_verified, status, available')
+      .eq('id', aidantUserId)
+      .single();
+
+    if (aidantError || !aidant) {
+      return res.status(404).json({
+        success: false,
+        error: 'Aidant non trouvé'
+      });
+    }
+
+    if (!aidant.is_verified || aidant.status !== 'approved') {
+      return res.status(400).json({
+        success: false,
+        error: 'Cet aidant n\'est pas disponible'
+      });
+    }
+
+    // ✅ Appeler la fonction d'assignation
+    const result = await assignAidantToTarget({
+      aidantUserId: aidant.user_id,
+      targetType: finalTargetType,
+      targetId: finalTargetId,
+      familyId: finalFamilyId,
+      assignmentType: assignmentType || 'primary',
+      createdBy: userId,
+      reason: `Assigné par la famille ${userId}`,
+      expiresAt: null,
+    });
+
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        error: result.error,
+        code: result.code,
+      });
+    }
+
+    res.status(201).json({
+      success: true,
+      message: 'Aidant assigné avec succès',
+      data: result,
+    });
+  } catch (error) {
+    console.error('❌ Family assign error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erreur lors de l\'assignation'
+    });
+  }
+});
+
 // ============================================================
 // ROUTES POUR L'ADMIN - ASSIGNATION FORCÉE
 // ============================================================
