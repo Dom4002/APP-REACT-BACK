@@ -10,7 +10,7 @@ const { supabase } = require('./supabase.service');
 const TARGET_TYPES = {
   PATIENT: 'patient',
   PERSONAL_ACCOUNT: 'personal_account',
-  PERSONAL: 'personal',            
+  PERSONAL: 'personal',           // ✅ Alias pour compatibilité frontend
   FAMILY: 'family',
 };
 
@@ -50,9 +50,9 @@ const ASSIGNMENT_STATUS = {
 };
 
 const PRIORITY = {
-  PATIENT: 1,
-  PERSONAL_ACCOUNT: 2,
-  FAMILY: 3,
+  PATIENT: 1,           // ✅ Priorité la plus haute
+  PERSONAL_ACCOUNT: 2,  // ✅ Priorité intermédiaire (fallback)
+  FAMILY: 3,            // ✅ Priorité la plus basse (dernier fallback)
 };
 
 // ============================================================
@@ -93,11 +93,12 @@ const getActiveAidantForTarget = async (targetType, targetId, familyId = null) =
 
 /**
  * Récupère tous les aidants pour une cible (principal + secondaires)
+ * Inclut les aidants du compte et de la famille en fallback
  * 
  * @param {string} targetType - 'patient' | 'personal_account' | 'family'
  * @param {string} targetId - UUID de la cible
  * @param {string} familyId - UUID de la famille (optionnel)
- * @returns {Promise<Array>} - Liste des aidants
+ * @returns {Promise<Array>} - Liste des aidants avec leur priorité
  */
 const getAllAidantsForTarget = async (targetType, targetId, familyId = null) => {
   try {
@@ -115,7 +116,10 @@ const getAllAidantsForTarget = async (targetType, targetId, familyId = null) => 
       return [];
     }
 
-    return data || [];
+    // ✅ Trier par priorité (1 = plus haute)
+    const sortedData = (data || []).sort((a, b) => (a.priority || 99) - (b.priority || 99));
+    
+    return sortedData;
   } catch (error) {
     console.error('❌ getAllAidantsForTarget error:', error);
     return [];
@@ -241,13 +245,22 @@ const assignAidantToTarget = async ({
       };
     }
 
-    // 4. Appeler la fonction SQL
+    // 4. Déterminer la priorité selon le type de cible
+    let priority = PRIORITY.PATIENT;
+    if (dbTargetType === TARGET_TYPES.PERSONAL_ACCOUNT) {
+      priority = PRIORITY.PERSONAL_ACCOUNT;
+    } else if (dbTargetType === TARGET_TYPES.FAMILY) {
+      priority = PRIORITY.FAMILY;
+    }
+
+    // 5. Appeler la fonction SQL
     const { data: assignmentId, error: assignError } = await supabase.rpc('assign_aidant_to_target', {
       p_aidant_user_id: aidantUserId,
       p_target_type: dbTargetType,
       p_target_id: targetId,
       p_family_id: familyId,
       p_assignment_type: assignmentType,
+      p_priority: priority,
       p_created_by: createdBy,
       p_reason: reason,
       p_expires_at: expiresAt,
@@ -262,7 +275,7 @@ const assignAidantToTarget = async ({
       };
     }
 
-    // 5. Récupérer l'assignation créée
+    // 6. Récupérer l'assignation créée
     const { data: assignment, error: fetchError } = await supabase
       .from('aidant_assignments')
       .select(`
@@ -284,7 +297,7 @@ const assignAidantToTarget = async ({
       console.error('❌ Erreur récupération assignation:', fetchError);
     }
 
-    // 6. Mettre à jour current_assignments de l'aidant
+    // 7. Mettre à jour current_assignments de l'aidant
     await supabase
       .from('aidants')
       .update({
@@ -294,7 +307,7 @@ const assignAidantToTarget = async ({
       })
       .eq('id', aidant.id);
 
-    // 7. Créer les notifications
+    // 8. Créer les notifications
     await createAssignmentNotifications({
       assignmentId,
       aidantUserId,
@@ -303,6 +316,7 @@ const assignAidantToTarget = async ({
       targetName,
       assignmentType,
       createdBy,
+      priority,
     });
 
     return {
@@ -310,6 +324,7 @@ const assignAidantToTarget = async ({
       assignment: assignment || { id: assignmentId },
       target_type: mapTargetTypeForResponse(dbTargetType), // ✅ Réponse en 'personal'
       target_name: targetName,
+      priority: priority,
     };
   } catch (error) {
     console.error('❌ assignAidantToTarget error:', error);
@@ -463,7 +478,7 @@ const getAssignmentsByAidant = async (aidantUserId, status = null) => {
       query = query.eq('status', status);
     }
 
-    const { data, error } = await query;
+    const { data, error } = await query.order('priority', { ascending: true });
     if (error) throw error;
 
     // ✅ Transformer les données pour le frontend
@@ -509,7 +524,7 @@ const getAssignmentsByTarget = async (targetType, targetId, status = null) => {
       query = query.eq('status', status);
     }
 
-    const { data, error } = await query;
+    const { data, error } = await query.order('priority', { ascending: true });
     if (error) throw error;
 
     // ✅ Transformer les données pour le frontend
@@ -576,19 +591,23 @@ const createAssignmentNotifications = async ({
   targetName,
   assignmentType,
   createdBy,
+  priority,
 }) => {
   try {
+    const priorityLabel = priority === 1 ? 'prioritaire' : priority === 2 ? 'standard' : 'fallback';
+    
     // 1. Notification à l'aidant
     await supabase.from('notifications').insert({
       user_id: aidantUserId,
       title: '📋 Nouvelle assignation',
-      body: `Vous avez été assigné à ${targetName} (${assignmentType})`,
+      body: `Vous avez été assigné à ${targetName} (${assignmentType}) - ${priorityLabel}`,
       type: 'system',
       data: {
         assignment_id: assignmentId,
         target_type: targetType,
         target_id: targetId,
         assignment_type: assignmentType,
+        priority: priority,
       },
     });
 
@@ -617,7 +636,7 @@ const createAssignmentNotifications = async ({
       await supabase.from('notifications').insert({
         user_id: ownerId,
         title: '✅ Aidant assigné',
-        body: `Un aidant a été assigné à ${targetName}`,
+        body: `Un aidant a été assigné à ${targetName} (${assignmentType})`,
         type: 'system',
         data: {
           assignment_id: assignmentId,
@@ -625,6 +644,7 @@ const createAssignmentNotifications = async ({
           target_type: targetType,
           target_id: targetId,
           assignment_type: assignmentType,
+          priority: priority,
         },
       });
     }
@@ -639,13 +659,14 @@ const createAssignmentNotifications = async ({
       const adminNotifications = admins.map((admin) => ({
         user_id: admin.id,
         title: '📋 Nouvelle assignation créée',
-        body: `Un aidant a été assigné à ${targetName} par ${createdBy || 'le système'}`,
+        body: `Un aidant a été assigné à ${targetName} par ${createdBy || 'le système'} (${priorityLabel})`,
         type: 'alert',
         data: {
           assignment_id: assignmentId,
           aidant_user_id: aidantUserId,
           target_type: targetType,
           target_id: targetId,
+          priority: priority,
         },
       }));
 
