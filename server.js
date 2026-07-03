@@ -24,10 +24,8 @@ const fs = require('fs');
 // ✅ SERVIR LES FICHIERS STATIQUES (LOGOS)
 // =============================================
 
-// 1. Servir tout le dossier assets
 app.use('/assets', express.static(path.join(__dirname, 'src/assets')));
 
-// 2. Route spécifique pour les logos
 app.get('/logos/:filename', (req, res) => {
   const filename = req.params.filename;
   const filePath = path.join(__dirname, 'src/assets/emails', filename);
@@ -69,14 +67,12 @@ app.use(cors({
   credentials: true,
 }));
 
-// ⚠️ IMPORTANT : Webhook FedaPay DOIT être AVANT express.json()
 app.use('/api/billing/webhook', express.raw({ type: 'application/json' }));
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('dev'));
 
-// ✅ File upload pour les messages
 app.use(fileUpload({
   limits: { fileSize: 5 * 1024 * 1024 },
   abortOnLimit: true,
@@ -100,13 +96,13 @@ const authMiddleware = require('./src/middleware/auth.middleware');
 const roleMiddleware = require('./src/middleware/role.middleware');
 
 // =============================================
-// ✅ ROUTES - UNE SEULE FOIS CHAQUE
+// ✅ ROUTES
 // =============================================
 const authRoutes = require('./src/routes/auth.routes');
 const patientRoutes = require('./src/routes/patient.routes');
 const visitRoutes = require('./src/routes/visit.routes');
 const orderRoutes = require('./src/routes/order.routes');
-const messageRoutes = require('./src/routes/message.routes'); // ✅ CONSERVÉ
+const messageRoutes = require('./src/routes/message.routes');
 const paymentRoutes = require('./src/routes/payment.routes');
 const adminRoutes = require('./src/routes/admin.routes');
 const notificationRoutes = require('./src/routes/notification.routes');
@@ -118,7 +114,6 @@ const adminSetupRoutes = require('./src/routes/adminSetup.routes');
 const settingsRoutes = require('./src/routes/settings.routes');
 const offerRoutes = require('./src/routes/offers.routes');
 
-// ✅ UNE SEULE DÉCLARATION POUR CHAQUE ROUTE
 const aidantCatalogRoutes = require('./src/routes/aidantCatalog.routes');
 const aidantAssignmentsRoutes = require('./src/routes/aidantAssignments.routes');
 
@@ -154,9 +149,8 @@ app.use('/api/admin-setup', adminSetupRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/offers', offerRoutes);
 app.use('/api/aidants', aidantCatalogRoutes);
-app.use('/api/assignments', aidantAssignmentsRoutes);
+app.use('/api/assignments', aidantAssignmentsRoutes); // ✅ UNIQUE DÉFINITION
 
- 
 // =============================================
 // ✅ REDIRECTION FEDAPAY
 // =============================================
