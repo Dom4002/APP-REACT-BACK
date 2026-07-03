@@ -13,6 +13,8 @@ const {
   getTargetAssignments,
   checkAssignment,
 } = require('../controllers/aidantAssignment.controller');
+const { supabase } = require('../services/supabase.service');
+const { mapTargetTypeForResponse } = require('../services/aidantAssignment.service');
 
 // Toutes les routes nécessitent une authentification
 router.use(authMiddleware);
@@ -42,8 +44,6 @@ router.get(
   roleMiddleware(['admin', 'coordinator']),
   async (req, res) => {
     try {
-      const { supabase } = require('../services/supabase.service');
-      
       // ✅ Utiliser la vue pour les relations
       const { data: assignments, error } = await supabase
         .from('aidant_assignments_view')
@@ -59,11 +59,11 @@ router.get(
         });
       }
 
-      // ✅ Formater les données
+      // ✅ Formater les données avec mapping des types
       const formattedAssignments = (assignments || []).map((item) => ({
         id: item.id,
         aidant_user_id: item.aidant_user_id,
-        target_type: item.target_type,
+        target_type: mapTargetTypeForResponse(item.target_type),
         target_id: item.target_id,
         assignment_type: item.assignment_type,
         status: item.status,
@@ -140,14 +140,11 @@ router.get('/target/:targetType/:targetId', getTargetAssignments);
 
 // GET /api/assignments/admin/all
 // Récupère toutes les assignations (admin uniquement)
-// ✅ Version améliorée avec la vue
 router.get(
   '/admin/all',
   roleMiddleware(['admin', 'coordinator']),
   async (req, res) => {
     try {
-      const { supabase } = require('../services/supabase.service');
-      
       // ✅ Utiliser la vue
       const { data: assignments, error } = await supabase
         .from('aidant_assignments_view')
@@ -162,11 +159,11 @@ router.get(
         });
       }
 
-      // ✅ Formater les données
+      // ✅ Formater les données avec mapping des types
       const formattedAssignments = (assignments || []).map((item) => ({
         id: item.id,
         aidant_user_id: item.aidant_user_id,
-        target_type: item.target_type,
+        target_type: mapTargetTypeForResponse(item.target_type),
         target_id: item.target_id,
         assignment_type: item.assignment_type,
         status: item.status,
@@ -222,7 +219,6 @@ router.put(
     try {
       const { id } = req.params;
       const { status, reason } = req.body;
-      const { supabase } = require('../services/supabase.service');
 
       if (!status) {
         return res.status(400).json({
@@ -252,10 +248,16 @@ router.put(
 
       if (error) throw error;
 
+      // ✅ Formater la réponse avec mapping
+      const formattedData = {
+        ...data,
+        target_type: mapTargetTypeForResponse(data.target_type),
+      };
+
       res.json({
         success: true,
         message: 'Statut mis à jour avec succès',
-        data,
+        data: formattedData,
       });
     } catch (error) {
       console.error('❌ Erreur updateAssignmentStatus:', error);
@@ -278,8 +280,6 @@ router.get(
   roleMiddleware(['admin', 'coordinator']),
   async (req, res) => {
     try {
-      const { supabase } = require('../services/supabase.service');
-
       const [
         { count: total },
         { count: active },
@@ -358,8 +358,6 @@ router.post(
         expiresAt,
         force = false,
       } = req.body;
-
-      const { supabase } = require('../services/supabase.service');
 
       // ✅ Validation
       if (!aidantUserId || !targetType || !targetId) {
