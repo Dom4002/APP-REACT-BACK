@@ -365,8 +365,6 @@ const generateHeader = (type = 'general', title = '', brandColor = '#1a4a3a') =>
     <div class="header">
       <div class="logo-wrapper">
         <img src="${logoIcon}" alt="Santé Plus" class="logo-icon" />
-        <span class="brand-name">${brandName}</span>
-        <span class="brand-sub">Accompagnement & Coordination</span>
       </div>
       ${title ? `<h1 class="title">${title}</h1>` : ''}
     </div>
