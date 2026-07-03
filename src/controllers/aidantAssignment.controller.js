@@ -1,5 +1,7 @@
 // 📁 backend/src/controllers/aidantAssignment.controller.js
 
+const { supabase } = require('../services/supabase.service');
+
 const {
   getActiveAidantForTarget,
   getAllAidantsForTarget,
