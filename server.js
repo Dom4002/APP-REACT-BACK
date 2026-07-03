@@ -117,14 +117,46 @@ const offerRoutes = require('./src/routes/offers.routes');
 const aidantCatalogRoutes = require('./src/routes/aidantCatalog.routes');
 const aidantAssignmentsRoutes = require('./src/routes/aidantAssignments.routes');
 
- 
+// ✅ DEBUG
+console.log('📋 === ROUTES D\'ASSIGNATION ===');
+console.log('📋 aidantAssignmentsRoutes:', !!aidantAssignmentsRoutes);
+if (aidantAssignmentsRoutes) {
+  console.log('📋 Type:', typeof aidantAssignmentsRoutes);
+  console.log('📋 Routes disponibles:', aidantAssignmentsRoutes.stack?.map(r => {
+    const routePath = r.route?.path || r.path || '?';
+    const methods = r.route?.methods ? Object.keys(r.route.methods).join(',') : '?';
+    return `${methods.toUpperCase()} ${routePath}`;
+  }) || []);
+}
+console.log('📋 ================================');
 
-// ✅ Si le routeur ne fonctionne pas, ajouter cette route directe
+// =============================================
+// ✅ APPLICATION DES ROUTES
+// =============================================
+app.use('/api/auth', authRoutes);
+app.use('/api/patients', patientRoutes);
+app.use('/api/visits', visitRoutes);
+app.use('/api/orders', orderRoutes);
+app.use('/api/messages', messageRoutes); 
+app.use('/api/payments', paymentRoutes);
+app.use('/api/admin', adminRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/billing', billingRoutes);
+app.use('/api/reminders', reminderRoutes);
+app.use('/api/assessment', assessmentRoutes);
+app.use('/api/contract', contractRoutes);
+app.use('/api/admin-setup', adminSetupRoutes);
+app.use('/api/settings', settingsRoutes);
+app.use('/api/offers', offerRoutes);
+app.use('/api/aidants', aidantCatalogRoutes);
+app.use('/api/assignments', aidantAssignmentsRoutes);  // ← Routeur
+
+// ✅ AJOUTER LA ROUTE DIRECTE ICI (APRÈS le routeur)
+// Pour GET /api/assignments - admin seulement
 app.get('/api/assignments', authMiddleware, async (req, res) => {
   try {
     const userRole = req.profile?.role;
 
-    // Seuls les admins peuvent voir toutes les assignations
     if (!['admin', 'coordinator'].includes(userRole)) {
       return res.status(403).json({
         success: false,
@@ -181,41 +213,6 @@ app.get('/api/assignments', authMiddleware, async (req, res) => {
     });
   }
 });
-
-
-// ✅ DEBUG
-console.log('📋 === ROUTES D\'ASSIGNATION ===');
-console.log('📋 aidantAssignmentsRoutes:', !!aidantAssignmentsRoutes);
-if (aidantAssignmentsRoutes) {
-  console.log('📋 Type:', typeof aidantAssignmentsRoutes);
-  console.log('📋 Routes disponibles:', aidantAssignmentsRoutes.stack?.map(r => {
-    const routePath = r.route?.path || r.path || '?';
-    const methods = r.route?.methods ? Object.keys(r.route.methods).join(',') : '?';
-    return `${methods.toUpperCase()} ${routePath}`;
-  }) || []);
-}
-console.log('📋 ================================');
-
-// =============================================
-// ✅ APPLICATION DES ROUTES
-// =============================================
-app.use('/api/auth', authRoutes);
-app.use('/api/patients', patientRoutes);
-app.use('/api/visits', visitRoutes);
-app.use('/api/orders', orderRoutes);
-app.use('/api/messages', messageRoutes); 
-app.use('/api/payments', paymentRoutes);
-app.use('/api/admin', adminRoutes);
-app.use('/api/notifications', notificationRoutes);
-app.use('/api/billing', billingRoutes);
-app.use('/api/reminders', reminderRoutes);
-app.use('/api/assessment', assessmentRoutes);
-app.use('/api/contract', contractRoutes);
-app.use('/api/admin-setup', adminSetupRoutes);
-app.use('/api/settings', settingsRoutes);
-app.use('/api/offers', offerRoutes);
-app.use('/api/aidants', aidantCatalogRoutes);
-app.use('/api/assignments', aidantAssignmentsRoutes);  
 
 // =============================================
 // ✅ REDIRECTION FEDAPAY
