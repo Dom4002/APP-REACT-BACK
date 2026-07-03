@@ -4,13 +4,37 @@
 const { supabase } = require('./supabase.service');
 
 // ============================================================
-// CONSTANTES
+// CONSTANTES - AVEC MAPPING POUR COMPATIBILITÉ FRONTEND
 // ============================================================
 
 const TARGET_TYPES = {
   PATIENT: 'patient',
   PERSONAL_ACCOUNT: 'personal_account',
+  PERSONAL: 'personal',            
   FAMILY: 'family',
+};
+
+// ✅ Mapping pour normaliser les types venant du frontend
+const mapTargetType = (type) => {
+  if (!type) return type;
+  const normalized = type.toLowerCase();
+  
+  // 🔄 Normaliser 'personal' → 'personal_account'
+  if (normalized === 'personal') return TARGET_TYPES.PERSONAL_ACCOUNT;
+  if (normalized === 'personal_account') return TARGET_TYPES.PERSONAL_ACCOUNT;
+  if (normalized === 'patient') return TARGET_TYPES.PATIENT;
+  if (normalized === 'family') return TARGET_TYPES.FAMILY;
+  
+  return type;
+};
+
+// ✅ Mapping inverse pour les réponses (si le frontend attend 'personal')
+const mapTargetTypeForResponse = (type) => {
+  if (!type) return type;
+  if (type === TARGET_TYPES.PERSONAL_ACCOUNT) return 'personal';
+  if (type === TARGET_TYPES.PATIENT) return 'patient';
+  if (type === TARGET_TYPES.FAMILY) return 'family';
+  return type;
 };
 
 const ASSIGNMENT_TYPES = {
@@ -46,8 +70,11 @@ const PRIORITY = {
  */
 const getActiveAidantForTarget = async (targetType, targetId, familyId = null) => {
   try {
+    // ✅ Normaliser le type pour la base de données
+    const dbTargetType = mapTargetType(targetType);
+    
     const { data, error } = await supabase.rpc('get_active_aidant_for_target', {
-      p_target_type: targetType,
+      p_target_type: dbTargetType,
       p_target_id: targetId,
       p_family_id: familyId,
     });
@@ -74,8 +101,11 @@ const getActiveAidantForTarget = async (targetType, targetId, familyId = null) =
  */
 const getAllAidantsForTarget = async (targetType, targetId, familyId = null) => {
   try {
+    // ✅ Normaliser le type pour la base de données
+    const dbTargetType = mapTargetType(targetType);
+    
     const { data, error } = await supabase.rpc('get_all_aidants_for_target', {
-      p_target_type: targetType,
+      p_target_type: dbTargetType,
       p_target_id: targetId,
       p_family_id: familyId,
     });
@@ -117,10 +147,13 @@ const assignAidantToTarget = async ({
   expiresAt = null,
 }) => {
   try {
+    // ✅ Normaliser le type pour la base de données
+    const dbTargetType = mapTargetType(targetType);
+    
     // 1. Vérifier que l'aidant existe et est disponible
     const { data: aidant, error: aidantError } = await supabase
       .from('aidants')
-      .select('id, user_id, is_verified, status, available')
+      .select('id, user_id, is_verified, status, available, max_assignments')
       .eq('user_id', aidantUserId)
       .single();
 
@@ -164,7 +197,7 @@ const assignAidantToTarget = async ({
     let targetExists = false;
     let targetName = '';
 
-    switch (targetType) {
+    switch (dbTargetType) {
       case TARGET_TYPES.PATIENT:
         const { data: patient, error: patientError } = await supabase
           .from('patients')
@@ -211,7 +244,7 @@ const assignAidantToTarget = async ({
     // 4. Appeler la fonction SQL
     const { data: assignmentId, error: assignError } = await supabase.rpc('assign_aidant_to_target', {
       p_aidant_user_id: aidantUserId,
-      p_target_type: targetType,
+      p_target_type: dbTargetType,
       p_target_id: targetId,
       p_family_id: familyId,
       p_assignment_type: assignmentType,
@@ -265,7 +298,7 @@ const assignAidantToTarget = async ({
     await createAssignmentNotifications({
       assignmentId,
       aidantUserId,
-      targetType,
+      targetType: dbTargetType,
       targetId,
       targetName,
       assignmentType,
@@ -275,7 +308,7 @@ const assignAidantToTarget = async ({
     return {
       success: true,
       assignment: assignment || { id: assignmentId },
-      target_type: targetType,
+      target_type: mapTargetTypeForResponse(dbTargetType), // ✅ Réponse en 'personal'
       target_name: targetName,
     };
   } catch (error) {
@@ -433,7 +466,13 @@ const getAssignmentsByAidant = async (aidantUserId, status = null) => {
     const { data, error } = await query;
     if (error) throw error;
 
-    return data || [];
+    // ✅ Transformer les données pour le frontend
+    const formattedData = (data || []).map(item => ({
+      ...item,
+      target_type: mapTargetTypeForResponse(item.target_type),
+    }));
+
+    return formattedData || [];
   } catch (error) {
     console.error('❌ getAssignmentsByAidant error:', error);
     return [];
@@ -450,6 +489,9 @@ const getAssignmentsByAidant = async (aidantUserId, status = null) => {
  */
 const getAssignmentsByTarget = async (targetType, targetId, status = null) => {
   try {
+    // ✅ Normaliser le type pour la base de données
+    const dbTargetType = mapTargetType(targetType);
+    
     let query = supabase
       .from('aidant_assignments')
       .select(`
@@ -460,7 +502,7 @@ const getAssignmentsByTarget = async (targetType, targetId, status = null) => {
           email
         )
       `)
-      .eq('target_type', targetType)
+      .eq('target_type', dbTargetType)
       .eq('target_id', targetId);
 
     if (status) {
@@ -470,7 +512,13 @@ const getAssignmentsByTarget = async (targetType, targetId, status = null) => {
     const { data, error } = await query;
     if (error) throw error;
 
-    return data || [];
+    // ✅ Transformer les données pour le frontend
+    const formattedData = (data || []).map(item => ({
+      ...item,
+      target_type: mapTargetTypeForResponse(item.target_type),
+    }));
+
+    return formattedData || [];
   } catch (error) {
     console.error('❌ getAssignmentsByTarget error:', error);
     return [];
@@ -487,16 +535,25 @@ const getAssignmentsByTarget = async (targetType, targetId, status = null) => {
  */
 const isAidantAssignedToTarget = async (aidantUserId, targetType, targetId) => {
   try {
+    // ✅ Normaliser le type pour la base de données
+    const dbTargetType = mapTargetType(targetType);
+    
     const { data, error } = await supabase
       .from('aidant_assignments')
       .select('*')
       .eq('aidant_user_id', aidantUserId)
-      .eq('target_type', targetType)
+      .eq('target_type', dbTargetType)
       .eq('target_id', targetId)
       .eq('status', ASSIGNMENT_STATUS.ACTIVE)
       .maybeSingle();
 
     if (error) throw error;
+    
+    // ✅ Transformer pour le frontend
+    if (data) {
+      data.target_type = mapTargetTypeForResponse(data.target_type);
+    }
+    
     return data;
   } catch (error) {
     console.error('❌ isAidantAssignedToTarget error:', error);
@@ -609,6 +666,10 @@ module.exports = {
   ASSIGNMENT_TYPES,
   ASSIGNMENT_STATUS,
   PRIORITY,
+
+  // Fonctions de mapping
+  mapTargetType,
+  mapTargetTypeForResponse,
 
   // Fonctions principales
   getActiveAidantForTarget,
