@@ -12,7 +12,7 @@ const {
   isAidantAssignedToTarget,
   TARGET_TYPES,
   ASSIGNMENT_TYPES,
-  mapTargetTypeForResponse,   
+  mapTargetTypeForResponse,
 } = require('../services/aidantAssignment.service');
 const { asyncWrapper } = require('../utils/errorHandler');
 
@@ -39,6 +39,66 @@ const getActiveAidant = asyncWrapper(async (req, res) => {
       });
     }
 
+    // ✅ VÉRIFICATION DES PERMISSIONS
+    const userId = req.user.id;
+    const userRole = req.profile?.role;
+
+    let hasPermission = false;
+
+    // Admin/Coordinator ont tout accès
+    if (['admin', 'coordinator'].includes(userRole)) {
+      hasPermission = true;
+    }
+    // ✅ Une famille peut accéder à ses assignations personnelles
+    else if (userRole === 'family') {
+      // ✅ Cas 1 : Assignation personnelle (compte personnel)
+      if ((targetType === 'personal' || targetType === 'personal_account') && targetId === userId) {
+        hasPermission = true;
+      }
+      // ✅ Cas 2 : Patient - vérifier le lien
+      else if (targetType === 'patient') {
+        const { data: link, error: linkError } = await supabase
+          .from('patient_family_links')
+          .select('id')
+          .eq('family_id', userId)
+          .eq('patient_id', targetId)
+          .maybeSingle();
+
+        if (!linkError && link) {
+          hasPermission = true;
+        }
+      }
+      // ✅ Cas 3 : Famille - si targetId correspond à userId
+      else if (targetType === 'family' && targetId === userId) {
+        hasPermission = true;
+      }
+    }
+    // ✅ Un aidant ne peut voir que ses propres patients
+    else if (userRole === 'aidant') {
+      // Vérifier via les assignations
+      const { data: assignment, error: assignError } = await supabase
+        .from('aidant_assignments')
+        .select('id')
+        .eq('aidant_user_id', userId)
+        .eq('target_type', targetType)
+        .eq('target_id', targetId)
+        .eq('status', 'active')
+        .maybeSingle();
+
+      if (!assignError && assignment) {
+        hasPermission = true;
+      }
+    }
+
+    if (!hasPermission) {
+      return res.status(403).json({
+        success: false,
+        error: 'Accès non autorisé à cette cible',
+        code: 'ACCESS_DENIED',
+      });
+    }
+
+    // ✅ Récupérer l'aidant actif
     const aidantId = await getActiveAidantForTarget(targetType, targetId, familyId || null);
 
     let aidant = null;
@@ -59,7 +119,7 @@ const getActiveAidant = asyncWrapper(async (req, res) => {
       data: {
         aidant_id: aidantId,
         aidant: aidant,
-        target_type: mapTargetTypeForResponse(targetType),  // ✅ Normaliser la réponse
+        target_type: mapTargetTypeForResponse(targetType),
         target_id: targetId,
       },
     });
@@ -94,6 +154,66 @@ const getAllAidants = asyncWrapper(async (req, res) => {
       });
     }
 
+    // ✅ VÉRIFICATION DES PERMISSIONS
+    const userId = req.user.id;
+    const userRole = req.profile?.role;
+
+    let hasPermission = false;
+
+    // Admin/Coordinator ont tout accès
+    if (['admin', 'coordinator'].includes(userRole)) {
+      hasPermission = true;
+    }
+    // ✅ Une famille peut accéder à ses assignations personnelles
+    else if (userRole === 'family') {
+      // ✅ Cas 1 : Assignation personnelle (compte personnel)
+      if ((targetType === 'personal' || targetType === 'personal_account') && targetId === userId) {
+        hasPermission = true;
+      }
+      // ✅ Cas 2 : Patient - vérifier le lien
+      else if (targetType === 'patient') {
+        const { data: link, error: linkError } = await supabase
+          .from('patient_family_links')
+          .select('id')
+          .eq('family_id', userId)
+          .eq('patient_id', targetId)
+          .maybeSingle();
+
+        if (!linkError && link) {
+          hasPermission = true;
+        }
+      }
+      // ✅ Cas 3 : Famille - si targetId correspond à userId
+      else if (targetType === 'family' && targetId === userId) {
+        hasPermission = true;
+      }
+    }
+    // ✅ Un aidant ne peut voir que ses propres patients
+    else if (userRole === 'aidant') {
+      // Vérifier via les assignations
+      const { data: assignment, error: assignError } = await supabase
+        .from('aidant_assignments')
+        .select('id')
+        .eq('aidant_user_id', userId)
+        .eq('target_type', targetType)
+        .eq('target_id', targetId)
+        .eq('status', 'active')
+        .maybeSingle();
+
+      if (!assignError && assignment) {
+        hasPermission = true;
+      }
+    }
+
+    if (!hasPermission) {
+      return res.status(403).json({
+        success: false,
+        error: 'Accès non autorisé à cette cible',
+        code: 'ACCESS_DENIED',
+      });
+    }
+
+    // ✅ Récupérer les aidants
     const aidants = await getAllAidantsForTarget(targetType, targetId, familyId || null);
 
     const aidantIds = aidants.map(a => a.aidant_user_id).filter(Boolean);
@@ -115,7 +235,7 @@ const getAllAidants = asyncWrapper(async (req, res) => {
 
     const aidantsWithProfiles = aidants.map(a => ({
       ...a,
-      target_type: mapTargetTypeForResponse(a.target_type),  // ✅ Normaliser
+      target_type: mapTargetTypeForResponse(a.target_type),
       profile: profilesMap[a.aidant_user_id] || null,
     }));
 
@@ -173,6 +293,7 @@ const assignAidant = asyncWrapper(async (req, res) => {
       });
     }
 
+    // ✅ VÉRIFICATION DES PERMISSIONS
     const isAdmin = ['admin', 'coordinator'].includes(userRole);
     let hasPermission = isAdmin;
 
@@ -197,9 +318,11 @@ const assignAidant = asyncWrapper(async (req, res) => {
       return res.status(403).json({
         success: false,
         error: 'Non autorisé à effectuer cette assignation',
+        code: 'ACCESS_DENIED',
       });
     }
 
+    // ✅ Créer l'assignation
     const result = await assignAidantToTarget({
       aidantUserId,
       targetType,
@@ -257,9 +380,11 @@ const revokeAssignmentController = asyncWrapper(async (req, res) => {
       return res.status(404).json({
         success: false,
         error: 'Assignation non trouvée',
+        code: 'NOT_FOUND',
       });
     }
 
+    // ✅ VÉRIFICATION DES PERMISSIONS
     const isAdmin = ['admin', 'coordinator'].includes(userRole);
     let hasPermission = isAdmin;
 
@@ -285,6 +410,7 @@ const revokeAssignmentController = asyncWrapper(async (req, res) => {
       return res.status(403).json({
         success: false,
         error: 'Non autorisé à révoquer cette assignation',
+        code: 'ACCESS_DENIED',
       });
     }
 
@@ -332,6 +458,7 @@ const getAidantAssignments = asyncWrapper(async (req, res) => {
       return res.status(403).json({
         success: false,
         error: 'Non autorisé à voir ces assignations',
+        code: 'ACCESS_DENIED',
       });
     }
 
@@ -369,6 +496,7 @@ const getTargetAssignments = asyncWrapper(async (req, res) => {
       });
     }
 
+    // ✅ VÉRIFICATION DES PERMISSIONS
     const isAdmin = ['admin', 'coordinator'].includes(userRole);
     let hasPermission = isAdmin;
 
@@ -393,6 +521,7 @@ const getTargetAssignments = asyncWrapper(async (req, res) => {
       return res.status(403).json({
         success: false,
         error: 'Non autorisé à voir ces assignations',
+        code: 'ACCESS_DENIED',
       });
     }
 
