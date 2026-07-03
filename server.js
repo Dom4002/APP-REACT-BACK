@@ -13,8 +13,6 @@ const { createClient } = require('@supabase/supabase-js');
 const { errorHandler, notFoundHandler } = require('./src/utils/errorHandler');
 const { logRequest } = require('./src/config/logger');
 const { setupSwagger } = require('./src/config/swagger');
-const aidantCatalogRoutes = require('./src/routes/aidantCatalog.routes');
-const aidantAssignmentsRoutes = require('./src/routes/aidantAssignments.routes'); // ✅ AJOUTÉ
 const fileUpload = require('express-fileupload');
 
 const app = express();
@@ -102,7 +100,7 @@ const authMiddleware = require('./src/middleware/auth.middleware');
 const roleMiddleware = require('./src/middleware/role.middleware');
 
 // =============================================
-// ROUTES
+// ✅ ROUTES - UNE SEULE FOIS CHAQUE
 // =============================================
 const authRoutes = require('./src/routes/auth.routes');
 const patientRoutes = require('./src/routes/patient.routes');
@@ -119,8 +117,10 @@ const contractRoutes = require('./src/routes/contract.routes');
 const adminSetupRoutes = require('./src/routes/adminSetup.routes');
 const settingsRoutes = require('./src/routes/settings.routes');
 const offerRoutes = require('./src/routes/offers.routes');
-const aidantCatalogRoutes = require('./src/routes/aidantCatalog.routes');
 
+// ✅ UNE SEULE DÉCLARATION POUR CHAQUE ROUTE
+const aidantCatalogRoutes = require('./src/routes/aidantCatalog.routes');
+const aidantAssignmentsRoutes = require('./src/routes/aidantAssignments.routes');
 
 // ✅ DEBUG
 console.log('📋 === ROUTES D\'ASSIGNATION ===');
@@ -128,14 +128,12 @@ console.log('📋 aidantAssignmentsRoutes:', !!aidantAssignmentsRoutes);
 if (aidantAssignmentsRoutes) {
   console.log('📋 Type:', typeof aidantAssignmentsRoutes);
   console.log('📋 Routes disponibles:', aidantAssignmentsRoutes.stack?.map(r => {
-    const path = r.route?.path || r.path || '?';
+    const routePath = r.route?.path || r.path || '?';
     const methods = r.route?.methods ? Object.keys(r.route.methods).join(',') : '?';
-    return `${methods.toUpperCase()} ${path}`;
+    return `${methods.toUpperCase()} ${routePath}`;
   }) || []);
 }
 console.log('📋 ================================');
-
-const aidantAssignmentsRoutes = require('./src/routes/aidantAssignments.routes');  
 
 // =============================================
 // ✅ APPLICATION DES ROUTES
@@ -156,7 +154,7 @@ app.use('/api/admin-setup', adminSetupRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/offers', offerRoutes);
 app.use('/api/aidants', aidantCatalogRoutes);
-app.use('/api/assignments', aidantAssignmentsRoutes); 
+app.use('/api/assignments', aidantAssignmentsRoutes);
 
 // ============================================================
 // MESSAGES - CONVERSATIONS (ROUTES AJOUTÉES DIRECTEMENT)
