@@ -93,7 +93,7 @@ const getEmailStyles = (brandColor = '#1a4a3a', secondaryColor = '#c9a84c') => `
   }
   
   .logo-icon {
-    max-height: 56px;
+    max-height: 100px;
     width: auto;
     display: block;
   }
@@ -263,7 +263,7 @@ const getEmailStyles = (brandColor = '#1a4a3a', secondaryColor = '#c9a84c') => `
     }
     
     .logo-icon {
-      max-height: 44px;
+      max-height: 80px;
     }
     
     .brand-name {
@@ -309,8 +309,7 @@ const generateHeader = (type = 'general', title = '', brandColor = '#1a4a3a') =>
     <div class="header">
       <div class="logo-wrapper">
         <img src="${logoIcon}" alt="Santé Plus" class="logo-icon" />
-        <span class="brand-name">${brandName}</span>
-       </div>
+      </div>
       ${title ? `<h1 class="title">${title}</h1>` : ''}
     </div>
   `;
