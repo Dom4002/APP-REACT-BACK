@@ -34,6 +34,83 @@ router.get('/all', getAllAidants);
 router.get('/check', checkAssignment);
 
 // ============================================================
+// ✅ ROUTE GET /api/assignments (AJOUTÉE)
+// Récupère toutes les assignations (admin uniquement)
+// ============================================================
+router.get(
+  '/',
+  roleMiddleware(['admin', 'coordinator']),
+  async (req, res) => {
+    try {
+      const { supabase } = require('../services/supabase.service');
+      
+      // ✅ Utiliser la vue pour les relations
+      const { data: assignments, error } = await supabase
+        .from('aidant_assignments_view')
+        .select('*')
+        .eq('status', 'active')
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        console.error('❌ Assignments error:', error);
+        return res.status(500).json({
+          success: false,
+          error: error.message,
+        });
+      }
+
+      // ✅ Formater les données
+      const formattedAssignments = (assignments || []).map((item) => ({
+        id: item.id,
+        aidant_user_id: item.aidant_user_id,
+        target_type: item.target_type,
+        target_id: item.target_id,
+        assignment_type: item.assignment_type,
+        status: item.status,
+        priority: item.priority,
+        expires_at: item.expires_at,
+        created_at: item.created_at,
+        updated_at: item.updated_at,
+        created_by: item.created_by,
+        reason: item.reason,
+        aidant: item.aidant_id ? {
+          id: item.aidant_id,
+          full_name: item.aidant_name,
+          email: item.aidant_email,
+          phone: item.aidant_phone,
+          avatar_url: item.aidant_avatar,
+        } : null,
+        target_patient: item.target_type === 'patient' && item.patient_id ? {
+          id: item.patient_id,
+          first_name: item.patient_first_name,
+          last_name: item.patient_last_name,
+          address: item.patient_address,
+          category: item.patient_category,
+        } : null,
+        target_profile: item.target_type !== 'patient' && item.profile_id ? {
+          id: item.profile_id,
+          full_name: item.profile_name,
+          email: item.profile_email,
+          phone: item.profile_phone,
+        } : null,
+      }));
+
+      res.json({
+        success: true,
+        data: formattedAssignments || [],
+        count: formattedAssignments?.length || 0,
+      });
+    } catch (error) {
+      console.error('❌ Erreur getAssignments:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Erreur lors de la récupération des assignations',
+      });
+    }
+  }
+);
+
+// ============================================================
 // ROUTES POUR LES ASSIGNATIONS (CRUD)
 // ============================================================
 
@@ -63,6 +140,7 @@ router.get('/target/:targetType/:targetId', getTargetAssignments);
 
 // GET /api/assignments/admin/all
 // Récupère toutes les assignations (admin uniquement)
+// ✅ Version améliorée avec la vue
 router.get(
   '/admin/all',
   roleMiddleware(['admin', 'coordinator']),
@@ -70,34 +148,60 @@ router.get(
     try {
       const { supabase } = require('../services/supabase.service');
       
-      const { data, error } = await supabase
-        .from('aidant_assignments')
-        .select(`
-          *,
-          aidant:profiles!aidant_user_id(
-            id,
-            full_name,
-            email
-          ),
-          target_patient:patients!target_id(
-            id,
-            first_name,
-            last_name
-          ),
-          target_profile:profiles!target_id(
-            id,
-            full_name,
-            email
-          )
-        `)
+      // ✅ Utiliser la vue
+      const { data: assignments, error } = await supabase
+        .from('aidant_assignments_view')
+        .select('*')
         .order('created_at', { ascending: false });
 
-      if (error) throw error;
+      if (error) {
+        console.error('❌ Erreur getAdminAllAssignments:', error);
+        return res.status(500).json({
+          success: false,
+          error: error.message,
+        });
+      }
+
+      // ✅ Formater les données
+      const formattedAssignments = (assignments || []).map((item) => ({
+        id: item.id,
+        aidant_user_id: item.aidant_user_id,
+        target_type: item.target_type,
+        target_id: item.target_id,
+        assignment_type: item.assignment_type,
+        status: item.status,
+        priority: item.priority,
+        expires_at: item.expires_at,
+        created_at: item.created_at,
+        updated_at: item.updated_at,
+        created_by: item.created_by,
+        reason: item.reason,
+        aidant: item.aidant_id ? {
+          id: item.aidant_id,
+          full_name: item.aidant_name,
+          email: item.aidant_email,
+          phone: item.aidant_phone,
+          avatar_url: item.aidant_avatar,
+        } : null,
+        target_patient: item.target_type === 'patient' && item.patient_id ? {
+          id: item.patient_id,
+          first_name: item.patient_first_name,
+          last_name: item.patient_last_name,
+          address: item.patient_address,
+          category: item.patient_category,
+        } : null,
+        target_profile: item.target_type !== 'patient' && item.profile_id ? {
+          id: item.profile_id,
+          full_name: item.profile_name,
+          email: item.profile_email,
+          phone: item.profile_phone,
+        } : null,
+      }));
 
       res.json({
         success: true,
-        data: data || [],
-        count: data?.length || 0,
+        data: formattedAssignments || [],
+        count: formattedAssignments?.length || 0,
       });
     } catch (error) {
       console.error('❌ Erreur getAdminAllAssignments:', error);
@@ -194,7 +298,6 @@ router.get(
         supabase.from('aidant_assignments').select('*', { count: 'exact', head: true }).eq('assignment_type', 'temporary'),
       ]);
 
-      // Répartition par target_type
       const [
         { count: patients },
         { count: personalAccounts },
@@ -336,8 +439,6 @@ router.post(
       // ✅ Appeler la fonction d'assignation
       const { assignAidantToTarget } = require('../services/aidantAssignment.service');
 
-      // Si force = true, on ignore le quota
-      // On le fait en passant directement par la fonction SQL
       const result = await assignAidantToTarget({
         aidantUserId,
         targetType,
@@ -357,9 +458,8 @@ router.post(
         });
       }
 
-      // Si force = true et l'assignation a échoué à cause du quota, on la force
+      // Si force = true et l'assignation a échoué à cause du quota
       if (!result.success && force && result.code === 'AIDANT_FULL') {
-        // Supprimer les anciennes assignations pour libérer de la place
         await supabase
           .from('aidant_assignments')
           .update({
@@ -370,7 +470,6 @@ router.post(
           .eq('aidant_user_id', aidantUserId)
           .eq('status', 'active');
 
-        // Réessayer l'assignation
         const retryResult = await assignAidantToTarget({
           aidantUserId,
           targetType,
