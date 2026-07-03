@@ -1,4 +1,5 @@
 // 📁 backend/src/controllers/aidantCatalog.controller.js
+const { supabase } = require('../services/supabase.service');
 
 const {
   getAvailableAidants,
