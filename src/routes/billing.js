@@ -93,7 +93,7 @@ function isValidUUID(uuid) {
 }
 
 // ============================================================
-// ✅ CRÉER UN ABONNEMENT EN ATTENTE - SANS PATIENT OBLIGATOIRE
+// ✅ CRÉER UN ABONNEMENT EN ATTENTE
 // ============================================================
 async function createPendingSubscription(userId, offerId, offer, patientId = null) {
   try {
@@ -136,8 +136,12 @@ async function createPendingSubscription(userId, offerId, offer, patientId = nul
       updated_at: new Date().toISOString(),
     };
 
+    // ✅ NE PAS ajouter patient_id s'il est null
     if (patientId) {
       subscriptionData.patient_id = patientId;
+      console.log('✅ patient_id ajouté:', patientId);
+    } else {
+      console.log('ℹ️ patient_id null - abonnement personnel');
     }
 
     const { data: subscription, error } = await supabase
@@ -148,26 +152,6 @@ async function createPendingSubscription(userId, offerId, offer, patientId = nul
 
     if (error) {
       console.error('❌ Erreur création abonnement:', error.message);
-      
-      if (error.code === '23502' && error.message.includes('patient_id')) {
-        console.log('⚠️ patient_id null non accepté, tentative sans patient...');
-        delete subscriptionData.patient_id;
-        
-        const { data: retrySubscription, error: retryError } = await supabase
-          .from('abonnements')
-          .insert(subscriptionData)
-          .select()
-          .single();
-
-        if (retryError) {
-          console.error('❌ Erreur création abonnement (sans patient):', retryError.message);
-          return null;
-        }
-
-        console.log('✅ Abonnement créé (en attente, sans patient):', retrySubscription.id);
-        return retrySubscription;
-      }
-
       return null;
     }
 
@@ -281,7 +265,6 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
   try {
     console.log('🔄 Traitement d\'une visite ponctuelle:', visitId);
 
-    // ✅ Récupérer la visite
     const { data: visit, error: visitError } = await supabase
       .from('visites')
       .select('*')
@@ -293,13 +276,11 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
       return null;
     }
 
-    // ✅ Vérifier que la visite est en brouillon
     if (visit.status !== 'brouillon') {
       console.log(`ℹ️ La visite ${visitId} n'est pas en brouillon (status: ${visit.status})`);
       return null;
     }
 
-    // ✅ Passer la visite de brouillon à planifiee
     const { data: updatedVisit, error: updateError } = await supabase
       .from('visites')
       .update({
@@ -325,7 +306,6 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
 
     console.log('✅ Visite passée de brouillon à planifiee:', visitId);
 
-    // ✅ Notifier l'aidant assigné
     if (updatedVisit.aidant_id) {
       await supabase.from('notifications').insert({
         user_id: updatedVisit.aidant_id,
@@ -336,7 +316,6 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
       });
     }
 
-    // ✅ Notification à la famille
     const targetDisplay = updatedVisit.target_name || (updatedVisit.patient ? `${updatedVisit.patient.first_name} ${updatedVisit.patient.last_name}` : 'Personnel');
 
     await supabase.from('notifications').insert({
@@ -347,7 +326,6 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
       data: { visit_id: visitId, status: 'planifiee' },
     });
 
-    // ✅ Mettre à jour le paiement avec la référence de la visite
     await supabase
       .from('paiements')
       .update({
@@ -483,8 +461,8 @@ router.post('/generate-payment', async (req, res) => {
       patient_id = null,
       target_type = 'personal',
       target_name = null,
-      visit_id = null,              // ✅ NOUVEAU - pour les visites
-      is_visit = false,             // ✅ NOUVEAU - pour les visites
+      visit_id = null,
+      is_visit = false,
     } = req.body;
 
     console.log('📥 is_ponctual reçu du frontend:', is_ponctual);
@@ -579,9 +557,9 @@ router.post('/generate-payment', async (req, res) => {
       is_visit: is_visit || false,
       visit_id: visit_id || null,
       abonnement_id: actualAbonnementId || null,
+      patient_id: patient_id || null,
     });
 
-    // ✅ Métadonnées avec toutes les informations
     const metadata = {
       user_id: user.id,
       plan_id: plan_id || null,
@@ -593,7 +571,6 @@ router.post('/generate-payment', async (req, res) => {
       patient_id: patient_id || null,
       target_type: target_type || 'personal',
       target_name: target_name || finalName,
-      // ✅ NOUVEAU - pour les visites
       is_visit: is_visit || false,
       visit_id: visit_id || null,
       type: is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription'),
@@ -658,7 +635,6 @@ router.post('/generate-payment', async (req, res) => {
         patient_id: patient_id || null,
         target_type: target_type || 'personal',
         target_name: target_name || finalName,
-        // ✅ NOUVEAU - pour les visites
         is_visit: is_visit || false,
         visit_id: visit_id || null,
         type: is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription'),
@@ -673,6 +649,7 @@ router.post('/generate-payment', async (req, res) => {
       is_visit: is_visit,
       visit_id: visit_id,
       abonnement_id: actualAbonnementId || null,
+      patient_id: patient_id || null,
     });
 
     const { data: payment, error: dbError } = await supabase
@@ -860,8 +837,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     const isPonctual = metadata.is_ponctual === true || metadata.is_ponctual === 'true';
     const subscriptionId = metadata.abonnement_id || null;
     const orderData = metadata.order_data || null;
-
-    // ✅ NOUVEAU - Vérifier si c'est une visite
     const isVisit = metadata.is_visit === true || metadata.type === 'visit';
     const visitId = metadata.visit_id || null;
 
@@ -873,7 +848,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       hasOrderData: !!orderData,
     });
 
-    // ✅ Mettre à jour le paiement
     const { data: updatedPayment, error: updateError } = await supabase
       .from('paiements')
       .update({
@@ -892,7 +866,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     const paymentRecord = updatedPayment || payment;
     let result = null;
 
-    // ✅ TRAITEMENT PRIORITAIRE : VISITE PONCTUELLE
     if (isVisit && visitId) {
       console.log('🔄 Traitement d\'une visite ponctuelle:', visitId);
       result = await processPonctualVisit(paymentRecord, transactionId, visitId, metadata);
@@ -903,7 +876,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         console.warn('⚠️ La visite ponctuelle n\'a pas pu être traitée, mais le paiement est validé');
       }
 
-    // ✅ TRAITEMENT : COMMANDE PONCTUELLE
     } else if (isPonctual) {
       console.log('📦 Traitement commande ponctuelle...');
       result = await createPonctualOrder(paymentRecord, transactionId, orderData);
@@ -914,7 +886,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         console.warn('⚠️ La commande ponctuelle n\'a pas pu être créée, mais le paiement est validé');
       }
 
-    // ✅ TRAITEMENT : ABONNEMENT
     } else if (subscriptionId) {
       console.log('📦 Activation de l\'abonnement:', subscriptionId);
       result = await activateSubscription(paymentRecord, subscriptionId);
@@ -928,7 +899,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       console.warn('⚠️ Aucun traitement spécifique trouvé pour ce paiement');
     }
 
-    // ✅ Notification de confirmation de paiement
     try {
       let notificationTitle = '✅ Paiement confirmé';
       let notificationBody = `Votre paiement de ${paymentRecord.amount} FCFA a été confirmé.`;
