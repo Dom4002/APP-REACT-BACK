@@ -837,12 +837,21 @@ router.post('/reset-password', async (req, res) => {
 // =============================================
 // UTILISATEUR ACTUEL
 // =============================================
+ 
 router.get('/me', authMiddleware, async (req, res) => {
   try {
-    res.json({ 
+    if (!req.profile) {
+      return res.status(403).json({
+        success: false,
+        error: 'Profil utilisateur introuvable',
+        code: 'PROFILE_MISSING',
+      });
+    }
+
+    res.json({
       success: true,
-      user: req.user, 
-      profile: req.profile 
+      user: req.user,
+      profile: req.profile,
     });
   } catch (error) {
     console.error('❌ Get me error:', error);
