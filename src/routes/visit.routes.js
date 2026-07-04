@@ -141,13 +141,13 @@ router.get('/:id', async (req, res) => {
     const { id } = req.params;
     const { user, profile } = req;
 
-    // ✅ Récupérer la visite AVEC les relations
-    const { data, error } = await supabase
+    // ✅ Récupérer la visite avec les relations
+    const { data: visit, error } = await supabase
       .from('visites')
       .select(`
         *,
         patient:patients(*),
-        aidant:aidants(
+        aidant:aidants!visites_aidant_id_fkey (
           id,
           user_id,
           specialties,
@@ -156,8 +156,7 @@ router.get('/:id', async (req, res) => {
           total_missions,
           completed_missions,
           cancelled_missions,
-          is_verified,
-          user:profiles!aidants_user_id_fkey(
+          user:profiles!aidants_user_id_fkey (
             id,
             full_name,
             email,
@@ -178,31 +177,31 @@ router.get('/:id', async (req, res) => {
       throw error;
     }
 
-    // ✅ Vérifier les permissions
+    // ✅ Vérifier l'accès
     let hasAccess = false;
     if (['admin', 'coordinator'].includes(profile.role)) {
       hasAccess = true;
     } else if (profile.role === 'family') {
-      if (data.user_id === user.id) {
+      if (visit.user_id === user.id) {
         hasAccess = true;
-      } else if (data.patient_id) {
+      } else if (visit.patient_id) {
         const { data: links } = await supabase
           .from('patient_family_links')
           .select('patient_id')
           .eq('family_id', user.id)
-          .eq('patient_id', data.patient_id);
+          .eq('patient_id', visit.patient_id);
         hasAccess = links && links.length > 0;
       }
     } else if (profile.role === 'aidant') {
-      // ✅ Récupérer l'aidant correspondant à l'utilisateur
-      const { data: aidant, error: aidantError } = await supabase
+      // ✅ Vérifier si l'aidant est assigné à cette visite
+      const { data: aidant } = await supabase
         .from('aidants')
         .select('id')
         .eq('user_id', user.id)
         .single();
 
-      if (!aidantError && aidant) {
-        hasAccess = data.aidant_id === aidant.id;
+      if (aidant) {
+        hasAccess = visit.aidant_id === aidant.id;
       }
     }
 
@@ -210,9 +209,9 @@ router.get('/:id', async (req, res) => {
       return res.status(403).json({ error: 'Accès non autorisé' });
     }
 
-    res.json(data);
+    res.json(visit);
   } catch (error) {
-    console.error('❌ Get visit detail error:', error);
+    console.error('Get visit detail error:', error);
     res.status(500).json({ error: error.message });
   }
 });
