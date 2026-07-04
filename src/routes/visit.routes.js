@@ -45,6 +45,35 @@ const getAidantIdFromUserId = async (userId) => {
 };
 
 // =============================================
+// ✅ RÉCUPÉRER L'AIDANT_ID DEPUIS UN USER_ID (AVEC CONVERSION)
+// =============================================
+const getAidantIdFromUserIdOrId = async (userIdOrId) => {
+  // 1. Vérifier si c'est déjà un aidant_id
+  const { data: aidantById, error: errorById } = await supabase
+    .from('aidants')
+    .select('id')
+    .eq('id', userIdOrId)
+    .maybeSingle();
+
+  if (!errorById && aidantById) {
+    return aidantById.id;
+  }
+
+  // 2. Vérifier si c'est un user_id
+  const { data: aidantByUser, error: errorByUser } = await supabase
+    .from('aidants')
+    .select('id')
+    .eq('user_id', userIdOrId)
+    .maybeSingle();
+
+  if (!errorByUser && aidantByUser) {
+    return aidantByUser.id;
+  }
+
+  return null;
+};
+
+// =============================================
 // ✅ RÉCUPÉRER LES COMPTES DISPONIBLES POUR L'ADMIN
 // =============================================
 router.get('/accounts', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
@@ -133,16 +162,15 @@ router.get('/', async (req, res) => {
 });
 
 // =============================================
-// DÉTAILS D'UNE VISITE
+// DÉTAILS D'UNE VISITE - AVEC CONVERSION USER_ID → AIDANT_ID
 // =============================================
- 
 router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { user, profile } = req;
 
     // ✅ Récupérer la visite avec les relations
-       const { data: visit, error } = await supabase
+    const { data: visit, error } = await supabase
       .from('visites')
       .select(`
         *,
@@ -194,14 +222,9 @@ router.get('/:id', async (req, res) => {
       }
     } else if (profile.role === 'aidant') {
       // ✅ Vérifier si l'aidant est assigné à cette visite
-      const { data: aidant } = await supabase
-        .from('aidants')
-        .select('id')
-        .eq('user_id', user.id)
-        .single();
-
-      if (aidant) {
-        hasAccess = visit.aidant_id === aidant.id;
+      const aidantId = await getAidantIdFromUserId(user.id);
+      if (aidantId) {
+        hasAccess = visit.aidant_id === aidantId;
       }
     }
 
@@ -395,21 +418,38 @@ router.post('/', async (req, res) => {
       }
     }
 
-    // ✅ DÉTERMINER L'AIDANT À ASSIGNER
+    // ✅ DÉTERMINER L'AIDANT À ASSIGNER - AVEC CONVERSION
     let finalAidantId = aidant_id || null;
 
+    // Si un aidant_id est fourni, vérifier s'il s'agit d'un user_id ou aidant_id
+    if (finalAidantId) {
+      const convertedId = await getAidantIdFromUserIdOrId(finalAidantId);
+      if (convertedId) {
+        finalAidantId = convertedId;
+        console.log(`🔄 Aidant fourni converti: ${aidant_id} → ${finalAidantId}`);
+      }
+    }
+
+    // Si pas d'aidant fourni et pas de paiement requis, chercher automatiquement
     if (!finalAidantId && status !== 'brouillon') {
       const targetTypeForAidant = finalPatientId ? 'patient' : 'personal_account';
       const targetIdForAidant = finalPatientId || finalUserId;
       
-      finalAidantId = await getActiveAidantForTarget(
+      let foundId = await getActiveAidantForTarget(
         targetTypeForAidant,
         targetIdForAidant,
         familyId
       );
 
-      if (finalAidantId) {
-        console.log(`✅ Aidant automatique trouvé pour la visite: ${finalAidantId}`);
+      // ✅ Vérifier que le résultat est un aidant_id (pas un user_id)
+      if (foundId) {
+        const convertedId = await getAidantIdFromUserIdOrId(foundId);
+        if (convertedId) {
+          finalAidantId = convertedId;
+          console.log(`✅ Aidant automatique trouvé pour la visite: ${finalAidantId}`);
+        } else {
+          console.log(`⚠️ L'aidant trouvé ${foundId} n'est pas valide`);
+        }
       } else {
         console.log(`ℹ️ Aucun aidant actif trouvé pour la cible ${targetTypeForAidant}/${targetIdForAidant}`);
       }
@@ -596,9 +636,27 @@ router.post('/:id/confirm-payment', async (req, res) => {
     const targetId = visit.patient_id || visit.user_id;
 
     let aidantId = visit.aidant_id || null;
+
+    // Si un aidant est déjà assigné, vérifier que c'est un aidant_id valide
+    if (aidantId) {
+      const convertedId = await getAidantIdFromUserIdOrId(aidantId);
+      if (convertedId) {
+        aidantId = convertedId;
+      } else {
+        aidantId = null;
+      }
+    }
+
+    // Si pas d'aidant, chercher automatiquement
     if (!aidantId) {
-      aidantId = await getActiveAidantForTarget(targetType, targetId, familyId);
-      console.log(`✅ Aidant trouvé après paiement: ${aidantId}`);
+      let foundId = await getActiveAidantForTarget(targetType, targetId, familyId);
+      if (foundId) {
+        const convertedId = await getAidantIdFromUserIdOrId(foundId);
+        if (convertedId) {
+          aidantId = convertedId;
+          console.log(`✅ Aidant trouvé après paiement: ${aidantId}`);
+        }
+      }
     }
 
     const { data: updatedVisit, error: updateError } = await supabase
@@ -723,7 +781,7 @@ router.get('/drafts/my', async (req, res) => {
 });
 
 // =============================================
-// ✅ APPROUVER UNE VISITE (CORRIGÉ)
+// ✅ APPROUVER UNE VISITE
 // =============================================
 router.post('/:id/approve', async (req, res) => {
   try {
@@ -803,7 +861,7 @@ router.post('/:id/approve', async (req, res) => {
 });
 
 // =============================================
-// ✅ REFUSER UNE VISITE (CORRIGÉ)
+// ✅ REFUSER UNE VISITE
 // =============================================
 router.post('/:id/refuse', async (req, res) => {
   try {
@@ -905,6 +963,17 @@ router.post('/:id/reassign', roleMiddleware(['admin', 'coordinator']), async (re
     const { id } = req.params;
     const { aidant_id, assignment_type } = req.body;
 
+    // ✅ Vérifier que aidant_id est un aidant_id valide (convertir si user_id)
+    let finalAidantId = aidant_id;
+    if (finalAidantId) {
+      const convertedId = await getAidantIdFromUserIdOrId(finalAidantId);
+      if (convertedId) {
+        finalAidantId = convertedId;
+      } else {
+        return res.status(400).json({ error: 'Aidant invalide' });
+      }
+    }
+
     const { data: visit, error: fetchError } = await supabase
       .from('visites')
       .select('*')
@@ -916,7 +985,7 @@ router.post('/:id/reassign', roleMiddleware(['admin', 'coordinator']), async (re
     const { data, error } = await supabase
       .from('visites')
       .update({
-        aidant_id,
+        aidant_id: finalAidantId,
         status: 'planifiee',
         assignment_type: assignment_type || 'ponctuelle',
         approved_at: null,
@@ -934,7 +1003,7 @@ router.post('/:id/reassign', roleMiddleware(['admin', 'coordinator']), async (re
     const targetDisplay = visit.target_name || (visit.patient ? `${visit.patient.first_name} ${visit.patient.last_name}` : 'Personnel');
 
     await createNotification({
-      userId: aidant_id,
+      userId: finalAidantId,
       title: '📅 Nouvelle visite assignée',
       body: `Vous avez été assigné à une visite pour ${targetDisplay} le ${visit.scheduled_date} à ${visit.scheduled_time}.`,
       type: 'visite',
@@ -949,7 +1018,7 @@ router.post('/:id/reassign', roleMiddleware(['admin', 'coordinator']), async (re
 });
 
 // =============================================
-// ✅ DÉMARRER UNE VISITE (CORRIGÉ)
+// ✅ DÉMARRER UNE VISITE
 // =============================================
 router.post('/:id/start', async (req, res) => {
   try {
@@ -1040,7 +1109,7 @@ router.post('/:id/start', async (req, res) => {
 });
 
 // =============================================
-// ✅ TERMINER UNE VISITE (CORRIGÉ)
+// ✅ TERMINER UNE VISITE
 // =============================================
 router.post('/:id/complete', async (req, res) => {
   try {
