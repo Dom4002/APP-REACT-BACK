@@ -68,9 +68,9 @@ const PRIORITY = {
  * @param {string} familyId - UUID de la famille (optionnel)
  * @returns {Promise<string|null>} - UUID de l'aidant ou null
  */
+ 
 const getActiveAidantForTarget = async (targetType, targetId, familyId = null) => {
   try {
-    // ✅ Normaliser le type pour la base de données
     const dbTargetType = mapTargetType(targetType);
     
     const { data, error } = await supabase.rpc('get_active_aidant_for_target', {
@@ -84,13 +84,43 @@ const getActiveAidantForTarget = async (targetType, targetId, familyId = null) =
       return null;
     }
 
-    return data;
+    if (!data) {
+      return null;
+    }
+
+    // ✅ VÉRIFIER SI data est un aidant_id ou un user_id
+    // 1. Vérifier si data est un aidant_id (dans la table aidants)
+    const { data: aidantById, error: errorById } = await supabase
+      .from('aidants')
+      .select('id')
+      .eq('id', data)
+      .maybeSingle();
+
+    if (!errorById && aidantById) {
+      // ✅ data est déjà un aidant_id, le retourner directement
+      return data;
+    }
+
+    // 2. Vérifier si data est un user_id
+    const { data: aidantByUser, error: errorByUser } = await supabase
+      .from('aidants')
+      .select('id')
+      .eq('user_id', data)
+      .maybeSingle();
+
+    if (!errorByUser && aidantByUser) {
+      // ✅ data est un user_id, retourner l'aidant_id correspondant
+      console.log(`🔄 Conversion user_id ${data} → aidant_id ${aidantByUser.id}`);
+      return aidantByUser.id;
+    }
+
+    console.warn(`⚠️ Aucun aidant trouvé pour ${data}`);
+    return null;
   } catch (error) {
     console.error('❌ getActiveAidantForTarget error:', error);
     return null;
   }
 };
-
 /**
  * Récupère tous les aidants pour une cible (principal + secondaires)
  * Inclut les aidants du compte et de la famille en fallback
