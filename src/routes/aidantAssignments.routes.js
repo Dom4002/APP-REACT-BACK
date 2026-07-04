@@ -642,4 +642,95 @@ router.post(
   }
 );
 
+
+// ============================================================
+// ✅ ROUTE POUR LES FAMILLES
+// ============================================================
+// GET /api/assignments/my
+// Récupère les assignations de la famille connectée
+// ============================================================
+router.get(
+  '/my',
+  authMiddleware,
+  async (req, res) => {
+    try {
+      const userId = req.user.id;
+      const userRole = req.profile?.role;
+
+      // ✅ Seulement les familles
+      if (userRole !== 'family') {
+        return res.status(403).json({
+          success: false,
+          error: 'Accès réservé aux familles',
+        });
+      }
+
+      // ✅ Utiliser la vue pour récupérer les assignations de la famille
+      const { data: assignments, error } = await supabase
+        .from('aidant_assignments_view')
+        .select('*')
+        .or(`target_id.eq.${userId}, target_type.eq.family`)
+        .eq('status', 'active')
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        console.error('❌ Assignments error:', error);
+        return res.status(500).json({
+          success: false,
+          error: error.message,
+        });
+      }
+
+      // ✅ Formater les données
+      const formattedAssignments = (assignments || []).map((item) => ({
+        id: item.id,
+        aidant_user_id: item.aidant_user_id,
+        target_type: mapTargetTypeForResponse(item.target_type),
+        target_id: item.target_id,
+        assignment_type: item.assignment_type,
+        status: item.status,
+        priority: item.priority,
+        expires_at: item.expires_at,
+        created_at: item.created_at,
+        updated_at: item.updated_at,
+        created_by: item.created_by,
+        reason: item.reason,
+        aidant: item.aidant_id ? {
+          id: item.aidant_id,
+          full_name: item.aidant_name,
+          email: item.aidant_email,
+          phone: item.aidant_phone,
+          avatar_url: item.aidant_avatar,
+        } : null,
+        target_patient: item.target_type === 'patient' && item.patient_id ? {
+          id: item.patient_id,
+          first_name: item.patient_first_name,
+          last_name: item.patient_last_name,
+          address: item.patient_address,
+          category: item.patient_category,
+          status: item.patient_status,
+        } : null,
+        target_profile: item.target_type !== 'patient' && item.profile_id ? {
+          id: item.profile_id,
+          full_name: item.profile_name,
+          email: item.profile_email,
+          phone: item.profile_phone,
+          role: item.profile_role,
+        } : null,
+      }));
+
+      res.json({
+        success: true,
+        data: formattedAssignments || [],
+        count: formattedAssignments?.length || 0,
+      });
+    } catch (error) {
+      console.error('❌ Erreur getMyAssignments:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Erreur lors de la récupération des assignations',
+      });
+    }
+  }
+);
 module.exports = router;
