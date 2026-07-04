@@ -14,7 +14,7 @@ const {
   checkAssignment,
 } = require('../controllers/aidantAssignment.controller');
 const { supabase } = require('../services/supabase.service');
-const { mapTargetTypeForResponse } = require('../services/aidantAssignment.service');
+const { mapTargetTypeForResponse, assignAidantToTarget } = require('../services/aidantAssignment.service');
 
 // Toutes les routes nécessitent une authentification
 router.use(authMiddleware);
@@ -36,7 +36,7 @@ router.get('/all', getAllAidants);
 router.get('/check', checkAssignment);
 
 // ============================================================
-// ✅ ROUTE GET /api/assignments (AJOUTÉE)
+// ✅ ROUTE GET /api/assignments - UTILISE LA VUE
 // Récupère toutes les assignations (admin uniquement)
 // ============================================================
 router.get(
@@ -86,12 +86,14 @@ router.get(
           last_name: item.patient_last_name,
           address: item.patient_address,
           category: item.patient_category,
+          status: item.patient_status,
         } : null,
         target_profile: item.target_type !== 'patient' && item.profile_id ? {
           id: item.profile_id,
           full_name: item.profile_name,
           email: item.profile_email,
           phone: item.profile_phone,
+          role: item.profile_role,
         } : null,
       }));
 
@@ -186,12 +188,14 @@ router.get(
           last_name: item.patient_last_name,
           address: item.patient_address,
           category: item.patient_category,
+          status: item.patient_status,
         } : null,
         target_profile: item.target_type !== 'patient' && item.profile_id ? {
           id: item.profile_id,
           full_name: item.profile_name,
           email: item.profile_email,
           phone: item.profile_phone,
+          role: item.profile_role,
         } : null,
       }));
 
@@ -337,6 +341,9 @@ router.get(
   }
 );
 
+// ============================================================
+// ROUTE FAMILY ASSIGN
+// ============================================================
 
 router.post('/family/assign', authMiddleware, async (req, res) => {
   try {
@@ -396,6 +403,26 @@ router.post('/family/assign', authMiddleware, async (req, res) => {
       });
     }
 
+    // ✅ Vérifier le quota de l'aidant
+    const { count: currentAssignments, error: countError } = await supabase
+      .from('aidant_assignments')
+      .select('id', { count: 'exact', head: true })
+      .eq('aidant_user_id', aidant.user_id)
+      .eq('status', 'active');
+
+    if (countError) {
+      console.error('❌ Erreur comptage assignations:', countError);
+    }
+
+    const maxAssignments = aidant.max_assignments || 4;
+    if ((currentAssignments || 0) >= maxAssignments) {
+      return res.status(400).json({
+        success: false,
+        error: `Cet aidant a déjà ${currentAssignments} assignations (maximum ${maxAssignments})`,
+        code: 'AIDANT_FULL',
+      });
+    }
+
     // ✅ Appeler la fonction d'assignation
     const result = await assignAidantToTarget({
       aidantUserId: aidant.user_id,
@@ -425,7 +452,7 @@ router.post('/family/assign', authMiddleware, async (req, res) => {
     console.error('❌ Family assign error:', error);
     res.status(500).json({
       success: false,
-      error: error.message || 'Erreur lors de l\'assignation'
+      error: error.message || 'Erreur lors de l\'assignation',
     });
   }
 });
@@ -527,9 +554,59 @@ router.post(
         });
       }
 
-      // ✅ Appeler la fonction d'assignation
-      const { assignAidantToTarget } = require('../services/aidantAssignment.service');
+      // ✅ Vérifier le quota de l'aidant
+      const { count: currentAssignments, error: countError } = await supabase
+        .from('aidant_assignments')
+        .select('id', { count: 'exact', head: true })
+        .eq('aidant_user_id', aidantUserId)
+        .eq('status', 'active');
 
+      if (countError) {
+        console.error('❌ Erreur comptage assignations:', countError);
+      }
+
+      const maxAssignments = aidant.max_assignments || 4;
+      const isFull = (currentAssignments || 0) >= maxAssignments;
+
+      // ✅ Si l'aidant est full et que force n'est pas activé
+      if (isFull && !force) {
+        return res.status(400).json({
+          success: false,
+          error: `Cet aidant a déjà ${currentAssignments} assignations (maximum ${maxAssignments})`,
+          code: 'AIDANT_FULL',
+          current: currentAssignments || 0,
+          max: maxAssignments,
+        });
+      }
+
+      // ✅ Si force est activé, libérer une place
+      if (isFull && force) {
+        // Supprimer l'assignation la moins prioritaire
+        const { data: oldestAssignment, error: oldestError } = await supabase
+          .from('aidant_assignments')
+          .select('id')
+          .eq('aidant_user_id', aidantUserId)
+          .eq('status', 'active')
+          .order('priority', { ascending: false })
+          .order('created_at', { ascending: true })
+          .limit(1)
+          .single();
+
+        if (oldestError) {
+          console.error('❌ Erreur récupération assignation la moins prioritaire:', oldestError);
+        } else if (oldestAssignment) {
+          await supabase
+            .from('aidant_assignments')
+            .update({
+              status: 'inactive',
+              reason: `Supprimé pour assignation forcée par ${req.user.id}`,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', oldestAssignment.id);
+        }
+      }
+
+      // ✅ Appeler la fonction d'assignation
       const result = await assignAidantToTarget({
         aidantUserId,
         targetType,
@@ -541,7 +618,7 @@ router.post(
         expiresAt: expiresAt || null,
       });
 
-      if (!result.success && !force) {
+      if (!result.success) {
         return res.status(400).json({
           success: false,
           error: result.error,
@@ -549,48 +626,9 @@ router.post(
         });
       }
 
-      // Si force = true et l'assignation a échoué à cause du quota
-      if (!result.success && force && result.code === 'AIDANT_FULL') {
-        await supabase
-          .from('aidant_assignments')
-          .update({
-            status: 'inactive',
-            reason: 'Supprimé pour assignation forcée',
-            updated_at: new Date().toISOString(),
-          })
-          .eq('aidant_user_id', aidantUserId)
-          .eq('status', 'active');
-
-        const retryResult = await assignAidantToTarget({
-          aidantUserId,
-          targetType,
-          targetId,
-          familyId: familyId || null,
-          assignmentType,
-          createdBy: req.user.id,
-          reason: reason || `Assignation forcée par admin (quota réinitialisé)`,
-          expiresAt: expiresAt || null,
-        });
-
-        if (!retryResult.success) {
-          return res.status(400).json({
-            success: false,
-            error: retryResult.error,
-            code: retryResult.code,
-          });
-        }
-
-        return res.status(201).json({
-          success: true,
-          message: 'Assignation forcée réussie (quota réinitialisé)',
-          data: retryResult,
-          forced: true,
-        });
-      }
-
       res.status(201).json({
         success: true,
-        message: 'Assignation réussie',
+        message: `Assignation ${force ? 'forcée ' : ''}rÉussie`,
         data: result,
         forced: force || false,
       });
