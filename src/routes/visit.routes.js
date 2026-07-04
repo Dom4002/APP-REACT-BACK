@@ -78,7 +78,6 @@ const getAidantIdFromUserIdOrId = async (userIdOrId) => {
 // =============================================
 router.get('/accounts', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
   try {
-    // Récupérer tous les comptes family
     const { data: accounts, error: accountsError } = await supabase
       .from('profiles')
       .select('id, full_name, email, phone, role, patient_category, is_active')
@@ -87,7 +86,6 @@ router.get('/accounts', roleMiddleware(['admin', 'coordinator']), async (req, re
 
     if (accountsError) throw accountsError;
 
-    // Pour chaque compte, vérifier s'il a des patients
     const accountsWithPatients = await Promise.all((accounts || []).map(async (account) => {
       const { data: links, error: linksError } = await supabase
         .from('patient_family_links')
@@ -118,32 +116,61 @@ router.get('/accounts', roleMiddleware(['admin', 'coordinator']), async (req, re
 });
 
 // =============================================
-// LISTE DES VISITES
+// LISTE DES VISITES - CORRIGÉ POUR LES FAMILLES
 // =============================================
 router.get('/', async (req, res) => {
   try {
     const { user, profile } = req;
 
-    let query = supabase
-      .from('visites')
-      .select(`
-        *,
-        patient:patients(*),
-        aidant:aidants(*, user:profiles(*)),
-        coordinator:profiles!coordinator_id(*),
-        photos:visite_photos(*)
-      `);
-
+    // ✅ 1. Récupérer les IDs des patients de la famille
+    let patientIds = [];
     if (profile.role === 'family') {
       const { data: links } = await supabase
         .from('patient_family_links')
         .select('patient_id')
         .eq('family_id', user.id);
+      patientIds = links?.map(l => l.patient_id).filter(Boolean) || [];
+    }
 
-      const patientIds = links?.map(l => l.patient_id).filter(Boolean) || [];
-      query = query.or(`patient_id.in.(${patientIds.length ? patientIds.join(',') : 'null'}), user_id.eq.${user.id}, patient_id.is.null`);
-      
+    // ✅ 2. Construire la requête avec les bonnes relations
+    let query = supabase
+      .from('visites')
+      .select(`
+        *,
+        patient:patients(*),
+        aidant:aidants!visites_aidant_id_fkey (
+          id,
+          user_id,
+          specialties,
+          available,
+          rating,
+          total_missions,
+          completed_missions,
+          cancelled_missions,
+          user:profiles!aidants_user_id_fkey (
+            id,
+            full_name,
+            email,
+            phone,
+            avatar_url
+          )
+        ),
+        coordinator:profiles!coordinator_id(*),
+        photos:visite_photos(*)
+      `);
+
+    // ✅ 3. Appliquer les filtres selon le rôle
+    if (profile.role === 'admin' || profile.role === 'coordinator') {
+      // Admin/Coord → toutes les visites
+    } else if (profile.role === 'family') {
+      // ✅ Famille → ses propres visites (personnelles + patients)
+      if (patientIds.length > 0) {
+        query = query.or(`patient_id.in.(${patientIds.join(',')}), user_id.eq.${user.id}`);
+      } else {
+        query = query.eq('user_id', user.id);
+      }
     } else if (profile.role === 'aidant') {
+      // ✅ Aidant → ses visites assignées
       const aidantId = await getAidantIdFromUserId(user.id);
       if (aidantId) {
         query = query.eq('aidant_id', aidantId);
@@ -154,9 +181,56 @@ router.get('/', async (req, res) => {
 
     const { data, error } = await query.order('scheduled_date', { ascending: true });
     if (error) throw error;
-    res.json(data);
+
+    // ✅ 4. FORCER LE RE-CHARGE DES RELATIONS POUR LES FAMILLES
+    let visitsWithFullRelations = data || [];
+
+    if (profile.role === 'family' && visitsWithFullRelations.length > 0) {
+      const aidantIds = [...new Set(
+        visitsWithFullRelations
+          .filter(v => v.aidant_id)
+          .map(v => v.aidant_id)
+      )];
+
+      if (aidantIds.length > 0) {
+        const { data: aidantsData } = await supabase
+          .from('aidants')
+          .select(`
+            id,
+            user_id,
+            specialties,
+            available,
+            rating,
+            total_missions,
+            completed_missions,
+            cancelled_missions,
+            user:profiles!aidants_user_id_fkey (
+              id,
+              full_name,
+              email,
+              phone,
+              avatar_url
+            )
+          `)
+          .in('id', aidantIds);
+
+        if (aidantsData) {
+          const aidantMap = aidantsData.reduce((acc, a) => {
+            acc[a.id] = a;
+            return acc;
+          }, {});
+
+          visitsWithFullRelations = visitsWithFullRelations.map(visit => ({
+            ...visit,
+            aidant: visit.aidant_id ? aidantMap[visit.aidant_id] || null : null,
+          }));
+        }
+      }
+    }
+
+    res.json(visitsWithFullRelations);
   } catch (error) {
-    console.error('Get visits error:', error);
+    console.error('❌ Get visits error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -221,7 +295,6 @@ router.get('/:id', async (req, res) => {
         hasAccess = links && links.length > 0;
       }
     } else if (profile.role === 'aidant') {
-      // ✅ Vérifier si l'aidant est assigné à cette visite
       const aidantId = await getAidantIdFromUserId(user.id);
       if (aidantId) {
         hasAccess = visit.aidant_id === aidantId;
@@ -232,9 +305,38 @@ router.get('/:id', async (req, res) => {
       return res.status(403).json({ error: 'Accès non autorisé' });
     }
 
+    // ✅ Si aidant_id existe mais aidant est null, forcer le rechargement
+    if (visit.aidant_id && !visit.aidant) {
+      const { data: aidantData } = await supabase
+        .from('aidants')
+        .select(`
+          id,
+          user_id,
+          specialties,
+          available,
+          rating,
+          total_missions,
+          completed_missions,
+          cancelled_missions,
+          user:profiles!aidants_user_id_fkey (
+            id,
+            full_name,
+            email,
+            phone,
+            avatar_url
+          )
+        `)
+        .eq('id', visit.aidant_id)
+        .single();
+
+      if (aidantData) {
+        visit.aidant = aidantData;
+      }
+    }
+
     res.json(visit);
   } catch (error) {
-    console.error('Get visit detail error:', error);
+    console.error('❌ Get visit detail error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -441,7 +543,6 @@ router.post('/', async (req, res) => {
         familyId
       );
 
-      // ✅ Vérifier que le résultat est un aidant_id (pas un user_id)
       if (foundId) {
         const convertedId = await getAidantIdFromUserIdOrId(foundId);
         if (convertedId) {
@@ -775,7 +876,7 @@ router.get('/drafts/my', async (req, res) => {
 
     res.json(visitsWithPrice);
   } catch (error) {
-    console.error('Get drafts error:', error);
+    console.error('❌ Get drafts error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -788,7 +889,6 @@ router.post('/:id/approve', async (req, res) => {
     const { id } = req.params;
     const { user } = req;
 
-    // ✅ Récupérer l'aidant_id depuis l'user_id
     const aidantId = await getAidantIdFromUserId(user.id);
     if (!aidantId) {
       return res.status(404).json({ error: 'Aidant non trouvé' });
@@ -802,12 +902,11 @@ router.post('/:id/approve', async (req, res) => {
 
     if (fetchError) throw fetchError;
 
-    // ✅ Comparer avec l'aidant_id de la visite
     if (visit.aidant_id !== aidantId) {
       return res.status(403).json({ error: 'Vous n\'êtes pas assigné à cette visite' });
     }
 
-    if (visit.status !== 'planifiee') {
+    if (visit.status !== 'planifiee' && visit.status !== 'en_attente') {
       return res.status(400).json({ error: 'Cette visite ne peut pas être approuvée' });
     }
 
@@ -855,7 +954,7 @@ router.post('/:id/approve', async (req, res) => {
 
     res.json({ success: true, visit: data });
   } catch (error) {
-    console.error('Approve visit error:', error);
+    console.error('❌ Approve visit error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -869,7 +968,6 @@ router.post('/:id/refuse', async (req, res) => {
     const { user } = req;
     const { reason } = req.body;
 
-    // ✅ Récupérer l'aidant_id depuis l'user_id
     const aidantId = await getAidantIdFromUserId(user.id);
     if (!aidantId) {
       return res.status(404).json({ error: 'Aidant non trouvé' });
@@ -883,7 +981,6 @@ router.post('/:id/refuse', async (req, res) => {
 
     if (fetchError) throw fetchError;
 
-    // ✅ Comparer avec l'aidant_id de la visite
     if (visit.aidant_id !== aidantId) {
       return res.status(403).json({ error: 'Vous n\'êtes pas assigné à cette visite' });
     }
@@ -950,7 +1047,7 @@ router.post('/:id/refuse', async (req, res) => {
 
     res.json({ success: true, visit: data });
   } catch (error) {
-    console.error('Refuse visit error:', error);
+    console.error('❌ Refuse visit error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -963,7 +1060,6 @@ router.post('/:id/reassign', roleMiddleware(['admin', 'coordinator']), async (re
     const { id } = req.params;
     const { aidant_id, assignment_type } = req.body;
 
-    // ✅ Vérifier que aidant_id est un aidant_id valide (convertir si user_id)
     let finalAidantId = aidant_id;
     if (finalAidantId) {
       const convertedId = await getAidantIdFromUserIdOrId(finalAidantId);
@@ -1012,7 +1108,7 @@ router.post('/:id/reassign', roleMiddleware(['admin', 'coordinator']), async (re
 
     res.json({ success: true, visit: data });
   } catch (error) {
-    console.error('Reassign visit error:', error);
+    console.error('❌ Reassign visit error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1027,7 +1123,6 @@ router.post('/:id/start', async (req, res) => {
     const now = new Date().toISOString();
     const { lat, lng } = req.body;
 
-    // ✅ Récupérer l'aidant_id depuis l'user_id
     const aidantId = await getAidantIdFromUserId(user.id);
     if (!aidantId) {
       return res.status(404).json({ error: 'Aidant non trouvé' });
@@ -1041,7 +1136,6 @@ router.post('/:id/start', async (req, res) => {
 
     if (fetchError) throw fetchError;
 
-    // ✅ Comparer avec l'aidant_id de la visite
     if (visit.aidant_id !== aidantId) {
       return res.status(403).json({ error: 'Vous n\'êtes pas assigné à cette visite' });
     }
@@ -1103,7 +1197,7 @@ router.post('/:id/start', async (req, res) => {
 
     res.json({ success: true, visit: data });
   } catch (error) {
-    console.error('Start visit error:', error);
+    console.error('❌ Start visit error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1127,7 +1221,6 @@ router.post('/:id/complete', async (req, res) => {
     } = req.body;
     const now = new Date().toISOString();
 
-    // ✅ Récupérer l'aidant_id depuis l'user_id
     const aidantId = await getAidantIdFromUserId(user.id);
     if (!aidantId) {
       return res.status(404).json({ error: 'Aidant non trouvé' });
@@ -1141,7 +1234,6 @@ router.post('/:id/complete', async (req, res) => {
 
     if (visitError) throw visitError;
 
-    // ✅ Comparer avec l'aidant_id de la visite
     if (visit.aidant_id !== aidantId) {
       return res.status(403).json({ error: 'Vous n\'êtes pas assigné à cette visite' });
     }
@@ -1250,7 +1342,7 @@ router.post('/:id/complete', async (req, res) => {
 
     res.json({ success: true, visit: data });
   } catch (error) {
-    console.error('Complete visit error:', error);
+    console.error('❌ Complete visit error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1387,7 +1479,7 @@ router.post('/:id/validate', roleMiddleware(['admin', 'coordinator']), async (re
 
     res.json({ success: true, visit: data });
   } catch (error) {
-    console.error('Validate visit error:', error);
+    console.error('❌ Validate visit error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1453,7 +1545,7 @@ router.post('/:id/cancel', async (req, res) => {
 
     res.json({ success: true, visit: data });
   } catch (error) {
-    console.error('Cancel visit error:', error);
+    console.error('❌ Cancel visit error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1481,7 +1573,7 @@ router.post('/:id/photos', async (req, res) => {
     if (error) throw error;
     res.status(201).json({ success: true, photo: data });
   } catch (error) {
-    console.error('Add photo error:', error);
+    console.error('❌ Add photo error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1518,7 +1610,7 @@ router.delete('/photos/:photoId', async (req, res) => {
     if (error) throw error;
     res.json({ success: true });
   } catch (error) {
-    console.error('Delete photo error:', error);
+    console.error('❌ Delete photo error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1536,7 +1628,7 @@ router.get('/:id/photos', async (req, res) => {
     if (error) throw error;
     res.json(data);
   } catch (error) {
-    console.error('Get photos error:', error);
+    console.error('❌ Get photos error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1554,7 +1646,7 @@ router.get('/:id/audios', async (req, res) => {
     if (error) throw error;
     res.json(data);
   } catch (error) {
-    console.error('Get audios error:', error);
+    console.error('❌ Get audios error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1567,7 +1659,6 @@ router.post('/:id/convert-to-subscription', async (req, res) => {
     const { id } = req.params;
     const userId = req.user.id;
 
-    // 1. Récupérer la visite
     const { data: visit, error: visitError } = await supabase
       .from('visites')
       .select('*')
@@ -1589,7 +1680,6 @@ router.post('/:id/convert-to-subscription', async (req, res) => {
       });
     }
 
-    // 2. Vérifier l'abonnement actif
     const { data: subscription, error: subError } = await supabase
       .from('abonnements')
       .select('id, remaining_visits, used_visits, total_visits, status, user_id')
@@ -1611,7 +1701,6 @@ router.post('/:id/convert-to-subscription', async (req, res) => {
       });
     }
 
-    // 3. Mettre à jour la visite
     const { data: updatedVisit, error: updateError } = await supabase
       .from('visites')
       .update({
@@ -1637,7 +1726,6 @@ router.post('/:id/convert-to-subscription', async (req, res) => {
       });
     }
 
-    // 4. Décompter de l'abonnement
     const newRemaining = subscription.remaining_visits - 1;
     const newUsed = subscription.used_visits + 1;
 
@@ -1654,7 +1742,6 @@ router.post('/:id/convert-to-subscription', async (req, res) => {
       console.error('❌ Erreur mise à jour abonnement:', subUpdateError);
     }
 
-    // 5. Notification de succès
     await createNotification({
       userId: userId,
       title: '✅ Visite validée avec votre abonnement',
@@ -1667,7 +1754,6 @@ router.post('/:id/convert-to-subscription', async (req, res) => {
       },
     });
 
-    // 6. Si plus de visites restantes, envoyer une alerte
     if (newRemaining === 0) {
       await createNotification({
         userId: userId,
@@ -1678,7 +1764,6 @@ router.post('/:id/convert-to-subscription', async (req, res) => {
       });
     }
 
-    // 7. Notifier l'aidant assigné (si existant)
     if (updatedVisit.aidant_id) {
       await createNotification({
         userId: updatedVisit.aidant_id,
