@@ -1433,4 +1433,156 @@ router.get('/:id/audios', async (req, res) => {
   }
 });
 
+
+
+// =============================================
+// ✅ CONVERTIR UN BROUILLON EN VISITE PLANIFIÉE (DÉCOMPTE ABONNEMENT)
+// =============================================
+router.post('/:id/convert-to-subscription', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user.id;
+
+    // 1. Récupérer la visite
+    const { data: visit, error: visitError } = await supabase
+      .from('visites')
+      .select('*')
+      .eq('id', id)
+      .eq('user_id', userId)
+      .single();
+
+    if (visitError) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Visite non trouvée' 
+      });
+    }
+
+    if (visit.status !== 'brouillon') {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Cette visite n\'est pas en attente de paiement' 
+      });
+    }
+
+    // 2. Vérifier l'abonnement actif
+    const { data: subscription, error: subError } = await supabase
+      .from('abonnements')
+      .select('id, remaining_visits, used_visits, total_visits, status, user_id')
+      .eq('user_id', userId)
+      .eq('status', 'actif')
+      .maybeSingle();
+
+    if (subError || !subscription) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Aucun abonnement actif trouvé' 
+      });
+    }
+
+    if (subscription.remaining_visits <= 0) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Plus de visites disponibles dans votre abonnement' 
+      });
+    }
+
+    // 3. Mettre à jour la visite
+    const { data: updatedVisit, error: updateError } = await supabase
+      .from('visites')
+      .update({
+        status: 'planifiee',
+        metadata: {
+          ...(visit.metadata || {}),
+          converted_from_draft: true,
+          converted_at: new Date().toISOString(),
+          subscription_id: subscription.id,
+          subscription_used: true,
+          payment_required: false,
+        }
+      })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (updateError) {
+      console.error('❌ Erreur mise à jour visite:', updateError);
+      return res.status(500).json({ 
+        success: false, 
+        error: updateError.message 
+      });
+    }
+
+    // 4. Décompter de l'abonnement
+    const newRemaining = subscription.remaining_visits - 1;
+    const newUsed = subscription.used_visits + 1;
+
+    const { error: subUpdateError } = await supabase
+      .from('abonnements')
+      .update({
+        used_visits: newUsed,
+        remaining_visits: newRemaining,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', subscription.id);
+
+    if (subUpdateError) {
+      console.error('❌ Erreur mise à jour abonnement:', subUpdateError);
+      // On ne bloque pas la réponse, mais on log l'erreur
+    }
+
+    // 5. Notification de succès
+    await createNotification({
+      userId: userId,
+      title: '✅ Visite validée avec votre abonnement',
+      body: `Visite du ${visit.scheduled_date} validée. Il vous reste ${newRemaining} visite(s).`,
+      type: 'visite',
+      data: { 
+        visit_id: id, 
+        status: 'planifiee',
+        remaining_visits: newRemaining,
+      },
+    });
+
+    // 6. Si plus de visites restantes, envoyer une alerte
+    if (newRemaining === 0) {
+      await createNotification({
+        userId: userId,
+        title: '📊 Plus de visites disponibles',
+        body: 'Vous avez utilisé toutes vos visites. Pensez à renouveler votre abonnement.',
+        type: 'system',
+        data: { subscription_id: subscription.id },
+      });
+    }
+
+    // 7. Notifier l'aidant assigné (si existant)
+    if (updatedVisit.aidant_id) {
+      await createNotification({
+        userId: updatedVisit.aidant_id,
+        title: '📅 Nouvelle visite à valider',
+        body: `Visite pour ${updatedVisit.target_name || 'le patient'} le ${updatedVisit.scheduled_date} à ${updatedVisit.scheduled_time}`,
+        type: 'visite',
+        data: { visit_id: id, action: 'approve' },
+      });
+    }
+
+    res.json({ 
+      success: true, 
+      visit: updatedVisit,
+      remaining_visits: newRemaining,
+      used_visits: newUsed,
+      message: 'Visite validée avec succès avec votre abonnement',
+    });
+
+  } catch (error) {
+    console.error('❌ Convert to subscription error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+module.exports = router;
+          
 module.exports = router;
