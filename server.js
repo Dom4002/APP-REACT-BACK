@@ -149,7 +149,7 @@ app.use('/api/admin-setup', adminSetupRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/offers', offerRoutes);
 app.use('/api/aidants', aidantCatalogRoutes);
-app.use('/api/assignments', aidantAssignmentsRoutes);  // ← Routeur
+app.use('/api/assignments', aidantAssignmentsRoutes);  
 
 
 // =============================================
