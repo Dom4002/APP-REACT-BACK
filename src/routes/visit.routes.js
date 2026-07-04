@@ -142,7 +142,7 @@ router.get('/:id', async (req, res) => {
     const { user, profile } = req;
 
     // ✅ Récupérer la visite avec les relations
-    const { data: visit, error } = await supabase
+       const { data: visit, error } = await supabase
       .from('visites')
       .select(`
         *,
