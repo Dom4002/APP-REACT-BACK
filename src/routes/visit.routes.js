@@ -31,6 +31,20 @@ const getPonctualPrice = (durationMinutes) => {
 };
 
 // =============================================
+// ✅ RÉCUPÉRER L'AIDANT_ID DEPUIS L'USER_ID
+// =============================================
+const getAidantIdFromUserId = async (userId) => {
+  const { data: aidant, error } = await supabase
+    .from('aidants')
+    .select('id')
+    .eq('user_id', userId)
+    .single();
+  
+  if (error || !aidant) return null;
+  return aidant.id;
+};
+
+// =============================================
 // ✅ RÉCUPÉRER LES COMPTES DISPONIBLES POUR L'ADMIN
 // =============================================
 router.get('/accounts', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
@@ -101,14 +115,9 @@ router.get('/', async (req, res) => {
       query = query.or(`patient_id.in.(${patientIds.length ? patientIds.join(',') : 'null'}), user_id.eq.${user.id}, patient_id.is.null`);
       
     } else if (profile.role === 'aidant') {
-      const { data: aidant } = await supabase
-        .from('aidants')
-        .select('id')
-        .eq('user_id', user.id)
-        .single();
-
-      if (aidant) {
-        query = query.eq('aidant_id', aidant.id);
+      const aidantId = await getAidantIdFromUserId(user.id);
+      if (aidantId) {
+        query = query.eq('aidant_id', aidantId);
       } else {
         return res.json([]);
       }
@@ -160,12 +169,8 @@ router.get('/:id', async (req, res) => {
         hasAccess = links && links.length > 0;
       }
     } else if (profile.role === 'aidant') {
-      const { data: aidant } = await supabase
-        .from('aidants')
-        .select('id')
-        .eq('user_id', user.id)
-        .single();
-      hasAccess = data.aidant_id === aidant?.id;
+      const aidantId = await getAidantIdFromUserId(user.id);
+      hasAccess = data.aidant_id === aidantId;
     }
 
     if (!hasAccess) {
@@ -225,7 +230,6 @@ router.post('/', async (req, res) => {
         return res.status(404).json({ error: 'Patient non trouvé' });
       }
 
-      // Récupérer la famille liée au patient
       const { data: familyLinks } = await supabase
         .from('patient_family_links')
         .select('family_id')
@@ -258,7 +262,6 @@ router.post('/', async (req, res) => {
         return res.status(404).json({ error: 'Compte non trouvé' });
       }
 
-      // Vérifier si le compte a des patients
       const { data: links, error: linksError } = await supabase
         .from('patient_family_links')
         .select('patient_id')
@@ -363,9 +366,7 @@ router.post('/', async (req, res) => {
     // ✅ DÉTERMINER L'AIDANT À ASSIGNER
     let finalAidantId = aidant_id || null;
 
-    // Si aucun aidant spécifié et la visite n'est pas un brouillon
     if (!finalAidantId && status !== 'brouillon') {
-      // Utiliser le service d'assignation pour trouver l'aidant actif
       const targetTypeForAidant = finalPatientId ? 'patient' : 'personal_account';
       const targetIdForAidant = finalPatientId || finalUserId;
       
@@ -388,7 +389,7 @@ router.post('/', async (req, res) => {
       patient_id: finalPatientId,
       target_type: finalTargetType,
       target_name: finalTargetName,
-      aidant_id: finalAidantId,  // ✅ Aidant automatique ou null
+      aidant_id: finalAidantId,
       coordinator_id: ['admin', 'coordinator'].includes(profile.role) ? user.id : null,
       scheduled_date,
       scheduled_time,
@@ -457,7 +458,6 @@ router.post('/', async (req, res) => {
         },
       });
 
-      // Notification aux admins
       const { data: admins } = await supabase
         .from('profiles')
         .select('id')
@@ -493,7 +493,6 @@ router.post('/', async (req, res) => {
       data: { visit_id: visit.id, status: 'planifiee' },
     });
 
-    // ✅ Si un aidant a été assigné (auto ou manuel), le notifier
     if (finalAidantId) {
       await createNotification({
         userId: finalAidantId,
@@ -560,7 +559,6 @@ router.post('/:id/confirm-payment', async (req, res) => {
       return res.status(400).json({ error: 'Cette visite n\'est pas en attente de paiement' });
     }
 
-    // ✅ Récupérer l'aidant actif après paiement
     const familyId = visit.user_id;
     const targetType = visit.patient_id ? 'patient' : 'personal_account';
     const targetId = visit.patient_id || visit.user_id;
@@ -575,7 +573,7 @@ router.post('/:id/confirm-payment', async (req, res) => {
       .from('visites')
       .update({
         status: 'planifiee',
-        aidant_id: aidantId,  // ✅ Assigner l'aidant si trouvé
+        aidant_id: aidantId,
         metadata: {
           ...(visit.metadata || {}),
           payment_confirmed_at: new Date().toISOString(),
@@ -599,7 +597,6 @@ router.post('/:id/confirm-payment', async (req, res) => {
 
     const targetDisplay = updatedVisit.target_name || (updatedVisit.patient ? `${updatedVisit.patient.first_name} ${updatedVisit.patient.last_name}` : 'Personnel');
 
-    // ✅ Si un aidant a été assigné, le notifier
     if (aidantId) {
       await createNotification({
         userId: aidantId,
@@ -694,12 +691,18 @@ router.get('/drafts/my', async (req, res) => {
 });
 
 // =============================================
-// APPROUVER UNE VISITE (par l'aidant)
+// ✅ APPROUVER UNE VISITE (CORRIGÉ)
 // =============================================
 router.post('/:id/approve', async (req, res) => {
   try {
     const { id } = req.params;
     const { user } = req;
+
+    // ✅ Récupérer l'aidant_id depuis l'user_id
+    const aidantId = await getAidantIdFromUserId(user.id);
+    if (!aidantId) {
+      return res.status(404).json({ error: 'Aidant non trouvé' });
+    }
 
     const { data: visit, error: fetchError } = await supabase
       .from('visites')
@@ -709,7 +712,8 @@ router.post('/:id/approve', async (req, res) => {
 
     if (fetchError) throw fetchError;
 
-    if (visit.aidant_id !== user.id) {
+    // ✅ Comparer avec l'aidant_id de la visite
+    if (visit.aidant_id !== aidantId) {
       return res.status(403).json({ error: 'Vous n\'êtes pas assigné à cette visite' });
     }
 
@@ -767,13 +771,19 @@ router.post('/:id/approve', async (req, res) => {
 });
 
 // =============================================
-// REFUSER UNE VISITE (par l'aidant)
+// ✅ REFUSER UNE VISITE (CORRIGÉ)
 // =============================================
 router.post('/:id/refuse', async (req, res) => {
   try {
     const { id } = req.params;
     const { user } = req;
     const { reason } = req.body;
+
+    // ✅ Récupérer l'aidant_id depuis l'user_id
+    const aidantId = await getAidantIdFromUserId(user.id);
+    if (!aidantId) {
+      return res.status(404).json({ error: 'Aidant non trouvé' });
+    }
 
     const { data: visit, error: fetchError } = await supabase
       .from('visites')
@@ -783,7 +793,8 @@ router.post('/:id/refuse', async (req, res) => {
 
     if (fetchError) throw fetchError;
 
-    if (visit.aidant_id !== user.id) {
+    // ✅ Comparer avec l'aidant_id de la visite
+    if (visit.aidant_id !== aidantId) {
       return res.status(403).json({ error: 'Vous n\'êtes pas assigné à cette visite' });
     }
 
@@ -906,7 +917,7 @@ router.post('/:id/reassign', roleMiddleware(['admin', 'coordinator']), async (re
 });
 
 // =============================================
-// DÉMARRER UNE VISITE
+// ✅ DÉMARRER UNE VISITE (CORRIGÉ)
 // =============================================
 router.post('/:id/start', async (req, res) => {
   try {
@@ -914,6 +925,12 @@ router.post('/:id/start', async (req, res) => {
     const { user } = req;
     const now = new Date().toISOString();
     const { lat, lng } = req.body;
+
+    // ✅ Récupérer l'aidant_id depuis l'user_id
+    const aidantId = await getAidantIdFromUserId(user.id);
+    if (!aidantId) {
+      return res.status(404).json({ error: 'Aidant non trouvé' });
+    }
 
     const { data: visit, error: fetchError } = await supabase
       .from('visites')
@@ -923,7 +940,8 @@ router.post('/:id/start', async (req, res) => {
 
     if (fetchError) throw fetchError;
 
-    if (visit.aidant_id !== user.id) {
+    // ✅ Comparer avec l'aidant_id de la visite
+    if (visit.aidant_id !== aidantId) {
       return res.status(403).json({ error: 'Vous n\'êtes pas assigné à cette visite' });
     }
 
@@ -990,7 +1008,7 @@ router.post('/:id/start', async (req, res) => {
 });
 
 // =============================================
-// TERMINER UNE VISITE
+// ✅ TERMINER UNE VISITE (CORRIGÉ)
 // =============================================
 router.post('/:id/complete', async (req, res) => {
   try {
@@ -1008,6 +1026,12 @@ router.post('/:id/complete', async (req, res) => {
     } = req.body;
     const now = new Date().toISOString();
 
+    // ✅ Récupérer l'aidant_id depuis l'user_id
+    const aidantId = await getAidantIdFromUserId(user.id);
+    if (!aidantId) {
+      return res.status(404).json({ error: 'Aidant non trouvé' });
+    }
+
     const { data: visit, error: visitError } = await supabase
       .from('visites')
       .select('aidant_id, patient_id, start_time, metadata, target_name, user_id')
@@ -1016,7 +1040,8 @@ router.post('/:id/complete', async (req, res) => {
 
     if (visitError) throw visitError;
 
-    if (visit.aidant_id !== user.id) {
+    // ✅ Comparer avec l'aidant_id de la visite
+    if (visit.aidant_id !== aidantId) {
       return res.status(403).json({ error: 'Vous n\'êtes pas assigné à cette visite' });
     }
 
@@ -1433,8 +1458,6 @@ router.get('/:id/audios', async (req, res) => {
   }
 });
 
-
-
 // =============================================
 // ✅ CONVERTIR UN BROUILLON EN VISITE PLANIFIÉE (DÉCOMPTE ABONNEMENT)
 // =============================================
@@ -1528,7 +1551,6 @@ router.post('/:id/convert-to-subscription', async (req, res) => {
 
     if (subUpdateError) {
       console.error('❌ Erreur mise à jour abonnement:', subUpdateError);
-      // On ne bloque pas la réponse, mais on log l'erreur
     }
 
     // 5. Notification de succès
