@@ -307,7 +307,7 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
 }
 
 // ============================================================
-// ✅ TRAITER UNE VISITE PONCTUELLE - CORRIGÉ
+// ✅ TRAITER UNE VISITE PONCTUELLE - CORRIGÉ AVEC NOTIFICATIONS
 // ============================================================
 async function processPonctualVisit(paymentRecord, transactionId, visitId, metadata) {
   try {
@@ -377,14 +377,13 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
       if (updateError.message.includes('chk_planned_not_draft')) {
         console.log('🔄 Tentative de récupération avec patient_id = user_id...');
         
-        // ✅ Récupérer l'aidant si pas encore fait
         if (!aidantId) {
           aidantId = await getActiveAidantForTarget(targetType, targetId, familyId);
         }
         
         const fallbackData = {
           status: 'planifiee',
-          patient_id: visit.user_id,  // Utiliser l'ID du compte comme fallback
+          patient_id: visit.user_id,
           aidant_id: aidantId || null,
           target_type: 'personal',
           target_name: visit.target_name || 'Personnel',
@@ -413,13 +412,21 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
           
           // ✅ NOTIFICATIONS POUR LE FALLBACK
           if (retryVisit.aidant_id) {
-            await supabase.from('notifications').insert({
-              user_id: retryVisit.aidant_id,
-              title: '📅 Nouvelle visite à valider',
-              body: `Visite pour ${retryVisit.target_name || 'le patient'} le ${retryVisit.scheduled_date} à ${retryVisit.scheduled_time}`,
-              type: 'visite',
-              data: { visit_id: visitId, action: 'approve' },
-            });
+            const { data: aidant } = await supabase
+              .from('aidants')
+              .select('user_id')
+              .eq('id', retryVisit.aidant_id)
+              .single();
+
+            if (aidant) {
+              await supabase.from('notifications').insert({
+                user_id: aidant.user_id,
+                title: '📅 Nouvelle visite à valider',
+                body: `Visite pour ${retryVisit.target_name || 'le patient'} le ${retryVisit.scheduled_date} à ${retryVisit.scheduled_time}`,
+                type: 'visite',
+                data: { visit_id: visitId, action: 'approve' },
+              });
+            }
           }
 
           await supabase.from('notifications').insert({
@@ -441,18 +448,17 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
 
     console.log('✅ Visite passée de brouillon à planifiee:', visitId);
 
-    // ✅ NOTIFICATIONS
-     if (updatedVisit.aidant_id) {
-      // Récupérer le user_id de l'aidant
+    // ✅ NOTIFICATIONS CORRIGÉES - AVEC USER_ID
+    if (updatedVisit.aidant_id) {
       const { data: aidant } = await supabase
         .from('aidants')
         .select('user_id')
         .eq('id', updatedVisit.aidant_id)
         .single();
-    
+
       if (aidant) {
         await supabase.from('notifications').insert({
-          user_id: aidant.user_id,   
+          user_id: aidant.user_id,
           title: '📅 Nouvelle visite à valider',
           body: `Visite pour ${updatedVisit.target_name || 'le patient'} le ${updatedVisit.scheduled_date} à ${updatedVisit.scheduled_time}`,
           type: 'visite',
