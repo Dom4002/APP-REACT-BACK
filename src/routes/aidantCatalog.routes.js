@@ -10,7 +10,7 @@ const {
   assignAidant,
   getMyAssignments,
   revokeAssignmentController,
-  getActiveAidant,          // ✅ NOUVEAU
+  getActiveAidant,
 } = require('../controllers/aidantCatalog.controller');
 
 // Toutes les routes nécessitent une authentification
@@ -20,45 +20,30 @@ router.use(authMiddleware);
 // ⚠️ IMPORTANT : ROUTES SPÉCIFIQUES AVANT LES ROUTES AVEC PARAMÈTRES
 // ============================================================
 
-// ============================================================
 // GET /api/aidants/catalog
 // Récupère la liste des aidants disponibles avec filtres
-// ============================================================
 router.get('/catalog', getCatalog);
 
-// ============================================================
 // GET /api/aidants/active
-// Récupère l'aidant actif pour une cible (patient, compte, famille)
-// ✅ NOUVELLE ROUTE - DOIT ÊTRE AVANT /:id
-// ============================================================
+// Récupère l'aidant actif pour une cible
 router.get('/active', getActiveAidant);
 
-// ============================================================
 // GET /api/aidants/my-assignments
 // Récupère les assignations de la famille connectée
-// ✅ DOIT ÊTRE AVANT /:id POUR ÉVITER QUE "my-assignments" SOIT INTERPRÉTÉ COMME UN ID
-// ============================================================
 router.get('/my-assignments', roleMiddleware(['family']), getMyAssignments);
 
-// ============================================================
 // POST /api/aidants/assign
 // Assigner un aidant à un patient ou à un compte personnel (famille uniquement)
-// ✅ patientId est OPTIONNEL - peut être null pour assignation personnelle
-// ============================================================
 router.post('/assign', roleMiddleware(['family']), assignAidant);
 
-// ============================================================
 // DELETE /api/aidants/assignments/:id
 // Révoquer une assignation (famille uniquement)
-// ============================================================
 router.delete('/assignments/:id', roleMiddleware(['family']), revokeAssignmentController);
 
 // ============================================================
-// ⚠️ ROUTE AVEC PARAMÈTRE - DOIT ÊTRE APRÈS TOUTES LES ROUTES SPÉCIFIQUES
+// ✅ ROUTE GET /api/aidants/:id - ACCESSIBLE À TOUS LES UTILISATEURS AUTHENTIFIÉS
 // ============================================================
-// GET /api/aidants/:id
-// Récupère les détails d'un aidant
-// ============================================================
-router.get('/:id', getAidant);
+// ✅ IMPORTANT : Cette route doit être accessible à tous les rôles authentifiés
+router.get('/:id', authMiddleware, getAidant);
 
 module.exports = router;
