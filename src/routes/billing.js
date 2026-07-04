@@ -93,6 +93,55 @@ function isValidUUID(uuid) {
 }
 
 // ============================================================
+// ✅ RÉCUPÉRER L'AIDANT ACTIF
+// ============================================================
+async function getActiveAidantForTarget(targetType, targetId, familyId) {
+  try {
+    const { data, error } = await supabase.rpc('get_active_aidant_for_target', {
+      p_target_type: targetType,
+      p_target_id: targetId,
+      p_family_id: familyId,
+    });
+
+    if (error) {
+      console.error('❌ get_active_aidant_for_target error:', error);
+      return null;
+    }
+
+    if (!data) {
+      return null;
+    }
+
+    // ✅ Vérifier si data est un aidant_id
+    const { data: aidantById, error: errorById } = await supabase
+      .from('aidants')
+      .select('id')
+      .eq('id', data)
+      .maybeSingle();
+
+    if (!errorById && aidantById) {
+      return data;
+    }
+
+    // ✅ Vérifier si data est un user_id
+    const { data: aidantByUser, error: errorByUser } = await supabase
+      .from('aidants')
+      .select('id')
+      .eq('user_id', data)
+      .maybeSingle();
+
+    if (!errorByUser && aidantByUser) {
+      return aidantByUser.id;
+    }
+
+    return null;
+  } catch (error) {
+    console.error('❌ getActiveAidantForTarget error:', error);
+    return null;
+  }
+}
+
+// ============================================================
 // ✅ CRÉER UN ABONNEMENT EN ATTENTE
 // ============================================================
 async function createPendingSubscription(userId, offerId, offer, patientId = null) {
@@ -136,7 +185,6 @@ async function createPendingSubscription(userId, offerId, offer, patientId = nul
       updated_at: new Date().toISOString(),
     };
 
-    // ✅ NE PAS ajouter patient_id s'il est null
     if (patientId) {
       subscriptionData.patient_id = patientId;
       console.log('✅ patient_id ajouté:', patientId);
@@ -165,7 +213,7 @@ async function createPendingSubscription(userId, offerId, offer, patientId = nul
 }
 
 // ============================================================
-// ✅ CRÉER UNE COMMANDE PONCTUELLE - AVEC TARGET_TYPE
+// ✅ CRÉER UNE COMMANDE PONCTUELLE
 // ============================================================
 async function createPonctualOrder(paymentRecord, transactionId, orderData) {
   try {
@@ -259,7 +307,7 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
 }
 
 // ============================================================
-// ✅ TRAITER UNE VISITE PONCTUELLE
+// ✅ TRAITER UNE VISITE PONCTUELLE - CORRIGÉ
 // ============================================================
 async function processPonctualVisit(paymentRecord, transactionId, visitId, metadata) {
   try {
@@ -281,31 +329,119 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
       return null;
     }
 
+    // ✅ RÉCUPÉRER L'AIDANT ACTIF APRÈS PAIEMENT
+    const familyId = visit.user_id;
+    const targetType = visit.patient_id ? 'patient' : 'personal_account';
+    const targetId = visit.patient_id || visit.user_id;
+
+    let aidantId = visit.aidant_id || null;
+    if (!aidantId) {
+      aidantId = await getActiveAidantForTarget(targetType, targetId, familyId);
+      console.log(`✅ Aidant trouvé après paiement: ${aidantId}`);
+    }
+
+    // ✅ CONSTRUIRE L'OBJET DE MISE À JOUR
+    const updateData = {
+      status: 'planifiee',
+      aidant_id: aidantId || null,
+      metadata: {
+        ...(visit.metadata || {}),
+        payment_confirmed_at: new Date().toISOString(),
+        transaction_id: transactionId,
+        scheduled_from_draft: true,
+        payment_completed: true,
+        webhook_processed: true,
+        webhook_processed_at: new Date().toISOString(),
+        aidant_assigned_after_payment: !!aidantId,
+      }
+    };
+
+    // ✅ Pour les visites personnelles, s'assurer que patient_id est null
+    if (visit.target_type === 'personal' || visit.target_type === 'personal_account') {
+      updateData.patient_id = null;
+    }
+
+    console.log('📤 Mise à jour visite avec:', JSON.stringify(updateData, null, 2));
+
     const { data: updatedVisit, error: updateError } = await supabase
       .from('visites')
-      .update({
-        status: 'planifiee',
-        metadata: {
-          ...(visit.metadata || {}),
-          payment_confirmed_at: new Date().toISOString(),
-          transaction_id: transactionId,
-          scheduled_from_draft: true,
-          payment_completed: true,
-          webhook_processed: true,
-          webhook_processed_at: new Date().toISOString(),
-        }
-      })
+      .update(updateData)
       .eq('id', visitId)
       .select()
       .single();
 
     if (updateError) {
       console.error('❌ Erreur mise à jour visite:', updateError.message);
+      
+      // ✅ TENTATIVE DE RÉCUPÉRATION
+      if (updateError.message.includes('chk_planned_not_draft')) {
+        console.log('🔄 Tentative de récupération avec patient_id = user_id...');
+        
+        // ✅ Récupérer l'aidant si pas encore fait
+        if (!aidantId) {
+          aidantId = await getActiveAidantForTarget(targetType, targetId, familyId);
+        }
+        
+        const fallbackData = {
+          status: 'planifiee',
+          patient_id: visit.user_id,  // Utiliser l'ID du compte comme fallback
+          aidant_id: aidantId || null,
+          target_type: 'personal',
+          target_name: visit.target_name || 'Personnel',
+          metadata: {
+            ...(visit.metadata || {}),
+            payment_confirmed_at: new Date().toISOString(),
+            transaction_id: transactionId,
+            scheduled_from_draft: true,
+            payment_completed: true,
+            webhook_processed: true,
+            webhook_processed_at: new Date().toISOString(),
+            aidant_assigned_after_payment: !!aidantId,
+            fallback_patient_id_used: true,
+          }
+        };
+        
+        const { data: retryVisit, error: retryError } = await supabase
+          .from('visites')
+          .update(fallbackData)
+          .eq('id', visitId)
+          .select()
+          .single();
+        
+        if (!retryError && retryVisit) {
+          console.log('✅ Visite récupérée avec patient_id fallback:', retryVisit.id);
+          
+          // ✅ NOTIFICATIONS POUR LE FALLBACK
+          if (retryVisit.aidant_id) {
+            await supabase.from('notifications').insert({
+              user_id: retryVisit.aidant_id,
+              title: '📅 Nouvelle visite à valider',
+              body: `Visite pour ${retryVisit.target_name || 'le patient'} le ${retryVisit.scheduled_date} à ${retryVisit.scheduled_time}`,
+              type: 'visite',
+              data: { visit_id: visitId, action: 'approve' },
+            });
+          }
+
+          await supabase.from('notifications').insert({
+            user_id: retryVisit.user_id,
+            title: '✅ Visite planifiée !',
+            body: `Votre visite pour ${retryVisit.target_name || 'Personnel'} a été planifiée avec succès après paiement.`,
+            type: 'visite',
+            data: { visit_id: visitId, status: 'planifiee' },
+          });
+
+          return retryVisit;
+        }
+        
+        console.error('❌ Échec de la récupération:', retryError?.message);
+      }
+      
       return null;
     }
 
     console.log('✅ Visite passée de brouillon à planifiee:', visitId);
 
+    // ✅ NOTIFICATIONS
     if (updatedVisit.aidant_id) {
       await supabase.from('notifications').insert({
         user_id: updatedVisit.aidant_id,
@@ -780,7 +916,7 @@ router.get('/verify-payment', async (req, res) => {
 });
 
 // ============================================================
-// 🔔 WEBHOOK FEDAPAY
+// 🔔 WEBHOOK FEDAPAY - CORRIGÉ
 // ============================================================
 router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const startTime = Date.now();
