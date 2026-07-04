@@ -87,7 +87,7 @@ router.get('/accounts', roleMiddleware(['admin', 'coordinator']), async (req, re
 });
 
 // =============================================
-// LISTE DES VISITES - CORRIGÉ AVEC RELATIONS COMPLÈTES
+// LISTE DES VISITES - AVEC RELATIONS COMPLÈTES
 // =============================================
 router.get('/', async (req, res) => {
   try {
@@ -103,179 +103,138 @@ router.get('/', async (req, res) => {
       patientIds = links?.map(l => l.patient_id).filter(Boolean) || [];
     }
 
-    // ✅ 2. Construire la requête avec les bonnes relations
+    // ✅ 2. Construire la requête SANS la relation automatique
     let query = supabase
-      .from('visites')
+      .from('commandes')
       .select(`
         *,
-        patient:patients(*),
-        aidant:aidants!visites_aidant_id_fkey (
-          id,
-          user_id,
-          specialties,
-          available,
-          rating,
-          total_missions,
-          completed_missions,
-          cancelled_missions,
-          user:profiles!aidants_user_id_fkey (
-            id,
-            full_name,
-            email,
-            phone,
-            avatar_url
-          )
-        ),
-        coordinator:profiles!coordinator_id(*),
-        photos:visite_photos(*)
+        patient:patients(*)
       `);
 
     // ✅ 3. Appliquer les filtres selon le rôle
     if (profile.role === 'admin' || profile.role === 'coordinator') {
-      // Admin/Coord → toutes les visites
-      // Pas de filtre
+      // Admin/Coord → toutes les commandes
     } else if (profile.role === 'family') {
-      // ✅ Famille → ses propres visites (personnelles + patients)
       if (patientIds.length > 0) {
-        // Visites pour les patients + visites personnelles
         query = query.or(`patient_id.in.(${patientIds.join(',')}), user_id.eq.${user.id}`);
       } else {
-        // Uniquement les visites personnelles
         query = query.eq('user_id', user.id);
       }
     } else if (profile.role === 'aidant') {
-      // ✅ Aidant → ses visites assignées
-      const aidantId = await getAidantIdFromUserId(user.id);
-      if (aidantId) {
-        query = query.eq('aidant_id', aidantId);
+      const { data: aidant } = await supabase
+        .from('aidants')
+        .select('id')
+        .eq('user_id', user.id)
+        .single();
+
+      if (aidant) {
+        query = query.eq('aidant_id', aidant.id);
       } else {
         return res.json([]);
       }
     }
 
-    const { data, error } = await query.order('scheduled_date', { ascending: true });
+    const { data: orders, error } = await query.order('created_at', { ascending: false });
     if (error) throw error;
 
-    // ✅ 4. FORCER LE RE-CHARGE DES RELATIONS POUR LES FAMILLES
-    let visitsWithFullRelations = data || [];
+    // ✅ 4. Récupérer MANUELLEMENT les aidants avec leurs profils
+    const aidantIds = [...new Set(
+      (orders || [])
+        .filter(o => o.aidant_id)
+        .map(o => o.aidant_id)
+    )];
 
-    if (profile.role === 'family' && visitsWithFullRelations.length > 0) {
-      // Récupérer tous les aidant_id uniques
-      const aidantIds = [...new Set(
-        visitsWithFullRelations
-          .filter(v => v.aidant_id)
-          .map(v => v.aidant_id)
-      )];
+    let aidantMap = {};
+    if (aidantIds.length > 0) {
+      // ✅ Récupérer les aidants
+      const { data: aidants } = await supabase
+        .from('aidants')
+        .select('*')
+        .in('id', aidantIds);
 
-      if (aidantIds.length > 0) {
-        // Récupérer les aidants avec leurs profils
-        const { data: aidantsData } = await supabase
-          .from('aidants')
-          .select(`
-            id,
-            user_id,
-            specialties,
-            available,
-            rating,
-            total_missions,
-            completed_missions,
-            cancelled_missions,
-            user:profiles!aidants_user_id_fkey (
-              id,
-              full_name,
-              email,
-              phone,
-              avatar_url
-            )
-          `)
-          .in('id', aidantIds);
-
-        if (aidantsData) {
-          // Créer un mapping aidant_id → aidant
-          const aidantMap = aidantsData.reduce((acc, a) => {
-            acc[a.id] = a;
-            return acc;
-          }, {});
-
-          // Remplacer les aidants dans les visites
-          visitsWithFullRelations = visitsWithFullRelations.map(visit => ({
-            ...visit,
-            aidant: visit.aidant_id ? aidantMap[visit.aidant_id] || null : null,
-          }));
+      if (aidants) {
+        // ✅ Récupérer les profils des aidants
+        const userIds = aidants.map(a => a.user_id).filter(Boolean);
+        let profileMap = {};
+        
+        if (userIds.length > 0) {
+          const { data: profiles } = await supabase
+            .from('profiles')
+            .select('id, full_name, email, phone, avatar_url, role')
+            .in('id', userIds);
+          
+          if (profiles) {
+            profileMap = profiles.reduce((acc, p) => {
+              acc[p.id] = p;
+              return acc;
+            }, {});
+          }
         }
+
+        // ✅ Construire l'aidant avec son profil
+        aidantMap = aidants.reduce((acc, a) => {
+          acc[a.id] = {
+            ...a,
+            user: a.user_id ? profileMap[a.user_id] || null : null,
+          };
+          return acc;
+        }, {});
       }
     }
 
-    res.json(visitsWithFullRelations);
+    // ✅ 5. Fusionner les données
+    const ordersWithAidants = (orders || []).map(order => ({
+      ...order,
+      aidant: order.aidant_id ? aidantMap[order.aidant_id] || null : null,
+    }));
+
+    res.json(ordersWithAidants);
   } catch (error) {
-    console.error('❌ GET visits error:', error);
+    console.error('❌ GET orders error:', error);
     res.status(500).json({ error: error.message });
   }
 });
-
 // =============================================
-// DÉTAILS D'UNE VISITE - CORRIGÉ
+// DÉTAILS D'UNE VISITE - 
+// =============================================
 // =============================================
 router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { user, profile } = req;
 
-    // ✅ 1. Récupérer la visite avec relations complètes
-    const { data: visit, error } = await supabase
-      .from('visites')
+    const { data: order, error } = await supabase
+      .from('commandes')
       .select(`
         *,
-        patient:patients(*),
-        aidant:aidants!visites_aidant_id_fkey (
-          id,
-          user_id,
-          specialties,
-          available,
-          rating,
-          total_missions,
-          completed_missions,
-          cancelled_missions,
-          user:profiles!aidants_user_id_fkey (
-            id,
-            full_name,
-            email,
-            phone,
-            avatar_url
-          )
-        ),
-        coordinator:profiles!coordinator_id(*),
-        photos:visite_photos(*)
+        patient:patients(*)
       `)
       .eq('id', id)
       .single();
 
     if (error) {
       if (error.code === 'PGRST116') {
-        return res.status(404).json({ error: 'Visite non trouvée' });
+        return res.status(404).json({ error: 'Commande non trouvée' });
       }
       throw error;
     }
 
-    // ✅ 2. Vérifier l'accès
+    // ✅ Vérification d'accès
     let hasAccess = false;
+
     if (['admin', 'coordinator'].includes(profile.role)) {
       hasAccess = true;
     } else if (profile.role === 'family') {
-      if (visit.user_id === user.id) {
-        hasAccess = true;
-      } else if (visit.patient_id) {
-        const { data: links } = await supabase
-          .from('patient_family_links')
-          .select('patient_id')
-          .eq('family_id', user.id)
-          .eq('patient_id', visit.patient_id);
-        hasAccess = links && links.length > 0;
-      }
+      hasAccess = order.user_id === user.id;
     } else if (profile.role === 'aidant') {
-      const aidantId = await getAidantIdFromUserId(user.id);
-      if (aidantId) {
-        hasAccess = visit.aidant_id === aidantId;
+      const { data: aidant } = await supabase
+        .from('aidants')
+        .select('id')
+        .eq('user_id', user.id)
+        .single();
+      
+      if (aidant) {
+        hasAccess = order.aidant_id === aidant.id || order.status === 'disponible';
       }
     }
 
@@ -283,38 +242,37 @@ router.get('/:id', async (req, res) => {
       return res.status(403).json({ error: 'Accès non autorisé' });
     }
 
-    // ✅ 3. Si aidant_id existe mais aidant est null, forcer le rechargement
-    if (visit.aidant_id && !visit.aidant) {
+    // ✅ Récupérer l'aidant manuellement si présent
+    let aidant = null;
+    if (order.aidant_id) {
       const { data: aidantData } = await supabase
         .from('aidants')
-        .select(`
-          id,
-          user_id,
-          specialties,
-          available,
-          rating,
-          total_missions,
-          completed_missions,
-          cancelled_missions,
-          user:profiles!aidants_user_id_fkey (
-            id,
-            full_name,
-            email,
-            phone,
-            avatar_url
-          )
-        `)
-        .eq('id', visit.aidant_id)
+        .select('*')
+        .eq('id', order.aidant_id)
         .single();
 
       if (aidantData) {
-        visit.aidant = aidantData;
+        let userProfile = null;
+        if (aidantData.user_id) {
+          const { data: profileData } = await supabase
+            .from('profiles')
+            .select('id, full_name, email, phone, avatar_url, role')
+            .eq('id', aidantData.user_id)
+            .single();
+          userProfile = profileData;
+        }
+        aidant = { ...aidantData, user: userProfile };
       }
     }
 
-    res.json(visit);
+    const fullOrder = {
+      ...order,
+      aidant,
+    };
+
+    res.json(fullOrder);
   } catch (error) {
-    console.error('❌ Get visit detail error:', error);
+    console.error('❌ Get order error:', error);
     res.status(500).json({ error: error.message });
   }
 });
