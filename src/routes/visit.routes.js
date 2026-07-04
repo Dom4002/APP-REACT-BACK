@@ -135,25 +135,50 @@ router.get('/', async (req, res) => {
 // =============================================
 // DÉTAILS D'UNE VISITE
 // =============================================
+ 
 router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { user, profile } = req;
 
+    // ✅ Récupérer la visite AVEC les relations
     const { data, error } = await supabase
       .from('visites')
       .select(`
         *,
         patient:patients(*),
-        aidant:aidants(*, user:profiles(*)),
+        aidant:aidants(
+          id,
+          user_id,
+          specialties,
+          available,
+          rating,
+          total_missions,
+          completed_missions,
+          cancelled_missions,
+          is_verified,
+          user:profiles!aidants_user_id_fkey(
+            id,
+            full_name,
+            email,
+            phone,
+            avatar_url
+          )
+        ),
         coordinator:profiles!coordinator_id(*),
         photos:visite_photos(*)
       `)
       .eq('id', id)
       .single();
 
-    if (error) throw error;
+    if (error) {
+      if (error.code === 'PGRST116') {
+        return res.status(404).json({ error: 'Visite non trouvée' });
+      }
+      throw error;
+    }
 
+    // ✅ Vérifier les permissions
     let hasAccess = false;
     if (['admin', 'coordinator'].includes(profile.role)) {
       hasAccess = true;
@@ -169,8 +194,16 @@ router.get('/:id', async (req, res) => {
         hasAccess = links && links.length > 0;
       }
     } else if (profile.role === 'aidant') {
-      const aidantId = await getAidantIdFromUserId(user.id);
-      hasAccess = data.aidant_id === aidantId;
+      // ✅ Récupérer l'aidant correspondant à l'utilisateur
+      const { data: aidant, error: aidantError } = await supabase
+        .from('aidants')
+        .select('id')
+        .eq('user_id', user.id)
+        .single();
+
+      if (!aidantError && aidant) {
+        hasAccess = data.aidant_id === aidant.id;
+      }
     }
 
     if (!hasAccess) {
@@ -179,7 +212,7 @@ router.get('/:id', async (req, res) => {
 
     res.json(data);
   } catch (error) {
-    console.error('Get visit detail error:', error);
+    console.error('❌ Get visit detail error:', error);
     res.status(500).json({ error: error.message });
   }
 });
