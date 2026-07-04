@@ -9,7 +9,7 @@ const { supabase } = require('./supabase.service');
 const TARGET_TYPES = {
   PATIENT: 'patient',
   PERSONAL_ACCOUNT: 'personal_account',
-  PERSONAL: 'personal',           // ✅ Alias pour compatibilité frontend
+  PERSONAL: 'personal',            
   FAMILY: 'family',
 };
 
@@ -67,6 +67,7 @@ const PRIORITY = {
  * @param {string} familyId - UUID de la famille (optionnel)
  * @returns {Promise<string|null>} - UUID de l'aidant ou null
  */
+ 
 const getActiveAidantForTarget = async (targetType, targetId, familyId = null) => {
   try {
     const dbTargetType = mapTargetType(targetType);
@@ -82,11 +83,9 @@ const getActiveAidantForTarget = async (targetType, targetId, familyId = null) =
       return null;
     }
 
-    if (!data) {
-      return null;
-    }
+    if (!data) return null;
 
-    // ✅ VÉRIFIER SI data est un aidant_id ou un user_id
+    // ✅ VÉRIFIER SI data EST UN aidant_id OU un user_id
     // 1. Vérifier si data est un aidant_id (dans la table aidants)
     const { data: aidantById, error: errorById } = await supabase
       .from('aidants')
@@ -96,6 +95,7 @@ const getActiveAidantForTarget = async (targetType, targetId, familyId = null) =
 
     if (!errorById && aidantById) {
       // ✅ data est déjà un aidant_id, le retourner directement
+      console.log(`✅ getActiveAidantForTarget: data est un aidant_id: ${data}`);
       return data;
     }
 
