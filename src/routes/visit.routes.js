@@ -1140,7 +1140,7 @@ router.post('/:id/validate', roleMiddleware(['admin', 'coordinator']), async (re
 
     const { data: visit, error: visitError } = await supabase
       .from('visites')
-      .select('patient_id, aidant_id, metadata, user_id, target_type, target_name')
+      .select('patient_id, aidant_id, metadata, user_id, target_type, target_name, status')   
       .eq('id', id)
       .single();
 
