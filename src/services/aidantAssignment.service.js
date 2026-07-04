@@ -1,5 +1,5 @@
 // 📁 backend/src/services/aidantAssignment.service.js
- 
+
 const { supabase } = require('./supabase.service');
 
 // ============================================================
@@ -67,7 +67,6 @@ const PRIORITY = {
  * @param {string} familyId - UUID de la famille (optionnel)
  * @returns {Promise<string|null>} - UUID de l'aidant ou null
  */
- 
 const getActiveAidantForTarget = async (targetType, targetId, familyId = null) => {
   try {
     const dbTargetType = mapTargetType(targetType);
@@ -83,7 +82,10 @@ const getActiveAidantForTarget = async (targetType, targetId, familyId = null) =
       return null;
     }
 
-    if (!data) return null;
+    if (!data) {
+      console.log(`ℹ️ Aucun aidant trouvé pour ${targetType}/${targetId}`);
+      return null;
+    }
 
     // ✅ VÉRIFIER SI data EST UN aidant_id OU un user_id
     // 1. Vérifier si data est un aidant_id (dans la table aidants)
@@ -110,6 +112,18 @@ const getActiveAidantForTarget = async (targetType, targetId, familyId = null) =
       // ✅ data est un user_id, retourner l'aidant_id correspondant
       console.log(`🔄 Conversion user_id ${data} → aidant_id ${aidantByUser.id}`);
       return aidantByUser.id;
+    }
+
+    // 3. Fallback: si data est un ID valide mais non trouvé, essayer de le chercher
+    const { data: aidantByAny, error: errorAny } = await supabase
+      .from('aidants')
+      .select('id')
+      .or(`id.eq.${data}, user_id.eq.${data}`)
+      .maybeSingle();
+
+    if (!errorAny && aidantByAny) {
+      console.log(`🔄 Fallback: ${data} → aidant_id ${aidantByAny.id}`);
+      return aidantByAny.id;
     }
 
     console.warn(`⚠️ Aucun aidant trouvé pour ${data}`);
@@ -159,7 +173,7 @@ const getAllAidantsForTarget = async (targetType, targetId, familyId = null) => 
  * Assigne un aidant à une cible
  * 
  * @param {Object} params
- * @param {string} params.aidantUserId - UUID de l'aidant
+ * @param {string} params.aidantUserId - UUID de l'aidant (user_id)
  * @param {string} params.targetType - 'patient' | 'personal_account' | 'family'
  * @param {string} params.targetId - UUID de la cible
  * @param {string} params.familyId - UUID de la famille (optionnel)
@@ -306,7 +320,7 @@ const assignAidantToTarget = async ({
 
     // 6. Récupérer l'assignation créée via la VUE
     const { data: assignment, error: fetchError } = await supabase
-      .from('aidant_assignments_view')  // ✅ Utiliser la vue
+      .from('aidant_assignments_view')
       .select('*')
       .eq('id', assignmentId)
       .single();
@@ -475,7 +489,7 @@ const revokeAssignment = async (assignmentId, revokedBy = null, reason = null) =
 const getAssignmentsByAidant = async (aidantUserId, status = null) => {
   try {
     let query = supabase
-      .from('aidant_assignments_view')  // ✅ Utiliser la vue
+      .from('aidant_assignments_view')
       .select('*')
       .eq('aidant_user_id', aidantUserId);
 
@@ -549,7 +563,7 @@ const getAssignmentsByTarget = async (targetType, targetId, status = null) => {
     const dbTargetType = mapTargetType(targetType);
     
     let query = supabase
-      .from('aidant_assignments_view')  // ✅ Utiliser la vue
+      .from('aidant_assignments_view')
       .select('*')
       .eq('target_type', dbTargetType)
       .eq('target_id', targetId);
