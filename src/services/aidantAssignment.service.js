@@ -1,6 +1,5 @@
 // 📁 backend/src/services/aidantAssignment.service.js
-// SERVICE DE GESTION DES ASSIGNATIONS D'AIDANTS
-
+ 
 const { supabase } = require('./supabase.service');
 
 // ============================================================
@@ -68,7 +67,6 @@ const PRIORITY = {
  * @param {string} familyId - UUID de la famille (optionnel)
  * @returns {Promise<string|null>} - UUID de l'aidant ou null
  */
- 
 const getActiveAidantForTarget = async (targetType, targetId, familyId = null) => {
   try {
     const dbTargetType = mapTargetType(targetType);
@@ -121,6 +119,7 @@ const getActiveAidantForTarget = async (targetType, targetId, familyId = null) =
     return null;
   }
 };
+
 /**
  * Récupère tous les aidants pour une cible (principal + secondaires)
  * Inclut les aidants du compte et de la famille en fallback
@@ -305,21 +304,10 @@ const assignAidantToTarget = async ({
       };
     }
 
-    // 6. Récupérer l'assignation créée
+    // 6. Récupérer l'assignation créée via la VUE
     const { data: assignment, error: fetchError } = await supabase
-      .from('aidant_assignments')
-      .select(`
-        *,
-        aidant:aidant_user_id(
-          id,
-          user_id,
-          user:profiles!aidants_user_id_fkey(
-            id,
-            full_name,
-            email
-          )
-        )
-      `)
+      .from('aidant_assignments_view')  // ✅ Utiliser la vue
+      .select('*')
       .eq('id', assignmentId)
       .single();
 
@@ -352,7 +340,7 @@ const assignAidantToTarget = async ({
     return {
       success: true,
       assignment: assignment || { id: assignmentId },
-      target_type: mapTargetTypeForResponse(dbTargetType), // ✅ Réponse en 'personal'
+      target_type: mapTargetTypeForResponse(dbTargetType),
       target_name: targetName,
       priority: priority,
     };
@@ -478,7 +466,7 @@ const revokeAssignment = async (assignmentId, revokedBy = null, reason = null) =
 };
 
 /**
- * Récupère toutes les assignations d'un aidant
+ * Récupère toutes les assignations d'un aidant - ✅ UTILISE LA VUE
  * 
  * @param {string} aidantUserId - UUID de l'aidant
  * @param {string} status - Statut des assignations (optionnel)
@@ -487,21 +475,8 @@ const revokeAssignment = async (assignmentId, revokedBy = null, reason = null) =
 const getAssignmentsByAidant = async (aidantUserId, status = null) => {
   try {
     let query = supabase
-      .from('aidant_assignments')
-      .select(`
-        *,
-        target_patient:patients!target_id(
-          id,
-          first_name,
-          last_name,
-          address
-        ),
-        target_profile:profiles!target_id(
-          id,
-          full_name,
-          email
-        )
-      `)
+      .from('aidant_assignments_view')  // ✅ Utiliser la vue
+      .select('*')
       .eq('aidant_user_id', aidantUserId);
 
     if (status) {
@@ -509,15 +484,51 @@ const getAssignmentsByAidant = async (aidantUserId, status = null) => {
     }
 
     const { data, error } = await query.order('priority', { ascending: true });
-    if (error) throw error;
+    
+    if (error) {
+      console.error('❌ getAssignmentsByAidant error:', error);
+      return [];
+    }
 
-    // ✅ Transformer les données pour le frontend
-    const formattedData = (data || []).map(item => ({
-      ...item,
+    // ✅ Formater les données avec les relations
+    const formattedData = (data || []).map((item) => ({
+      id: item.id,
+      aidant_user_id: item.aidant_user_id,
       target_type: mapTargetTypeForResponse(item.target_type),
+      target_id: item.target_id,
+      assignment_type: item.assignment_type,
+      status: item.status,
+      priority: item.priority,
+      expires_at: item.expires_at,
+      created_at: item.created_at,
+      updated_at: item.updated_at,
+      created_by: item.created_by,
+      reason: item.reason,
+      aidant: item.aidant_id ? {
+        id: item.aidant_id,
+        full_name: item.aidant_name,
+        email: item.aidant_email,
+        phone: item.aidant_phone,
+        avatar_url: item.aidant_avatar,
+      } : null,
+      target_patient: item.target_type === 'patient' && item.patient_id ? {
+        id: item.patient_id,
+        first_name: item.patient_first_name,
+        last_name: item.patient_last_name,
+        address: item.patient_address,
+        category: item.patient_category,
+        status: item.patient_status,
+      } : null,
+      target_profile: item.target_type !== 'patient' && item.profile_id ? {
+        id: item.profile_id,
+        full_name: item.profile_name,
+        email: item.profile_email,
+        phone: item.profile_phone,
+        role: item.profile_role,
+      } : null,
     }));
 
-    return formattedData || [];
+    return formattedData;
   } catch (error) {
     console.error('❌ getAssignmentsByAidant error:', error);
     return [];
@@ -525,7 +536,7 @@ const getAssignmentsByAidant = async (aidantUserId, status = null) => {
 };
 
 /**
- * Récupère toutes les assignations pour une cible
+ * Récupère toutes les assignations pour une cible - ✅ UTILISE LA VUE
  * 
  * @param {string} targetType - 'patient' | 'personal_account' | 'family'
  * @param {string} targetId - UUID de la cible
@@ -538,15 +549,8 @@ const getAssignmentsByTarget = async (targetType, targetId, status = null) => {
     const dbTargetType = mapTargetType(targetType);
     
     let query = supabase
-      .from('aidant_assignments')
-      .select(`
-        *,
-        aidant:profiles!aidant_user_id(
-          id,
-          full_name,
-          email
-        )
-      `)
+      .from('aidant_assignments_view')  // ✅ Utiliser la vue
+      .select('*')
       .eq('target_type', dbTargetType)
       .eq('target_id', targetId);
 
@@ -555,15 +559,51 @@ const getAssignmentsByTarget = async (targetType, targetId, status = null) => {
     }
 
     const { data, error } = await query.order('priority', { ascending: true });
-    if (error) throw error;
+    
+    if (error) {
+      console.error('❌ getAssignmentsByTarget error:', error);
+      return [];
+    }
 
-    // ✅ Transformer les données pour le frontend
-    const formattedData = (data || []).map(item => ({
-      ...item,
+    // ✅ Formater les données
+    const formattedData = (data || []).map((item) => ({
+      id: item.id,
+      aidant_user_id: item.aidant_user_id,
       target_type: mapTargetTypeForResponse(item.target_type),
+      target_id: item.target_id,
+      assignment_type: item.assignment_type,
+      status: item.status,
+      priority: item.priority,
+      expires_at: item.expires_at,
+      created_at: item.created_at,
+      updated_at: item.updated_at,
+      created_by: item.created_by,
+      reason: item.reason,
+      aidant: item.aidant_id ? {
+        id: item.aidant_id,
+        full_name: item.aidant_name,
+        email: item.aidant_email,
+        phone: item.aidant_phone,
+        avatar_url: item.aidant_avatar,
+      } : null,
+      target_patient: item.target_type === 'patient' && item.patient_id ? {
+        id: item.patient_id,
+        first_name: item.patient_first_name,
+        last_name: item.patient_last_name,
+        address: item.patient_address,
+        category: item.patient_category,
+        status: item.patient_status,
+      } : null,
+      target_profile: item.target_type !== 'patient' && item.profile_id ? {
+        id: item.profile_id,
+        full_name: item.profile_name,
+        email: item.profile_email,
+        phone: item.profile_phone,
+        role: item.profile_role,
+      } : null,
     }));
 
-    return formattedData || [];
+    return formattedData;
   } catch (error) {
     console.error('❌ getAssignmentsByTarget error:', error);
     return [];
