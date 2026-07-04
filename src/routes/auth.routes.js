@@ -645,7 +645,7 @@ router.post('/admin/process-registration', authMiddleware, roleMiddleware(['admi
       if (status === 'validee') {
         emailData = {
           to: user.email,
-          ...templates.registrationValidated({ name: user.full_name }),
+          ...templates.registrationValidated({    name: user.full_name,   role: user.role || 'family' }),
         };
       } else {
         emailData = {
