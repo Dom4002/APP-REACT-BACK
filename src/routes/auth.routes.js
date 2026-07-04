@@ -427,7 +427,7 @@ router.post('/register', async (req, res) => {
     }
 
     // =============================================
-    // 6. ENVOI EMAIL
+    // 6. ENVOI EMAIL - CORRIGÉ AVEC LES BONS TEMPLATES
     // =============================================
     let emailSent = false;
     let emailError = null;
@@ -435,10 +435,21 @@ router.post('/register', async (req, res) => {
     try {
       console.log('🔍 Envoi email...');
       
-      const emailData = { 
-        to: email, 
-        ...templates.welcome(full_name, role === 'aidant' ? 'aidant' : 'general')
-      };
+      // ✅ UTILISER LE BON TEMPLATE SELON LE RÔLE
+      let emailData;
+      if (role === 'aidant') {
+        emailData = { 
+          to: email, 
+          ...templates.welcomeAidant(full_name, { role: 'aidant' })
+        };
+        console.log('📧 Template utilisateur: welcomeAidant');
+      } else {
+        emailData = { 
+          to: email, 
+          ...templates.welcomeFamily(full_name, { role: 'family', patient_category: patientData?.category || 'senior' })
+        };
+        console.log('📧 Template utilisateur: welcomeFamily');
+      }
 
       const result = await sendEmailWithLog(emailData, 'REGISTER');
       emailSent = result.success;
@@ -645,7 +656,10 @@ router.post('/admin/process-registration', authMiddleware, roleMiddleware(['admi
       if (status === 'validee') {
         emailData = {
           to: user.email,
-          ...templates.registrationValidated({    name: user.full_name,   role: user.role || 'family' }),
+          ...templates.registrationValidated({ 
+            name: user.full_name, 
+            role: user.role || 'family' 
+          }),
         };
       } else {
         emailData = {
