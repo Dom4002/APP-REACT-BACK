@@ -442,14 +442,23 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
     console.log('✅ Visite passée de brouillon à planifiee:', visitId);
 
     // ✅ NOTIFICATIONS
-    if (updatedVisit.aidant_id) {
-      await supabase.from('notifications').insert({
-        user_id: updatedVisit.aidant_id,
-        title: '📅 Nouvelle visite à valider',
-        body: `Visite pour ${updatedVisit.target_name || 'le patient'} le ${updatedVisit.scheduled_date} à ${updatedVisit.scheduled_time}`,
-        type: 'visite',
-        data: { visit_id: visitId, action: 'approve' },
-      });
+     if (updatedVisit.aidant_id) {
+      // Récupérer le user_id de l'aidant
+      const { data: aidant } = await supabase
+        .from('aidants')
+        .select('user_id')
+        .eq('id', updatedVisit.aidant_id)
+        .single();
+    
+      if (aidant) {
+        await supabase.from('notifications').insert({
+          user_id: aidant.user_id,   
+          title: '📅 Nouvelle visite à valider',
+          body: `Visite pour ${updatedVisit.target_name || 'le patient'} le ${updatedVisit.scheduled_date} à ${updatedVisit.scheduled_time}`,
+          type: 'visite',
+          data: { visit_id: visitId, action: 'approve' },
+        });
+      }
     }
 
     const targetDisplay = updatedVisit.target_name || (updatedVisit.patient ? `${updatedVisit.patient.first_name} ${updatedVisit.patient.last_name}` : 'Personnel');
