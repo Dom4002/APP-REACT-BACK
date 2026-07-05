@@ -18,18 +18,10 @@ const profileCache = new Map();
 // ============================================================
 const getAvailableAidants = async (filters = {}) => {
   try {
+    // ✅ Construire la requête SANS la relation automatique
     let query = supabase
       .from('aidants')
-      .select(`
-        *,
-        user:profiles!user_id(
-          id,
-          full_name,
-          email,
-          phone,
-          avatar_url
-        )
-      `)
+      .select('*')
       .eq('is_verified', true)
       .eq('status', 'approved');
 
@@ -61,11 +53,29 @@ const getAvailableAidants = async (filters = {}) => {
     const offset = filters.offset || 0;
     query = query.range(offset, offset + limit - 1);
 
-    const { data, error } = await query;
+    const { data: aidants, error } = await query;
     if (error) throw error;
 
-    const aidantsWithStats = await Promise.all((data || []).map(async (aidant) => {
-      // ✅ Compter les assignations actives (nouvelle table)
+    // ✅ Récupérer les profils MANUELLEMENT
+    const userIds = (aidants || []).map(a => a.user_id).filter(Boolean);
+    let profileMap = {};
+
+    if (userIds.length > 0) {
+      const { data: profiles } = await supabase
+        .from('profiles')
+        .select('id, full_name, email, phone, avatar_url, role')
+        .in('id', userIds);
+      
+      if (profiles) {
+        profileMap = profiles.reduce((acc, p) => {
+          acc[p.id] = p;
+          return acc;
+        }, {});
+      }
+    }
+
+    // ✅ Calculer les stats pour chaque aidant
+    const aidantsWithStats = await Promise.all((aidants || []).map(async (aidant) => {
       const { count: activeAssignments, error: countError } = await supabase
         .from('aidant_assignments')
         .select('id', { count: 'exact', head: true })
@@ -74,36 +84,16 @@ const getAvailableAidants = async (filters = {}) => {
 
       if (countError) {
         console.error('❌ Erreur comptage assignations:', countError);
-        return {
-          ...aidant,
-          active_assignments: 0,
-          max_assignments: aidant.max_assignments || 4,
-          avg_rating: aidant.rating || 0,
-          total_reviews: 0,
-          is_available: aidant.available,
-          availability_status: aidant.available ? 'available' : 'unavailable',
-        };
       }
-
-      const { data: reviews, error: reviewsError } = await supabase
-        .from('aidant_reviews')
-        .select('rating')
-        .eq('aidant_id', aidant.id);
-
-      const totalReviews = reviews?.length || 0;
-      const avgRating = totalReviews > 0
-        ? reviews.reduce((sum, r) => sum + r.rating, 0) / totalReviews
-        : aidant.rating || 0;
 
       const maxAssignments = aidant.max_assignments || 4;
       const isAvailable = aidant.available && (activeAssignments || 0) < maxAssignments;
 
       return {
         ...aidant,
+        user: aidant.user_id ? profileMap[aidant.user_id] || null : null,
         active_assignments: activeAssignments || 0,
         max_assignments: maxAssignments,
-        avg_rating: Math.round(avgRating * 10) / 10,
-        total_reviews: totalReviews,
         is_available: isAvailable,
         availability_status: isAvailable ? 'available' : 
           ((activeAssignments || 0) >= maxAssignments ? 'full' : 'unavailable'),
