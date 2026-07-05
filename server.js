@@ -14,6 +14,7 @@ const { errorHandler, notFoundHandler } = require('./src/utils/errorHandler');
 const { logRequest } = require('./src/config/logger');
 const { setupSwagger } = require('./src/config/swagger');
 const fileUpload = require('express-fileupload');
+const pushRoutes = require('./src/routes/push.routes');
 
 const app = express();
 
@@ -159,6 +160,8 @@ app.use('/api/settings', settingsRoutes);
 app.use('/api/offers', offerRoutes);
 app.use('/api/aidants', aidantCatalogRoutes);
 app.use('/api/assignments', aidantAssignmentsRoutes);
+app.use('/api/push', pushRoutes);
+
 
 // =============================================
 // ✅ REDIRECTION FEDAPAY
