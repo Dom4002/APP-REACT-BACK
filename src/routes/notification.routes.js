@@ -2,10 +2,11 @@ const express = require('express');
 const router = express.Router();
 const { supabase } = require('../services/supabase.service');
 const authMiddleware = require('../middleware/auth.middleware');
-const { createNotification } = require('../services/notification.service');
+const { createNotification, sendPushNotification } = require('../services/notification.service');
 
+ 
 // ============================================================
-// ✅ TEST NOTIFICATION (SANS AUTH POUR LES TESTS RAPIDES)
+// ✅ TEST NOTIFICATION (AVEC ENVOI DE PUSH RÉEL)
 // ============================================================
 router.post('/test', async (req, res) => {
   try {
@@ -60,12 +61,20 @@ router.post('/test', async (req, res) => {
 
     if (error) throw error;
 
-    console.log(`✅ Notification test créée: ${notification.id}`);
+    console.log(`✅ Notification test créée en base : ${notification.id}`);
+
+    // 🔥 CORRECTIF CRUCIAL POUR APPLICATION FERMÉE : Envoi du push réel via Firebase FCM !
+    try {
+      await sendPushNotification(userId, notification.title, notification.body, notification.data);
+      console.log(`🚀 Push FCM envoyé avec succès pour l'utilisateur ${userId}`);
+    } catch (pushError) {
+      console.warn(`⚠️ Échec de l'envoi du push FCM (vérifiez vos variables d'environnement sur Render) :`, pushError.message);
+    }
 
     // ✅ Renvoyer la notification dans la réponse
     res.json({
       success: true,
-      message: 'Notification de test envoyée avec succès',
+      message: 'Notification de test insérée et push envoyé',
       notification: notification,
       user: {
         id: user.id,
