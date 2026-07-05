@@ -4,135 +4,128 @@ const express = require('express');
 const router = express.Router();
 const { supabase } = require('../services/supabase.service');
 const authMiddleware = require('../middleware/auth.middleware');
+const roleMiddleware = require('../middleware/role.middleware');
+const { sendPushToUser, sendPushToMultipleUsers } = require('../services/push.service');
+const rateLimit = require('express-rate-limit');
 
-// ✅ Toutes les routes nécessitent une authentification
+// ✅ Rate limiting spécifique pour les push
+const pushLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 30, // 30 notifications par minute par utilisateur
+  message: { error: 'Trop de notifications envoyées' },
+});
+
 router.use(authMiddleware);
 
 // ============================================================
-// TEST VAPID - ROUTE DE TEST POUR VÉRIFIER LES PUSH
+// ENVOYER UNE NOTIFICATION
 // ============================================================
-router.post('/test-vapid', async (req, res) => {
+router.post('/send', pushLimiter, async (req, res) => {
   try {
-    const userId = req.body.userId || req.user.id;
-    
-    console.log(`🧪 Test VAPID pour l'utilisateur: ${userId}`);
+    const { userId, title, body, data, url } = req.body;
 
-    // ✅ Vérifier que l'utilisateur existe
-    const { data: user, error: userError } = await supabase
-      .from('profiles')
-      .select('id, full_name, email')
-      .eq('id', userId)
-      .single();
-
-    if (userError || !user) {
-      return res.status(404).json({
-        success: false,
-        error: 'Utilisateur non trouvé'
-      });
+    if (!userId) {
+      return res.status(400).json({ success: false, error: 'userId requis' });
     }
 
-    // ✅ Récupérer les tokens push de l'utilisateur
-    const { data: tokens, error: tokensError } = await supabase
-      .from('push_tokens')
-      .select('token')
-      .eq('user_id', userId)
-      .eq('is_active', true);
+    const payload = {
+      title: title || 'Santé Plus Services',
+      body: body || 'Vous avez une nouvelle notification',
+      icon: '/icon-192.png',
+      badge: '/icon-72.png',
+      data: data || {},
+      url: url || '/app',
+      tag: data?.tag || `notification_${Date.now()}`,
+      timestamp: new Date().toISOString(),
+    };
 
-    if (tokensError) throw tokensError;
+    console.log(`📤 Envoi push à l'utilisateur ${userId}`);
 
-    if (!tokens || tokens.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'Aucun token push trouvé pour cet utilisateur'
-      });
-    }
-
-    console.log(`📋 ${tokens.length} token(s) push trouvés`);
-
-    // ✅ Créer la notification en base
-    const { data: notification, error: notifError } = await supabase
-      .from('notifications')
-      .insert({
-        user_id: userId,
-        title: '🔔 Test VAPID',
-        body: 'Cette notification push utilise VAPID pour fonctionner en arrière-plan !',
-        type: 'system',
-        data: { test: true, vapid: true },
-        is_read: false,
-        is_sent: true,
-        sent_at: new Date().toISOString(),
-        is_delivered: true,
-        delivered_at: new Date().toISOString(),
-      })
-      .select()
-      .single();
-
-    if (notifError) {
-      console.error('❌ Erreur création notification:', notifError);
-    }
+    const result = await sendPushToUser(userId, payload);
 
     res.json({
-      success: true,
-      message: '✅ Notification push test créée en base',
-      notification: notification || null,
-      tokens_found: tokens.length,
-      user: {
-        id: user.id,
-        full_name: user.full_name,
-        email: user.email
-      }
+      success: result.success,
+      message: result.success ? 'Notification envoyée' : 'Erreur lors de l\'envoi',
+      sent: result.sent || 0,
+      total: result.total || 0,
+      queueStats: result.queueStats,
     });
-
   } catch (error) {
-    console.error('❌ Erreur test VAPID:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
+    console.error('❌ Erreur send push:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
 // ============================================================
-// ENVOYER UNE NOTIFICATION PUSH (AVEC VAPID)
+// ENVOI EN BATCH (ADMIN)
 // ============================================================
-router.post('/send', async (req, res) => {
+router.post('/send-batch', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
   try {
-    const { userId, title, body, data } = req.body;
+    const { userIds, title, body, data, url } = req.body;
 
-    if (!userId) {
-      return res.status(400).json({
-        success: false,
-        error: 'userId est requis'
-      });
+    if (!userIds || !Array.isArray(userIds) || userIds.length === 0) {
+      return res.status(400).json({ success: false, error: 'userIds requis' });
     }
 
-    // ✅ Créer la notification en base
-    const { data: notification, error } = await supabase
-      .from('notifications')
-      .insert({
-        user_id: userId,
-        title: title || 'Santé Plus Services',
-        body: body || 'Vous avez une nouvelle notification',
-        type: data?.type || 'system',
-        data: data || {},
-        is_read: false,
-        is_sent: true,
-        sent_at: new Date().toISOString(),
-        is_delivered: true,
-        delivered_at: new Date().toISOString(),
-      })
-      .select()
-      .single();
+    if (userIds.length > 1000) {
+      return res.status(400).json({ success: false, error: 'Maximum 1000 utilisateurs par lot' });
+    }
 
-    if (error) throw error;
+    const payload = {
+      title: title || 'Santé Plus Services',
+      body: body || 'Vous avez une nouvelle notification',
+      icon: '/icon-192.png',
+      badge: '/icon-72.png',
+      data: data || {},
+      url: url || '/app',
+      tag: data?.tag || `notification_${Date.now()}`,
+      timestamp: new Date().toISOString(),
+    };
+
+    console.log(`📤 Envoi batch à ${userIds.length} utilisateurs`);
+
+    const result = await sendPushToMultipleUsers(userIds, payload);
 
     res.json({
       success: true,
-      message: 'Notification push envoyée',
-      notification
+      total: userIds.length,
+      results: result,
     });
   } catch (error) {
-    console.error('❌ Erreur send push:', error);
+    console.error('❌ Erreur send-batch:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ============================================================
+// STATISTIQUES (ADMIN)
+// ============================================================
+router.get('/stats', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
+  try {
+    const [
+      { count: total },
+      { count: active },
+      { count: inactive },
+      { data: recent }
+    ] = await Promise.all([
+      supabase.from('push_tokens').select('*', { count: 'exact', head: true }),
+      supabase.from('push_tokens').select('*', { count: 'exact', head: true }).eq('is_active', true),
+      supabase.from('push_tokens').select('*', { count: 'exact', head: true }).eq('is_active', false),
+      supabase.from('push_tokens').select('*').order('last_used_at', { ascending: false }).limit(10),
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        total,
+        active,
+        inactive,
+        recent,
+        queueStats: require('../services/push.service').notificationQueue.stats,
+      },
+    });
+  } catch (error) {
+    console.error('❌ Erreur stats:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
