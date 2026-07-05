@@ -11,8 +11,7 @@ const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY;
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
 
 if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) {
-  console.warn('⚠️ VAPID keys manquantes. Les notifications push ne fonctionneront pas.');
-  console.warn('📋 Générez les clés avec: npx web-push generate-vapid-keys');
+  console.warn('⚠️ VAPID keys manquantes');
 }
 
 webpush.setVapidDetails(
@@ -22,69 +21,126 @@ webpush.setVapidDetails(
 );
 
 // ============================================================
-// ENVOYER UNE NOTIFICATION PUSH
+// CONFIGURATION
 // ============================================================
 
-const sendPushNotification = async (subscription, payload) => {
-  try {
-    if (!subscription || !subscription.endpoint) {
-      throw new Error('Abonnement push invalide');
-    }
-
-    // ✅ Vérifier que les clés VAPID sont configurées
-    if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) {
-      console.warn('⚠️ Clés VAPID manquantes, notification non envoyée');
-      return { success: false, error: 'VAPID keys missing' };
-    }
-
-    console.log('📤 Envoi notification push vers:', subscription.endpoint.substring(0, 50) + '...');
-
-    const result = await webpush.sendNotification(
-      subscription,
-      JSON.stringify(payload)
-    );
-
-    console.log('✅ Notification push envoyée avec succès');
-    return { success: true, result };
-  } catch (error) {
-    console.error('❌ Erreur envoi push:', error.message);
-
-    // ✅ Si l'abonnement est expiré, le supprimer
-    if (error.statusCode === 410 || error.statusCode === 404) {
-      console.log('🗑️ Abonnement push expiré, suppression en base...');
-      try {
-        await supabase
-          .from('push_tokens')
-          .delete()
-          .eq('token', JSON.stringify(subscription));
-        console.log('✅ Abonnement push supprimé');
-      } catch (dbError) {
-        console.error('❌ Erreur suppression abonnement:', dbError);
-      }
-    }
-
-    return { success: false, error: error.message };
-  }
+const CONFIG = {
+  maxRetries: 3,
+  retryDelay: 2000, // 2 secondes
+  batchSize: 100, // Nombre de notifications par lot
+  rateLimit: 100, // Notifications par seconde
 };
 
 // ============================================================
-// ENVOYER À UN UTILISATEUR
+// FILE D'ATTENTE (Queue)
+// ============================================================
+
+class NotificationQueue {
+  constructor() {
+    this.queue = [];
+    this.processing = false;
+    this.stats = {
+      sent: 0,
+      failed: 0,
+      pending: 0,
+    };
+  }
+
+  async add(notification) {
+    this.queue.push(notification);
+    this.stats.pending = this.queue.length;
+    
+    if (!this.processing) {
+      this.process();
+    }
+  }
+
+  async process() {
+    this.processing = true;
+
+    while (this.queue.length > 0) {
+      const batch = this.queue.splice(0, CONFIG.batchSize);
+      await this.sendBatch(batch);
+      
+      // ✅ Pause pour respecter le rate limit
+      await sleep(1000 / CONFIG.rateLimit);
+    }
+
+    this.processing = false;
+  }
+
+  async sendBatch(batch) {
+    const results = await Promise.allSettled(
+      batch.map(notification => this.sendOne(notification))
+    );
+
+    results.forEach((result, index) => {
+      if (result.status === 'fulfilled') {
+        this.stats.sent++;
+      } else {
+        this.stats.failed++;
+        console.error(`❌ Échec notification ${batch[index].id}:`, result.reason);
+      }
+    });
+
+    this.stats.pending = this.queue.length;
+  }
+
+  async sendOne(notification) {
+    const { subscription, payload, userId } = notification;
+    
+    let attempts = 0;
+    while (attempts < CONFIG.maxRetries) {
+      try {
+        const result = await webpush.sendNotification(subscription, JSON.stringify(payload));
+        
+        // ✅ Mettre à jour le dernier envoi
+        await supabase
+          .from('push_tokens')
+          .update({ last_used_at: new Date().toISOString() })
+          .eq('token', JSON.stringify(subscription));
+
+        return result;
+      } catch (error) {
+        attempts++;
+        
+        if (error.statusCode === 410 || error.statusCode === 404) {
+          // ✅ Token expiré, le supprimer
+          await supabase
+            .from('push_tokens')
+            .delete()
+            .eq('token', JSON.stringify(subscription));
+          throw error;
+        }
+
+        if (attempts < CONFIG.maxRetries) {
+          await sleep(CONFIG.retryDelay * attempts);
+        } else {
+          throw error;
+        }
+      }
+    }
+  }
+}
+
+const notificationQueue = new NotificationQueue();
+
+// ============================================================
+// FONCTIONS PRINCIPALES
 // ============================================================
 
 const sendPushToUser = async (userId, payload) => {
   try {
-    // ✅ Récupérer tous les tokens de l'utilisateur
+    // ✅ Récupérer TOUS les tokens de l'utilisateur
     const { data: tokens, error } = await supabase
       .from('push_tokens')
-      .select('token')
+      .select('*')
       .eq('user_id', userId)
       .eq('is_active', true);
 
     if (error) throw error;
-
     if (!tokens || tokens.length === 0) {
-      console.log(`ℹ️ Aucun token push pour l'utilisateur ${userId}`);
-      return { success: false, sent: 0, message: 'Aucun token trouvé' };
+      return { success: false, sent: 0, message: 'Aucun token' };
     }
 
     let sent = 0;
@@ -92,29 +148,40 @@ const sendPushToUser = async (userId, payload) => {
 
     for (const token of tokens) {
       try {
-        // ✅ Le token peut être stocké comme JSON string
         let subscription;
         try {
           subscription = typeof token.token === 'string' 
             ? JSON.parse(token.token) 
             : token.token;
         } catch {
-          // Si ce n'est pas du JSON, c'est peut-être un token simple
           subscription = { endpoint: token.token };
         }
 
-        const result = await sendPushNotification(subscription, payload);
-        if (result.success) {
-          sent++;
-        }
-        results.push(result);
-      } catch (err) {
-        console.error('❌ Erreur pour un token:', err.message);
-        results.push({ success: false, error: err.message });
+        // ✅ Ajouter à la queue
+        await notificationQueue.add({
+          id: token.id,
+          subscription,
+          payload,
+          userId,
+        });
+
+        sent++;
+        results.push({ success: true, tokenId: token.id });
+      } catch (error) {
+        results.push({ success: false, tokenId: token.id, error: error.message });
       }
     }
 
-    return { success: true, sent, total: tokens.length, results };
+    // ✅ Créer la notification en base
+    await createNotificationInDB(userId, payload);
+
+    return {
+      success: true,
+      sent,
+      total: tokens.length,
+      results,
+      queueStats: notificationQueue.stats,
+    };
   } catch (error) {
     console.error('❌ Erreur sendPushToUser:', error);
     return { success: false, error: error.message };
@@ -122,43 +189,52 @@ const sendPushToUser = async (userId, payload) => {
 };
 
 // ============================================================
-// ENVOYER À PLUSIEURS UTILISATEURS
+// ENVOI EN BATCH (BULK)
 // ============================================================
 
 const sendPushToMultipleUsers = async (userIds, payload) => {
   const results = [];
-  for (const userId of userIds) {
-    const result = await sendPushToUser(userId, payload);
-    results.push({ userId, ...result });
+  const batchSize = 50;
+
+  for (let i = 0; i < userIds.length; i += batchSize) {
+    const batch = userIds.slice(i, i + batchSize);
+    const batchResults = await Promise.all(
+      batch.map(userId => sendPushToUser(userId, payload))
+    );
+    results.push(...batchResults);
   }
+
   return results;
 };
 
 // ============================================================
-// ENVOYER À TOUS LES AIDANTS DISPONIBLES
+// CRÉER UNE NOTIFICATION EN BASE
 // ============================================================
 
-const sendPushToAvailableAidants = async (payload) => {
+const createNotificationInDB = async (userId, payload) => {
   try {
-    const { data: aidants, error } = await supabase
-      .from('aidants')
-      .select('user_id')
-      .eq('available', true)
-      .eq('is_verified', true)
-      .eq('status', 'approved');
+    const { data, error } = await supabase
+      .from('notifications')
+      .insert({
+        user_id: userId,
+        title: payload.title,
+        body: payload.body,
+        type: payload.data?.type || 'system',
+        data: payload.data || {},
+        is_read: false,
+        is_sent: true,
+        sent_at: new Date().toISOString(),
+        is_delivered: true,
+        delivered_at: new Date().toISOString(),
+      })
+      .select()
+      .single();
 
     if (error) throw error;
-
-    if (!aidants || aidants.length === 0) {
-      console.log('ℹ️ Aucun aidant disponible');
-      return { success: true, sent: 0 };
-    }
-
-    const userIds = aidants.map(a => a.user_id);
-    return await sendPushToMultipleUsers(userIds, payload);
+    return data;
   } catch (error) {
-    console.error('❌ Erreur sendPushToAvailableAidants:', error);
-    return { success: false, error: error.message };
+    console.error('❌ Erreur création notification en base:', error);
+    return null;
   }
 };
 
@@ -167,8 +243,7 @@ const sendPushToAvailableAidants = async (payload) => {
 // ============================================================
 
 module.exports = {
-  sendPushNotification,
   sendPushToUser,
   sendPushToMultipleUsers,
-  sendPushToAvailableAidants,
+  notificationQueue,
 };
