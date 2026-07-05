@@ -1,12 +1,87 @@
-// 📁 backend/src/routes/notification.routes.js
-
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../services/supabase.service');
 const authMiddleware = require('../middleware/auth.middleware');
 const { createNotification } = require('../services/notification.service');
 
-// ✅ TOUTES LES ROUTES NÉCESSITENT UNE AUTH (sauf test)
+// ============================================================
+// ✅ TEST NOTIFICATION (SANS AUTH POUR LES TESTS RAPIDES)
+// ============================================================
+router.post('/test', async (req, res) => {
+  try {
+    const { userId, title, body } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: 'userId est requis'
+      });
+    }
+
+    console.log(`📨 Envoi notification test à: ${userId}`);
+
+    // ✅ Vérifier que l'utilisateur existe
+    const { data: user, error: userError } = await supabase
+      .from('profiles')
+      .select('id, full_name, email')
+      .eq('id', userId)
+      .single();
+
+    if (userError || !user) {
+      return res.status(404).json({
+        success: false,
+        error: 'Utilisateur non trouvé'
+      });
+    }
+
+    // ✅ Créer la notification en base
+    const notificationData = {
+      user_id: userId,
+      title: title || '🔔 Test notification',
+      body: body || 'Ceci est une notification de test.',
+      type: 'system',
+      is_read: false,
+      is_sent: true,
+      sent_at: new Date().toISOString(),
+      is_delivered: true,
+      delivered_at: new Date().toISOString(),
+      data: { 
+        test: true, 
+        source: 'test-route',
+        timestamp: new Date().toISOString()
+      }
+    };
+
+    const { data: notification, error } = await supabase
+      .from('notifications')
+      .insert(notificationData)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    console.log(`✅ Notification test créée: ${notification.id}`);
+
+    // ✅ Renvoyer la notification dans la réponse
+    res.json({
+      success: true,
+      message: 'Notification de test envoyée avec succès',
+      notification: notification,
+      user: {
+        id: user.id,
+        full_name: user.full_name,
+        email: user.email
+      }
+    });
+  } catch (error) {
+    console.error('❌ Test notification error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ============================================================
+// 🔐 TOUTES LES AUTRES ROUTES CI-DESSOUS NÉCESSITENT UNE AUTH
+// ============================================================
 router.use(authMiddleware);
 
 // ============================================================
@@ -91,7 +166,6 @@ router.put('/read-all', async (req, res) => {
   }
 });
 
- 
 // ============================================================
 // ENREGISTRER UN TOKEN PUSH (MULTI-APPAREIL CORRIGÉ)
 // ============================================================
@@ -107,8 +181,8 @@ router.post('/register-token', async (req, res) => {
       });
     }
 
-     // Nous réalisons un UPSERT pour enregistrer ou mettre à jour le token unique de l'appareil.
-    // Cela permet de préserver les sessions ouvertes sur d'autres mobiles ou ordinateurs.
+    // ✅ Réalisation d'un UPSERT (Insertion ou mise à jour du token propre à l'appareil)
+    // Cela préserve les sessions ouvertes sur d'autres mobiles ou ordinateurs
     const { error } = await supabase
       .from('push_tokens')
       .upsert({
@@ -119,7 +193,7 @@ router.post('/register-token', async (req, res) => {
         last_used_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       }, {
-        onConflict: 'token' // Contrainte d'unicité sur la colonne 'token'
+        onConflict: 'token' // Contrainte d'unicité (UNIQUE ou PRIMARY KEY) sur la colonne 'token'
       });
 
     if (error) throw error;
@@ -157,81 +231,6 @@ router.post('/remove-token', async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     console.error('❌ Remove token error:', error);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// ============================================================
-// ✅ TEST NOTIFICATION (SANS AUTH POUR TESTS)
-// ============================================================
-router.post('/test', async (req, res) => {
-  try {
-    const { userId, title, body } = req.body;
-
-    if (!userId) {
-      return res.status(400).json({
-        success: false,
-        error: 'userId est requis'
-      });
-    }
-
-    console.log(`📨 Envoi notification test à: ${userId}`);
-
-    // ✅ Vérifier que l'utilisateur existe
-    const { data: user, error: userError } = await supabase
-      .from('profiles')
-      .select('id, full_name, email')
-      .eq('id', userId)
-      .single();
-
-    if (userError || !user) {
-      return res.status(404).json({
-        success: false,
-        error: 'Utilisateur non trouvé'
-      });
-    }
-
-    // ✅ Créer la notification en base
-    const notificationData = {
-      user_id: userId,
-      title: title || '🔔 Test notification',
-      body: body || 'Ceci est une notification de test.',
-      type: 'system',
-      is_read: false,
-      is_sent: true,
-      sent_at: new Date().toISOString(),
-      is_delivered: true,
-      delivered_at: new Date().toISOString(),
-      data: { 
-        test: true, 
-        source: 'test-route',
-        timestamp: new Date().toISOString()
-      }
-    };
-
-    const { data: notification, error } = await supabase
-      .from('notifications')
-      .insert(notificationData)
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    console.log(`✅ Notification test créée: ${notification.id}`);
-
-    // ✅ Renvoyer la notification dans la réponse
-    res.json({
-      success: true,
-      message: 'Notification de test envoyée avec succès',
-      notification: notification,
-      user: {
-        id: user.id,
-        full_name: user.full_name,
-        email: user.email
-      }
-    });
-  } catch (error) {
-    console.error('❌ Test notification error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
