@@ -63,6 +63,7 @@ app.use(cors({
   origin: [
     'http://localhost:5173',
     'https://app-sante-plus-react-front.vercel.app',
+    'https://app-sante-plus-react-front-tawny.vercel.app',
     'https://app-sante-plus-react-front-git-main-abouamhster-cmyks-projects.vercel.app'
   ],
   credentials: true,
