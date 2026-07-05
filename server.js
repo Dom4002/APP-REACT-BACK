@@ -78,10 +78,28 @@ app.use(fileUpload({
   abortOnLimit: true,
 }));
 
+// =============================================
+// ✅ RATE LIMITING CORRIGÉ
+// =============================================
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 500, // ← Augmenter de 100 à 500
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 500, // ✅ Augmenté à 500
   message: { error: 'Trop de requêtes, veuillez réessayer plus tard' },
+  skip: (req) => {
+    // ✅ Ignorer les routes importantes
+    const skipPaths = [
+      '/api/health',
+      '/health',
+      '/billing/health',
+      '/api/notifications',
+      '/api/notifications/register-token',
+      '/api/notifications/test',
+      '/api/offers',
+      '/api/auth/login',
+      '/api/auth/register',
+    ];
+    return skipPaths.includes(req.path) || req.path.startsWith('/api/notifications');
+  },
   validate: {
     xForwardedForHeader: false,
     trustProxy: false,
@@ -120,15 +138,6 @@ const aidantAssignmentsRoutes = require('./src/routes/aidantAssignments.routes')
 // ✅ DEBUG
 console.log('📋 === ROUTES D\'ASSIGNATION ===');
 console.log('📋 aidantAssignmentsRoutes:', !!aidantAssignmentsRoutes);
-if (aidantAssignmentsRoutes) {
-  console.log('📋 Type:', typeof aidantAssignmentsRoutes);
-  console.log('📋 Routes disponibles:', aidantAssignmentsRoutes.stack?.map(r => {
-    const routePath = r.route?.path || r.path || '?';
-    const methods = r.route?.methods ? Object.keys(r.route.methods).join(',') : '?';
-    return `${methods.toUpperCase()} ${routePath}`;
-  }) || []);
-}
-console.log('📋 ================================');
 
 // =============================================
 // ✅ APPLICATION DES ROUTES
@@ -149,8 +158,7 @@ app.use('/api/admin-setup', adminSetupRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/offers', offerRoutes);
 app.use('/api/aidants', aidantCatalogRoutes);
-app.use('/api/assignments', aidantAssignmentsRoutes);  
-
+app.use('/api/assignments', aidantAssignmentsRoutes);
 
 // =============================================
 // ✅ REDIRECTION FEDAPAY
