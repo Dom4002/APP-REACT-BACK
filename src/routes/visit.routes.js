@@ -1,8 +1,5 @@
 // 📁 backend/src/routes/visit.routes.js
-// VERSION CORRIGÉE - LOGIQUE UNIFIÉE VISITES
-// ✅ Correction des routes GET qui utilisaient "commandes" au lieu de "visites"
-// ✅ Utilisation des helpers pour les prix et statuts
-// ✅ Logique cohérente pour les brouillons et paiements
+ 
 
 const express = require('express');
 const router = express.Router();
