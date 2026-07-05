@@ -91,8 +91,9 @@ router.put('/read-all', async (req, res) => {
   }
 });
 
+ 
 // ============================================================
-// ENREGISTRER UN TOKEN PUSH
+// ENREGISTRER UN TOKEN PUSH (MULTI-APPAREIL CORRIGÉ)
 // ============================================================
 router.post('/register-token', async (req, res) => {
   try {
@@ -106,28 +107,24 @@ router.post('/register-token', async (req, res) => {
       });
     }
 
-    // ✅ Supprimer l'ancien token
-    await supabase
-      .from('push_tokens')
-      .delete()
-      .eq('user_id', userId);
-
-    // ✅ Insérer le nouveau token
+     // Nous réalisons un UPSERT pour enregistrer ou mettre à jour le token unique de l'appareil.
+    // Cela permet de préserver les sessions ouvertes sur d'autres mobiles ou ordinateurs.
     const { error } = await supabase
       .from('push_tokens')
-      .insert({
+      .upsert({
         user_id: userId,
-        token: token,
+        token: typeof token === 'object' ? JSON.stringify(token) : token,
         device_info: device_info || 'web',
         is_active: true,
         last_used_at: new Date().toISOString(),
-        created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
+      }, {
+        onConflict: 'token' // Contrainte d'unicité sur la colonne 'token'
       });
 
     if (error) throw error;
 
-    console.log(`✅ Token push enregistré pour l'utilisateur ${userId}`);
+    console.log(`✅ Token push enregistré/mis à jour pour l'utilisateur ${userId}`);
     res.json({ success: true, message: 'Token enregistré' });
   } catch (error) {
     console.error('❌ Register token error:', error);
