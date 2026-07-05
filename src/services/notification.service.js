@@ -59,10 +59,8 @@ const removeToken = async (token) => {
 // =============================================
 // ✅ ENVOYER LES NOTIFICATIONS PUSH
 // =============================================
-// ✅ Envoyer les notifications push (backend) avec logs d'erreurs précis
-const sendPushNotification = async (userId, title, body, data = {}) => {
+ const sendPushNotification = async (userId, title, body, data = {}) => {
   try {
-    // Récupérer les tokens
     const { data: tokens } = await supabase
       .from('push_tokens')
       .select('token')
@@ -72,18 +70,25 @@ const sendPushNotification = async (userId, title, body, data = {}) => {
 
     const tokensList = tokens.map(t => t.token);
 
-    // Envoyer via Firebase Admin (backend)
     if (admin.apps.length > 0) {
+      // ✅ Configuration du message avec PRIORITÉ HAUTE
       const message = {
         notification: { title, body },
         data: data,
+        android: {
+          priority: 'high', // 🚀 Force Android à réveiller le téléphone et Chrome (Fermé/Veille)
+        },
+        webpush: {
+          headers: {
+            Urgency: 'high', // 🚀 Force la priorité haute pour les navigateurs web (Chrome, Firefox, etc.)
+          }
+        },
         tokens: tokensList,
       };
 
       const response = await admin.messaging().sendEachForMulticast(message);
       console.log('Push notification sent:', response);
 
-      // 🔥 CORRECTIF DE LOGS : Afficher la cause exacte du rejet par Google
       response.responses.forEach((resp, idx) => {
         if (!resp.success) {
           console.error(`❌ Échec d'envoi pour le token n°${idx + 1} (${tokensList[idx].substring(0, 15)}...) :`, {
