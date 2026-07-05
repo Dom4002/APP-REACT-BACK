@@ -1,4 +1,5 @@
 // 📁 backend/src/routes/billing.js
+ 
 
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
@@ -12,6 +13,23 @@ const router = express.Router();
 const MAX_RETRY_ATTEMPTS = 8;
 const RETRY_DELAY_MS = 1500;
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// ✅ PRIX DES VISITES PONCTUELLES - SOURCE UNIQUE
+const VISIT_PONCTUAL_PRICES = {
+  '30': 5000,
+  '45': 6000,
+  '60': 7500,
+  '90': 10000,
+  '120': 12500,
+};
+
+const DEFAULT_VISIT_PRICE = 7500;
+
+function getPonctualPrice(durationMinutes = 60) {
+  const price = VISIT_PONCTUAL_PRICES[durationMinutes.toString()];
+  if (price) return price;
+  return Math.round((durationMinutes / 60) * DEFAULT_VISIT_PRICE);
+}
 
 // ============================================================
 // SUPABASE BACKEND CLIENT
@@ -307,7 +325,7 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
 }
 
 // ============================================================
-// ✅ TRAITER UNE VISITE PONCTUELLE - CORRIGÉ AVEC NOTIFICATIONS
+// ✅ TRAITER UNE VISITE PONCTUELLE
 // ============================================================
 async function processPonctualVisit(paymentRecord, transactionId, visitId, metadata) {
   try {
@@ -711,6 +729,7 @@ router.post('/generate-payment', async (req, res) => {
       patient_id: patient_id || null,
     });
 
+    // ✅ METADATA AVEC TYPE EXPLICITE
     const metadata = {
       user_id: user.id,
       plan_id: plan_id || null,
@@ -724,6 +743,7 @@ router.post('/generate-payment', async (req, res) => {
       target_name: target_name || finalName,
       is_visit: is_visit || false,
       visit_id: visit_id || null,
+      // ✅ TYPE EXPLICITE POUR LE WEBHOOK
       type: is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription'),
     };
 
@@ -788,6 +808,7 @@ router.post('/generate-payment', async (req, res) => {
         target_name: target_name || finalName,
         is_visit: is_visit || false,
         visit_id: visit_id || null,
+        // ✅ TYPE EXPLICITE POUR LE WEBHOOK
         type: is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription'),
       },
     };
@@ -801,6 +822,7 @@ router.post('/generate-payment', async (req, res) => {
       visit_id: visit_id,
       abonnement_id: actualAbonnementId || null,
       patient_id: patient_id || null,
+      type: is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription'),
     });
 
     const { data: payment, error: dbError } = await supabase
@@ -931,7 +953,7 @@ router.get('/verify-payment', async (req, res) => {
 });
 
 // ============================================================
-// 🔔 WEBHOOK FEDAPAY - CORRIGÉ
+// 🔔 WEBHOOK FEDAPAY - CORRIGÉ AVEC TYPE EXPLICITE
 // ============================================================
 router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const startTime = Date.now();
@@ -985,15 +1007,17 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     }
 
     const metadata = payment.metadata || {};
+    
+    // ✅ UTILISER LE TYPE EXPLICITE
+    const type = metadata.type || 'subscription'; // 'visit' | 'order' | 'subscription'
     const isPonctual = metadata.is_ponctual === true || metadata.is_ponctual === 'true';
     const subscriptionId = metadata.abonnement_id || null;
     const orderData = metadata.order_data || null;
-    const isVisit = metadata.is_visit === true || metadata.type === 'visit';
     const visitId = metadata.visit_id || null;
 
     console.log('📦 Métadonnées extraites:', {
+      type,
       isPonctual,
-      isVisit,
       visitId,
       subscriptionId,
       hasOrderData: !!orderData,
@@ -1017,7 +1041,8 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     const paymentRecord = updatedPayment || payment;
     let result = null;
 
-    if (isVisit && visitId) {
+    // ✅ TRAITEMENT SELON LE TYPE EXPLICITE
+    if (type === 'visit' && visitId) {
       console.log('🔄 Traitement d\'une visite ponctuelle:', visitId);
       result = await processPonctualVisit(paymentRecord, transactionId, visitId, metadata);
 
@@ -1027,7 +1052,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         console.warn('⚠️ La visite ponctuelle n\'a pas pu être traitée, mais le paiement est validé');
       }
 
-    } else if (isPonctual) {
+    } else if (type === 'order' || isPonctual) {
       console.log('📦 Traitement commande ponctuelle...');
       result = await createPonctualOrder(paymentRecord, transactionId, orderData);
 
@@ -1037,7 +1062,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         console.warn('⚠️ La commande ponctuelle n\'a pas pu être créée, mais le paiement est validé');
       }
 
-    } else if (subscriptionId) {
+    } else if (type === 'subscription' && subscriptionId) {
       console.log('📦 Activation de l\'abonnement:', subscriptionId);
       result = await activateSubscription(paymentRecord, subscriptionId);
 
@@ -1047,20 +1072,21 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         console.warn('⚠️ L\'abonnement n\'a pas pu être activé, mais le paiement est validé');
       }
     } else {
-      console.warn('⚠️ Aucun traitement spécifique trouvé pour ce paiement');
+      console.warn('⚠️ Aucun traitement spécifique trouvé pour ce paiement (type:', type, ')');
     }
 
+    // ✅ NOTIFICATION UNIFIÉE
     try {
       let notificationTitle = '✅ Paiement confirmé';
       let notificationBody = `Votre paiement de ${paymentRecord.amount} FCFA a été confirmé.`;
 
-      if (isVisit && result) {
+      if (type === 'visit' && result) {
         notificationTitle = '✅ Visite planifiée !';
         notificationBody = `Votre visite a été planifiée avec succès après paiement.`;
-      } else if (isPonctual && result) {
+      } else if (type === 'order' && result) {
         notificationTitle = '✅ Commande confirmée !';
         notificationBody = `Votre commande a été enregistrée avec succès après paiement.`;
-      } else if (subscriptionId && result) {
+      } else if (type === 'subscription' && result) {
         notificationTitle = '✅ Abonnement activé !';
         notificationBody = `Votre abonnement est maintenant actif.`;
       }
@@ -1072,7 +1098,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         type: 'paiement',
         data: { 
           payment_id: paymentRecord.id,
-          type: isVisit ? 'visit' : (isPonctual ? 'order' : 'subscription'),
+          type: type,
           processed: !!result,
         },
       });
@@ -1087,7 +1113,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       success: true,
       message: 'Paiement traité avec succès',
       payment_id: paymentRecord.id,
-      type: isVisit ? 'visit' : (isPonctual ? 'ponctual' : 'subscription'),
+      type: type,
       processed: !!result,
     });
 
