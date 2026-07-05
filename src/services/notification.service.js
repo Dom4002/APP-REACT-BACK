@@ -3,12 +3,16 @@
 const admin = require('firebase-admin');
 const { supabase } = require('./supabase.service');
 
-// ✅ Initialisation Firebase Admin (backend seulement)
-if (process.env.FIREBASE_PROJECT_ID) {
+ if (process.env.FIREBASE_PROJECT_ID) {
+  // ✅ Nettoyage robuste des guillemets doubles et des sauts de ligne de Render
+  const cleanPrivateKey = process.env.FIREBASE_PRIVATE_KEY
+    .replace(/^"|"$/g, '') // Supprime les guillemets au début et à la fin
+    .replace(/\\n/g, '\n'); // Restitue les sauts de ligne réels
+
   admin.initializeApp({
     credential: admin.credential.cert({
       projectId: process.env.FIREBASE_PROJECT_ID,
-      privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+      privateKey: cleanPrivateKey,
       clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
     }),
   });
