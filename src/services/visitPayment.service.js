@@ -1,11 +1,13 @@
 // 📁 backend/src/services/visitPayment.service.js
+ 
 
 const { supabase } = require('./supabase.service');
 const { createNotification } = require('./notification.service');
 
 // ============================================================
-// CONSTANTES
+// CONSTANTES - SOURCE UNIQUE DE VÉRITÉ
 // ============================================================
+
 const VISIT_STATUS = {
   DRAFT: 'brouillon',
   PLANNED: 'planifiee',
@@ -26,6 +28,7 @@ const VISIT_PAYMENT_STATUS = {
   REFUNDED: 'refunded',
 };
 
+// ✅ PRIX DES VISITES PONCTUELLES - SOURCE UNIQUE
 const VISIT_PONCTUAL_PRICES = {
   '30': 5000,
   '45': 6000,
@@ -38,16 +41,29 @@ const DEFAULT_VISIT_PRICE = 7500;
 const DRAFT_EXPIRY_HOURS = 24;
 
 // ============================================================
-// FONCTIONS
+// FONCTIONS DE PRIX
 // ============================================================
 
+/**
+ * Calcule le prix d'une visite ponctuelle en fonction de sa durée
+ * @param {number} durationMinutes - Durée en minutes (30, 45, 60, 90, 120)
+ * @returns {number} Prix en FCFA
+ */
 const getVisitPrice = (durationMinutes = 60) => {
   const price = VISIT_PONCTUAL_PRICES[durationMinutes.toString()];
   if (price) return price;
   return Math.round((durationMinutes / 60) * DEFAULT_VISIT_PRICE);
 };
 
+/**
+ * Vérifie si un paiement est requis pour une visite
+ * @param {string} userId - ID de l'utilisateur
+ * @param {boolean} isPonctual - Si la visite est marquée comme ponctuelle
+ * @param {number} durationMinutes - Durée de la visite
+ * @returns {Promise<{requiresPayment: boolean, status: string, amount: number}>}
+ */
 const requiresPayment = async (userId, isPonctual, durationMinutes) => {
+  // ✅ CAS 1 : Visite explicitement ponctuelle → Paiement requis
   if (isPonctual) {
     return { 
       requiresPayment: true, 
@@ -56,6 +72,7 @@ const requiresPayment = async (userId, isPonctual, durationMinutes) => {
     };
   }
 
+  // ✅ CAS 2 : Vérifier l'abonnement
   const { data: subscription, error } = await supabase
     .from('abonnements')
     .select('id, remaining_visits, status')
@@ -64,6 +81,7 @@ const requiresPayment = async (userId, isPonctual, durationMinutes) => {
     .maybeSingle();
 
   if (error || !subscription || subscription.remaining_visits <= 0) {
+    // ✅ PAS D'ABONNEMENT OU PLUS DE VISITES → Paiement requis
     return { 
       requiresPayment: true, 
       status: VISIT_STATUS.DRAFT,
@@ -71,6 +89,7 @@ const requiresPayment = async (userId, isPonctual, durationMinutes) => {
     };
   }
 
+  // ✅ ABONNEMENT ACTIF AVEC VISITES DISPONIBLES → Pas de paiement
   return { 
     requiresPayment: false, 
     status: VISIT_STATUS.PLANNED,
@@ -78,7 +97,19 @@ const requiresPayment = async (userId, isPonctual, durationMinutes) => {
   };
 };
 
+// ============================================================
+// GESTION DES PAIEMENTS
+// ============================================================
+
+/**
+ * Confirme le paiement d'une visite et la planifie
+ * @param {string} visitId - ID de la visite
+ * @param {string} transactionId - ID de la transaction FedaPay
+ * @param {string} userId - ID de l'utilisateur
+ * @returns {Promise<Object>} Visite mise à jour
+ */
 const confirmVisitPayment = async (visitId, transactionId, userId) => {
+  // 1. Récupérer la visite
   const { data: visit, error: fetchError } = await supabase
     .from('visites')
     .select('*')
@@ -86,13 +117,18 @@ const confirmVisitPayment = async (visitId, transactionId, userId) => {
     .single();
 
   if (fetchError) throw new Error('Visite non trouvée');
+  
+  // 2. Vérifier que la visite est en brouillon
   if (visit.status !== VISIT_STATUS.DRAFT) {
     throw new Error('Cette visite n\'est pas en attente de paiement');
   }
+  
+  // 3. Vérifier que l'utilisateur est le propriétaire
   if (visit.user_id !== userId) {
     throw new Error('Non autorisé');
   }
 
+  // 4. Vérifier que le brouillon n'est pas expiré
   if (visit.draft_expires_at && new Date() > new Date(visit.draft_expires_at)) {
     await supabase
       .from('visites')
@@ -104,33 +140,116 @@ const confirmVisitPayment = async (visitId, transactionId, userId) => {
     throw new Error('Le brouillon a expiré. Veuillez recréer la visite.');
   }
 
+  // 5. ✅ RÉCUPÉRER L'AIDANT ACTIF APRÈS PAIEMENT
+  const familyId = visit.user_id;
+  const targetType = visit.patient_id ? 'patient' : 'personal_account';
+  const targetId = visit.patient_id || visit.user_id;
+
+  let aidantId = visit.aidant_id || null;
+  if (!aidantId) {
+    // ✅ Importer dynamiquement pour éviter la dépendance circulaire
+    const { getActiveAidantForTarget } = require('./aidantAssignment.service');
+    aidantId = await getActiveAidantForTarget(targetType, targetId, familyId);
+    console.log(`✅ Aidant trouvé après paiement: ${aidantId}`);
+  }
+
+  // 6. Mettre à jour la visite
+  const updateData = {
+    status: VISIT_STATUS.PLANNED,
+    aidant_id: aidantId || null,
+    is_draft: false,
+    payment_status: VISIT_PAYMENT_STATUS.COMPLETED,
+    payment_transaction_id: transactionId,
+    payment_confirmed_at: new Date().toISOString(),
+    scheduled_from_draft: true,
+    draft_expires_at: null,
+    metadata: {
+      ...(visit.metadata || {}),
+      is_draft: false,
+      scheduled_from_draft: true,
+      payment_confirmed_at: new Date().toISOString(),
+      payment_transaction_id: transactionId,
+      payment_status: VISIT_PAYMENT_STATUS.COMPLETED,
+      payment_completed: true,
+      aidant_assigned_after_payment: !!aidantId,
+    }
+  };
+
+  // ✅ Pour les visites personnelles, s'assurer que patient_id est null
+  if (visit.target_type === 'personal' || visit.target_type === 'personal_account') {
+    updateData.patient_id = null;
+  }
+
   const { data: updatedVisit, error: updateError } = await supabase
     .from('visites')
-    .update({
-      status: VISIT_STATUS.PLANNED,
-      is_draft: false,
-      payment_status: VISIT_PAYMENT_STATUS.COMPLETED,
-      payment_transaction_id: transactionId,
-      payment_confirmed_at: new Date().toISOString(),
-      scheduled_from_draft: true,
-      draft_expires_at: null,
-      metadata: {
-        ...(visit.metadata || {}),
-        is_draft: false,
-        scheduled_from_draft: true,
-        payment_confirmed_at: new Date().toISOString(),
-        payment_transaction_id: transactionId,
-        payment_status: VISIT_PAYMENT_STATUS.COMPLETED,
-      }
-    })
+    .update(updateData)
     .eq('id', visitId)
     .select()
     .single();
 
-  if (updateError) throw new Error('Erreur lors de la mise à jour');
+  if (updateError) {
+    console.error('❌ Erreur mise à jour visite:', updateError.message);
+    
+    // ✅ TENTATIVE DE RÉCUPÉRATION SI PATIENT_ID BLOQUANT
+    if (updateError.message.includes('chk_planned_not_draft')) {
+      console.log('🔄 Tentative de récupération avec patient_id = user_id...');
+      
+      if (!aidantId) {
+        const { getActiveAidantForTarget } = require('./aidantAssignment.service');
+        aidantId = await getActiveAidantForTarget(targetType, targetId, familyId);
+      }
+      
+      const fallbackData = {
+        status: VISIT_STATUS.PLANNED,
+        patient_id: visit.user_id,
+        aidant_id: aidantId || null,
+        target_type: 'personal',
+        target_name: visit.target_name || 'Personnel',
+        is_draft: false,
+        payment_status: VISIT_PAYMENT_STATUS.COMPLETED,
+        payment_transaction_id: transactionId,
+        payment_confirmed_at: new Date().toISOString(),
+        scheduled_from_draft: true,
+        draft_expires_at: null,
+        metadata: {
+          ...(visit.metadata || {}),
+          is_draft: false,
+          scheduled_from_draft: true,
+          payment_confirmed_at: new Date().toISOString(),
+          payment_transaction_id: transactionId,
+          payment_status: VISIT_PAYMENT_STATUS.COMPLETED,
+          payment_completed: true,
+          aidant_assigned_after_payment: !!aidantId,
+          fallback_patient_id_used: true,
+        }
+      };
+      
+      const { data: retryVisit, error: retryError } = await supabase
+        .from('visites')
+        .update(fallbackData)
+        .eq('id', visitId)
+        .select()
+        .single();
+      
+      if (!retryError && retryVisit) {
+        console.log('✅ Visite récupérée avec patient_id fallback:', retryVisit.id);
+        return retryVisit;
+      }
+      
+      console.error('❌ Échec de la récupération:', retryError?.message);
+      throw new Error(retryError?.message || 'Erreur lors de la mise à jour');
+    }
+    
+    throw new Error(updateError.message);
+  }
 
-  const targetDisplay = updatedVisit.target_name || 'le patient';
-  
+  console.log('✅ Visite passée de brouillon à planifiee:', visitId);
+
+  // 7. Notifications
+  const targetDisplay = updatedVisit.target_name || (updatedVisit.patient ? 
+    `${updatedVisit.patient.first_name} ${updatedVisit.patient.last_name}` : 'Personnel');
+
+  // Notification à l'utilisateur
   await createNotification({
     userId: updatedVisit.user_id,
     title: '✅ Visite planifiée !',
@@ -139,19 +258,39 @@ const confirmVisitPayment = async (visitId, transactionId, userId) => {
     data: { visit_id: visitId, status: VISIT_STATUS.PLANNED },
   });
 
+  // Notification à l'aidant (si assigné)
   if (updatedVisit.aidant_id) {
-    await createNotification({
-      userId: updatedVisit.aidant_id,
-      title: '📅 Nouvelle visite à valider',
-      body: `Visite pour ${targetDisplay} le ${updatedVisit.scheduled_date} à ${updatedVisit.scheduled_time}`,
-      type: 'visite',
-      data: { visit_id: visitId, action: 'approve' },
-    });
+    const { data: aidant } = await supabase
+      .from('aidants')
+      .select('user_id')
+      .eq('id', updatedVisit.aidant_id)
+      .single();
+
+    if (aidant) {
+      await createNotification({
+        userId: aidant.user_id,
+        title: '📅 Nouvelle visite à valider',
+        body: `Visite pour ${targetDisplay} le ${updatedVisit.scheduled_date} à ${updatedVisit.scheduled_time}`,
+        type: 'visite',
+        data: { visit_id: visitId, action: 'approve' },
+      });
+    }
   }
 
   return updatedVisit;
 };
 
+// ============================================================
+// GESTION DES BROUILLONS
+// ============================================================
+
+/**
+ * Annule un brouillon de visite
+ * @param {string} visitId - ID de la visite
+ * @param {string} userId - ID de l'utilisateur
+ * @param {string} reason - Motif d'annulation (optionnel)
+ * @returns {Promise<Object>} Visite annulée
+ */
 const cancelDraftVisit = async (visitId, userId, reason = null) => {
   const { data: visit, error: fetchError } = await supabase
     .from('visites')
@@ -183,6 +322,10 @@ const cancelDraftVisit = async (visitId, userId, reason = null) => {
   return data;
 };
 
+/**
+ * Nettoie les brouillons expirés (job cron)
+ * @returns {Promise<number>} Nombre de brouillons nettoyés
+ */
 const cleanExpiredDrafts = async () => {
   const now = new Date().toISOString();
 
@@ -223,15 +366,26 @@ const cleanExpiredDrafts = async () => {
   return expiredDrafts.length;
 };
 
+// ============================================================
+// EXPORTS
+// ============================================================
+
 module.exports = {
+  // Constantes
   VISIT_STATUS,
   VISIT_PAYMENT_STATUS,
   VISIT_PONCTUAL_PRICES,
   DEFAULT_VISIT_PRICE,
   DRAFT_EXPIRY_HOURS,
+  
+  // Fonctions de prix
   getVisitPrice,
   requiresPayment,
+  
+  // Gestion des paiements
   confirmVisitPayment,
+  
+  // Gestion des brouillons
   cancelDraftVisit,
   cleanExpiredDrafts,
 };
