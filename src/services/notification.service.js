@@ -3,7 +3,7 @@
 const admin = require('firebase-admin');
 const { supabase } = require('./supabase.service');
 
- if (process.env.FIREBASE_PROJECT_ID) {
+if (process.env.FIREBASE_PROJECT_ID) {
   // ✅ Nettoyage robuste des guillemets doubles et des sauts de ligne de Render
   const cleanPrivateKey = process.env.FIREBASE_PRIVATE_KEY
     .replace(/^"|"$/g, '') // Supprime les guillemets au début et à la fin
@@ -57,9 +57,9 @@ const removeToken = async (token) => {
 };
 
 // =============================================
-// ✅ ENVOYER LES NOTIFICATIONS PUSH
+// ✅ ENVOYER LES NOTIFICATIONS PUSH (AVEC NETTOYAGE FCM)
 // =============================================
- const sendPushNotification = async (userId, title, body, data = {}) => {
+const sendPushNotification = async (userId, title, body, data = {}) => {
   try {
     const { data: tokens } = await supabase
       .from('push_tokens')
@@ -71,10 +71,26 @@ const removeToken = async (token) => {
     const tokensList = tokens.map(t => t.token);
 
     if (admin.apps.length > 0) {
+      
+      // 🔥 NETTOYAGE REQUIS PAR GOOGLE : FCM exige que toutes les valeurs de 'data' soient des chaînes de caractères (Strings).
+      // On convertit les types (booléens, nombres, objets) pour éviter l'erreur 'messaging/invalid-payload'.
+      const cleanData = {};
+      if (data) {
+        for (const [key, value] of Object.entries(data)) {
+          if (value === null || value === undefined) {
+            cleanData[key] = '';
+          } else if (typeof value === 'object') {
+            cleanData[key] = JSON.stringify(value);
+          } else {
+            cleanData[key] = String(value);
+          }
+        }
+      }
+
       // ✅ Configuration du message avec PRIORITÉ HAUTE
       const message = {
         notification: { title, body },
-        data: data,
+        data: cleanData, // Utilisation de l'objet nettoyé
         android: {
           priority: 'high', // 🚀 Force Android à réveiller le téléphone et Chrome (Fermé/Veille)
         },
@@ -106,6 +122,7 @@ const removeToken = async (token) => {
     throw error;
   }
 };
+
 // =============================================
 // ✅ CRÉER UNE NOTIFICATION EN BASE + ENVOYER PUSH
 // =============================================
