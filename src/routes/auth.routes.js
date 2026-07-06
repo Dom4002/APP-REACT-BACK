@@ -6,6 +6,7 @@ const { supabase } = require('../services/supabase.service');
 const { sendEmail, templates } = require('../services/email.service');
 const authMiddleware = require('../middleware/auth.middleware');
 const roleMiddleware = require('../middleware/role.middleware');
+console.log(typeof roleMiddleware);
 
 // ============================================================
 // CONSTANTES
