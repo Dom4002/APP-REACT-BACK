@@ -2,6 +2,8 @@
 
 const { getActiveAidantForTarget } = require('../services/aidantAssignment.service');
 const { supabase } = require('../services/supabase.service');
+const { checkAidantOrderQuota } = require('../services/order.service');
+const { QUOTAS } = require('../config/constants');
 
 // ============================================================
 // MIDDLEWARE : RÉSOUDRE L'AIDANT ACTIF POUR UNE REQUÊTE
@@ -357,17 +359,23 @@ const validateTarget = (options = {}) => {
 };
 
 // ============================================================
-// MIDDLEWARE : CHECK QUOTA AIDANT
+// 🆕 MIDDLEWARE : CHECK QUOTA AIDANT (ASSIGNATIONS)
 // ============================================================
 
 /**
  * Middleware qui vérifie si l'aidant a encore de la place
- * pour de nouvelles assignations
+ * pour de nouvelles assignations permanentes
+ * 
+ * Utilisation :
+ * router.post('/assign', checkAidantQuota, (req, res) => { ... })
  */
 const checkAidantQuota = (options = {}) => {
   return async (req, res, next) => {
     try {
-      const { aidantUserId = req.body.aidantUserId || req.query.aidantUserId } = options;
+      const { 
+        aidantUserId = req.body.aidantUserId || req.query.aidantUserId || req.params.aidantId,
+        maxAssignments = QUOTAS.MAX_ASSIGNMENTS_PER_AIDANT,
+      } = options;
 
       if (!aidantUserId) {
         return next();
@@ -375,7 +383,7 @@ const checkAidantQuota = (options = {}) => {
 
       const { data: aidant, error: aidantError } = await supabase
         .from('aidants')
-        .select('id, max_assignments, current_assignments')
+        .select('id, current_assignments, max_assignments')
         .eq('user_id', aidantUserId)
         .single();
 
@@ -387,25 +395,26 @@ const checkAidantQuota = (options = {}) => {
         });
       }
 
-      const maxAssignments = aidant.max_assignments || 4;
-      const currentAssignments = aidant.current_assignments || 0;
+      const current = aidant.current_assignments || 0;
+      const max = aidant.max_assignments || maxAssignments;
 
-      if (currentAssignments >= maxAssignments) {
+      if (current >= max) {
         return res.status(400).json({
           success: false,
-          error: `Cet aidant a déjà ${currentAssignments} assignations (maximum ${maxAssignments})`,
+          error: `Cet aidant a déjà ${current} assignations (maximum ${max})`,
           code: 'AIDANT_FULL',
           data: {
-            current: currentAssignments,
-            max: maxAssignments,
+            current,
+            max,
+            available: 0,
           },
         });
       }
 
       req.aidantQuota = {
-        current: currentAssignments,
-        max: maxAssignments,
-        available: maxAssignments - currentAssignments,
+        current,
+        max,
+        available: max - current,
       };
 
       next();
@@ -417,13 +426,207 @@ const checkAidantQuota = (options = {}) => {
 };
 
 // ============================================================
+// 🆕 MIDDLEWARE : CHECK QUOTA COMMANDES EN COURS
+// ============================================================
+
+/**
+ * Middleware qui vérifie si l'aidant peut prendre une commande
+ * (current_orders < max_orders)
+ * 
+ * Utilisation :
+ * router.post('/orders/:id/take', checkAidantOrderQuota, (req, res) => { ... })
+ */
+const checkAidantOrderQuota = (options = {}) => {
+  return async (req, res, next) => {
+    try {
+      const { 
+        aidantUserId = req.user?.id,
+        maxOrders = QUOTAS.MAX_ORDERS_IN_PROGRESS,
+      } = options;
+
+      if (!aidantUserId) {
+        return res.status(400).json({
+          success: false,
+          error: 'aidantUserId requis',
+        });
+      }
+
+      const quotaCheck = await checkAidantOrderQuota(aidantUserId);
+
+      if (!quotaCheck.canTake) {
+        return res.status(403).json({
+          success: false,
+          error: `Vous avez déjà ${quotaCheck.current} commande(s) en cours (maximum ${quotaCheck.max})`,
+          code: 'QUOTA_EXCEEDED',
+          data: {
+            current: quotaCheck.current,
+            max: quotaCheck.max,
+            available: quotaCheck.available,
+          },
+        });
+      }
+
+      req.orderQuota = {
+        current: quotaCheck.current,
+        max: quotaCheck.max,
+        available: quotaCheck.available,
+      };
+
+      next();
+    } catch (error) {
+      console.error('❌ checkAidantOrderQuota error:', error);
+      next(error);
+    }
+  };
+};
+
+// ============================================================
+// 🆕 MIDDLEWARE : CHECK AIDANT DISPONIBILITÉ
+// ============================================================
+
+/**
+ * Middleware qui vérifie si l'aidant est disponible
+ * (available = true, is_verified = true, status = 'approved')
+ * 
+ * Utilisation :
+ * router.post('/missions/:id/take', checkAidantAvailability, (req, res) => { ... })
+ */
+const checkAidantAvailability = (options = {}) => {
+  return async (req, res, next) => {
+    try {
+      const { 
+        aidantUserId = req.user?.id,
+        required = true,
+      } = options;
+
+      if (!aidantUserId) {
+        if (required) {
+          return res.status(400).json({
+            success: false,
+            error: 'aidantUserId requis',
+          });
+        }
+        return next();
+      }
+
+      const { data: aidant, error } = await supabase
+        .from('aidants')
+        .select('id, available, is_verified, status')
+        .eq('user_id', aidantUserId)
+        .single();
+
+      if (error || !aidant) {
+        if (required) {
+          return res.status(404).json({
+            success: false,
+            error: 'Aidant non trouvé',
+            code: 'AIDANT_NOT_FOUND',
+          });
+        }
+        return next();
+      }
+
+      if (!aidant.available || !aidant.is_verified || aidant.status !== 'approved') {
+        if (required) {
+          return res.status(403).json({
+            success: false,
+            error: 'L\'aidant n\'est pas disponible ou n\'est pas approuvé',
+            code: 'AIDANT_NOT_AVAILABLE',
+            data: {
+              available: aidant.available,
+              is_verified: aidant.is_verified,
+              status: aidant.status,
+            },
+          });
+        }
+      }
+
+      req.aidant = aidant;
+      req.isAidantAvailable = aidant.available && aidant.is_verified && aidant.status === 'approved';
+
+      next();
+    } catch (error) {
+      console.error('❌ checkAidantAvailability error:', error);
+      next(error);
+    }
+  };
+};
+
+// ============================================================
+// 🆕 MIDDLEWARE : CHECK VISITE ASSIGNABLE
+// ============================================================
+
+/**
+ * Middleware qui vérifie si une visite peut être assignée
+ * (status = 'planifiee' ou 'en_attente_aidant')
+ * 
+ * Utilisation :
+ * router.post('/visits/:id/assign', checkVisitAssignable, (req, res) => { ... })
+ */
+const checkVisitAssignable = (options = {}) => {
+  return async (req, res, next) => {
+    try {
+      const { 
+        visitId = req.params.id || req.body.visitId,
+      } = options;
+
+      if (!visitId) {
+        return res.status(400).json({
+          success: false,
+          error: 'visitId requis',
+        });
+      }
+
+      const { data: visit, error } = await supabase
+        .from('visites')
+        .select('id, status, aidant_id')
+        .eq('id', visitId)
+        .single();
+
+      if (error || !visit) {
+        return res.status(404).json({
+          success: false,
+          error: 'Visite non trouvée',
+          code: 'VISIT_NOT_FOUND',
+        });
+      }
+
+      const assignableStatuses = ['planifiee', 'en_attente_aidant'];
+      if (!assignableStatuses.includes(visit.status)) {
+        return res.status(400).json({
+          success: false,
+          error: `La visite ne peut pas être assignée (statut: ${visit.status})`,
+          code: 'VISIT_NOT_ASSIGNABLE',
+          data: {
+            status: visit.status,
+            currentAidant: visit.aidant_id,
+          },
+        });
+      }
+
+      req.visit = visit;
+      req.isVisitAssignable = true;
+
+      next();
+    } catch (error) {
+      console.error('❌ checkVisitAssignable error:', error);
+      next(error);
+    }
+  };
+};
+
+// ============================================================
 // EXPORTS
 // ============================================================
 
 module.exports = {
+  // Fonctions existantes
   resolveActiveAidant,
   checkAidantAssignment,
   resolveAllAidants,
   validateTarget,
   checkAidantQuota,
+  checkAidantOrderQuota,
+  checkAidantAvailability,
+  checkVisitAssignable,
 };
