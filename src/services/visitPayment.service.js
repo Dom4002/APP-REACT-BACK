@@ -18,6 +18,8 @@ const VISIT_STATUS = {
   CANCELLED: 'annulee',
   REFUSED: 'refusee',
   EXPIRED: 'expire',
+  WAITING_AIDANT: 'en_attente_aidant',
+  WAITING_PAYMENT: 'attente_paiement',
 };
 
 const VISIT_PAYMENT_STATUS = {
@@ -393,6 +395,350 @@ const cleanExpiredDrafts = async () => {
 module.exports.cleanExpiredDrafts = cleanExpiredDrafts;
 
 // ============================================================
+// 🆕 NOUVELLES FONCTIONS POUR LE SYSTÈME COMPLET
+// ============================================================
+
+/**
+ * Vérifie si un aidant est disponible pour une visite
+ * @param {string} targetType - 'patient' | 'personal_account'
+ * @param {string} targetId - UUID de la cible
+ * @param {string} familyId - UUID de la famille
+ * @returns {Promise<Object>} - { hasAidant, aidantId, availableAidants, allFull }
+ */
+const checkAidantForVisit = async (targetType, targetId, familyId) => {
+  try {
+    const { getActiveAidantForTarget, getAvailableAidantsForFamily } = require('./aidantAssignment.service');
+
+    // 1. Vérifier si un aidant est déjà assigné
+    const aidantId = await getActiveAidantForTarget(targetType, targetId, familyId);
+
+    if (aidantId) {
+      return {
+        hasAidant: true,
+        aidantId: aidantId,
+        availableAidants: [],
+        allFull: false,
+      };
+    }
+
+    // 2. Récupérer les aidants disponibles
+    const availableAidants = await getAvailableAidantsForFamily(familyId);
+
+    if (availableAidants.length > 0) {
+      return {
+        hasAidant: false,
+        aidantId: null,
+        availableAidants: availableAidants,
+        allFull: false,
+      };
+    }
+
+    // 3. Tous les aidants sont full
+    return {
+      hasAidant: false,
+      aidantId: null,
+      availableAidants: [],
+      allFull: true,
+    };
+  } catch (error) {
+    console.error('❌ checkAidantForVisit error:', error);
+    return {
+      hasAidant: false,
+      aidantId: null,
+      availableAidants: [],
+      allFull: true,
+      error: error.message,
+    };
+  }
+};
+
+module.exports.checkAidantForVisit = checkAidantForVisit;
+
+/**
+ * Récupère les options du wizard pour une visite
+ * @param {string} targetType - 'patient' | 'personal_account'
+ * @param {string} targetId - UUID de la cible
+ * @param {string} familyId - UUID de la famille
+ * @param {string} userRole - Rôle de l'utilisateur
+ * @returns {Promise<Object>} - Options du wizard
+ */
+const getVisitWizardOptions = async (targetType, targetId, familyId, userRole = 'family') => {
+  try {
+    const { getAvailableAidantsForFamily, isAidantFull } = require('./aidantAssignment.service');
+    const isAdmin = userRole === 'admin' || userRole === 'coordinator';
+
+    // 1. Vérifier si un aidant est déjà assigné
+    const { getActiveAidantForTarget } = require('./aidantAssignment.service');
+    const aidantId = await getActiveAidantForTarget(targetType, targetId, familyId);
+
+    if (aidantId) {
+      return {
+        hasAidant: true,
+        aidantId: aidantId,
+        hasAvailableAidants: false,
+        aidants: [],
+        options: [
+          {
+            type: 'auto',
+            label: '✅ Aidant automatique',
+            description: 'Un aidant est déjà assigné à ce compte',
+            quota: 0,
+          },
+        ],
+        canProceed: true,
+        allFull: false,
+      };
+    }
+
+    // 2. Récupérer les aidants disponibles
+    const availableAidants = await getAvailableAidantsForFamily(familyId);
+
+    if (availableAidants.length > 0) {
+      const options = [
+        {
+          type: 'ponctuelle',
+          label: '⚡ Pour cette visite uniquement',
+          description: 'Ne consomme pas de quota',
+          quota: 0,
+        },
+        {
+          type: 'permanente',
+          label: '📌 Permanent',
+          description: 'Consomme 1 quota',
+          quota: 1,
+        },
+      ];
+
+      // ✅ Admin a une option supplémentaire
+      if (isAdmin) {
+        options.push({
+          type: 'force',
+          label: '👔 Force (Admin)',
+          description: 'Ignore le quota (5/4, 6/4, etc.)',
+          quota: 'illimité',
+        });
+      }
+
+      return {
+        hasAidant: false,
+        aidantId: null,
+        hasAvailableAidants: true,
+        aidants: availableAidants,
+        options: options,
+        canProceed: true,
+        allFull: false,
+        isAdmin: isAdmin,
+      };
+    }
+
+    // 3. Tous les aidants sont full
+    const options = [
+      {
+        type: 'without_aidant',
+        label: '⚡ Planifier sans aidant',
+        description: "L'admin sera notifié pour assigner un aidant",
+        quota: 0,
+      },
+    ];
+
+    // ✅ Admin peut forcer même si full
+    if (isAdmin) {
+      options.push({
+        type: 'force',
+        label: '👔 Force (Admin)',
+        description: 'Ignorer le quota (5/4, 6/4, etc.)',
+        quota: 'illimité',
+      });
+    }
+
+    return {
+      hasAidant: false,
+      aidantId: null,
+      hasAvailableAidants: false,
+      aidants: [],
+      options: options,
+      canProceed: true,
+      allFull: true,
+      isAdmin: isAdmin,
+      message: 'Tous les aidants sont actuellement complets (4/4)',
+    };
+  } catch (error) {
+    console.error('❌ getVisitWizardOptions error:', error);
+    return {
+      hasAidant: false,
+      aidantId: null,
+      hasAvailableAidants: false,
+      aidants: [],
+      options: [],
+      canProceed: false,
+      allFull: true,
+      error: error.message,
+    };
+  }
+};
+
+module.exports.getVisitWizardOptions = getVisitWizardOptions;
+
+/**
+ * Valide une visite créée sans aidant
+ * @param {string} visitId - UUID de la visite
+ * @param {string} adminId - UUID de l'admin qui valide
+ * @param {string} aidantId - UUID de l'aidant assigné (optionnel)
+ * @param {string} assignmentType - 'permanente' | 'ponctuelle'
+ * @returns {Promise<Object>}
+ */
+const validateVisitWithoutAidant = async ({
+  visitId,
+  adminId,
+  aidantId = null,
+  assignmentType = 'permanente',
+}) => {
+  try {
+    const { data: visit, error: visitError } = await supabase
+      .from('visites')
+      .select('*')
+      .eq('id', visitId)
+      .single();
+
+    if (visitError || !visit) {
+      return {
+        success: false,
+        error: 'Visite non trouvée',
+        code: 'VISIT_NOT_FOUND',
+      };
+    }
+
+    if (visit.status !== VISIT_STATUS.WAITING_AIDANT) {
+      return {
+        success: false,
+        error: `La visite n'est pas en attente d'aidant. Statut: ${visit.status}`,
+        code: 'INVALID_STATUS',
+      };
+    }
+
+    // Si un aidant est fourni, l'assigner
+    if (aidantId) {
+      const { assignAidantToVisit } = require('./visit.service');
+      const result = await assignAidantToVisit({
+        visitId,
+        aidantUserId: aidantId,
+        assignmentType,
+        adminId,
+        force: true,
+      });
+
+      if (!result.success) {
+        return result;
+      }
+
+      return {
+        success: true,
+        visit: result.visit,
+        assigned: true,
+        assignment_type: assignmentType,
+      };
+    }
+
+    // Sinon, marquer comme planifiée sans aidant
+    const { data: updatedVisit, error: updateError } = await supabase
+      .from('visites')
+      .update({
+        status: VISIT_STATUS.PLANNED,
+        metadata: {
+          ...(visit.metadata || {}),
+          validated_without_aidant: true,
+          validated_without_aidant_at: new Date().toISOString(),
+          validated_by: adminId,
+        },
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', visitId)
+      .select()
+      .single();
+
+    if (updateError) {
+      return {
+        success: false,
+        error: updateError.message,
+        code: 'UPDATE_ERROR',
+      };
+    }
+
+    return {
+      success: true,
+      visit: updatedVisit,
+      assigned: false,
+    };
+  } catch (error) {
+    console.error('❌ validateVisitWithoutAidant error:', error);
+    return {
+      success: false,
+      error: error.message,
+      code: 'UNKNOWN_ERROR',
+    };
+  }
+};
+
+module.exports.validateVisitWithoutAidant = validateVisitWithoutAidant;
+
+/**
+ * Vérifie si une visite peut être créée sans aidant
+ * @param {string} targetType - 'patient' | 'personal_account'
+ * @param {string} targetId - UUID de la cible
+ * @param {string} familyId - UUID de la famille
+ * @param {string} userRole - Rôle de l'utilisateur
+ * @returns {Promise<Object>}
+ */
+const canCreateVisitWithoutAidant = async (targetType, targetId, familyId, userRole = 'family') => {
+  try {
+    const wizardOptions = await getVisitWizardOptions(targetType, targetId, familyId, userRole);
+
+    // ✅ Si un aidant est déjà assigné → on peut créer sans problème
+    if (wizardOptions.hasAidant) {
+      return {
+        canCreate: true,
+        reason: 'aidant_assigned',
+        wizard: wizardOptions,
+      };
+    }
+
+    // ✅ Si des aidants sont disponibles → on peut créer (l'utilisateur choisira)
+    if (wizardOptions.hasAvailableAidants) {
+      return {
+        canCreate: true,
+        reason: 'aidants_available',
+        wizard: wizardOptions,
+      };
+    }
+
+    // ✅ Si tous les aidants sont full → on peut créer sans aidant (famille) ou forcer (admin)
+    if (wizardOptions.allFull) {
+      const isAdmin = userRole === 'admin' || userRole === 'coordinator';
+      return {
+        canCreate: true,
+        reason: isAdmin ? 'admin_force' : 'without_aidant',
+        wizard: wizardOptions,
+      };
+    }
+
+    return {
+      canCreate: false,
+      reason: 'unknown',
+      wizard: wizardOptions,
+    };
+  } catch (error) {
+    console.error('❌ canCreateVisitWithoutAidant error:', error);
+    return {
+      canCreate: false,
+      reason: 'error',
+      error: error.message,
+    };
+  }
+};
+
+module.exports.canCreateVisitWithoutAidant = canCreateVisitWithoutAidant;
+
+// ============================================================
 // EXPORTS PRINCIPAUX
 // ============================================================
 
@@ -418,4 +764,10 @@ module.exports = {
   
   // Nettoyage
   cleanExpiredDrafts,
+
+  // 🆕 Nouvelles fonctions
+  checkAidantForVisit,
+  getVisitWizardOptions,
+  validateVisitWithoutAidant,
+  canCreateVisitWithoutAidant,
 };
