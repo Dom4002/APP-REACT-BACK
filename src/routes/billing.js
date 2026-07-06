@@ -162,6 +162,8 @@ async function getActiveAidantForTarget(targetType, targetId, familyId) {
 // ============================================================
 // ✅ CRÉER UN ABONNEMENT EN ATTENTE
 // ============================================================
+ 
+
 async function createPendingSubscription(userId, offerId, offer, patientId = null) {
   try {
     const startDate = new Date();
@@ -180,10 +182,13 @@ async function createPendingSubscription(userId, offerId, offer, patientId = nul
         break;
     }
 
-    const totalVisits = offer.total_visits || offer.visits_per_week * 4 || 0;
+     // total_visits est déjà défini dans l'offre
+    const totalVisits = offer.total_visits || 0;
     const totalOrders = offer.total_orders || 0;
 
     console.log('📝 Création abonnement pour user_id:', userId);
+    console.log('📝 total_visits:', totalVisits);
+    console.log('📝 total_orders:', totalOrders);
     console.log('📝 patient_id (optionnel):', patientId);
 
     const subscriptionData = {
@@ -194,11 +199,11 @@ async function createPendingSubscription(userId, offerId, offer, patientId = nul
       end_date: endDate.toISOString().split('T')[0],
       auto_renew: true,
       total_visits: totalVisits,
-      used_visits: 0,
-      remaining_visits: totalVisits,
+      used_visits: 0,        
+      remaining_visits: totalVisits, 
       total_orders: totalOrders,
-      used_orders: 0,
-      remaining_orders: totalOrders,
+      used_orders: 0,       
+      remaining_orders: totalOrders,  
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
@@ -517,6 +522,8 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
 // ============================================================
 // ✅ ACTIVER UN ABONNEMENT
 // ============================================================
+ 
+
 async function activateSubscription(paymentRecord, subscriptionId) {
   try {
     if (!isValidUUID(subscriptionId)) {
@@ -526,7 +533,7 @@ async function activateSubscription(paymentRecord, subscriptionId) {
 
     const { data: existingSub, error: subCheckError } = await supabase
       .from('abonnements')
-      .select('id, status, user_id')
+      .select('id, status, user_id, total_visits, used_visits, remaining_visits')
       .eq('id', subscriptionId)
       .single();
 
@@ -540,11 +547,13 @@ async function activateSubscription(paymentRecord, subscriptionId) {
       return existingSub;
     }
 
+    // ✅ CORRECTION : Ne modifier que le statut, pas les compteurs
     const { data: subscription, error: subError } = await supabase
       .from('abonnements')
       .update({
         status: 'actif',
         updated_at: new Date().toISOString(),
+        // ✅ NE PAS TOUCHER aux compteurs ici !
       })
       .eq('id', subscriptionId)
       .select()
@@ -556,7 +565,11 @@ async function activateSubscription(paymentRecord, subscriptionId) {
     }
 
     console.log('✅ Abonnement activé:', subscriptionId);
+    console.log('📊 total_visits:', subscription.total_visits);
+    console.log('📊 used_visits:', subscription.used_visits);
+    console.log('📊 remaining_visits:', subscription.remaining_visits);
 
+    // ✅ Notification
     await supabase.from('notifications').insert({
       user_id: paymentRecord.user_id,
       title: '✅ Abonnement activé !',
@@ -565,6 +578,8 @@ async function activateSubscription(paymentRecord, subscriptionId) {
       data: {
         subscription_id: subscriptionId,
         status: 'actif',
+        remaining_visits: subscription.remaining_visits,
+        remaining_orders: subscription.remaining_orders,
       },
     });
 
