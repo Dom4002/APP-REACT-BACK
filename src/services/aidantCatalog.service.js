@@ -8,10 +8,20 @@ const {
   revokeAssignment: revokeAssignmentNew,
   TARGET_TYPES,
   ASSIGNMENT_TYPES,
+  getAvailableAidantsForFamily,
+  getAidantsWithQuota,
+  isAidantFull,
 } = require('./aidantAssignment.service');
 
 // ✅ Cache pour les profils (pour éviter les appels répétés)
 const profileCache = new Map();
+
+// ============================================================
+// CONSTANTES
+// ============================================================
+
+const DEFAULT_MAX_ASSIGNMENTS = 4;
+const DEFAULT_MAX_ORDERS = 2;
 
 // ============================================================
 // RÉCUPÉRER LES AIDANTS DISPONIBLES AVEC FILTRES
@@ -43,6 +53,11 @@ const getAvailableAidants = async (filters = {}) => {
 
     if (filters.minExperience) {
       query = query.gte('experience_years', filters.minExperience);
+    }
+
+    // ✅ Filtrer par quota (aidants qui ont de la place)
+    if (filters.hasQuota === true) {
+      // On filtrera après récupération
     }
 
     const sortField = filters.sortBy || 'rating';
@@ -86,7 +101,18 @@ const getAvailableAidants = async (filters = {}) => {
         console.error('❌ Erreur comptage assignations:', countError);
       }
 
-      const maxAssignments = aidant.max_assignments || 4;
+      const { count: currentOrders, error: ordersError } = await supabase
+        .from('commandes')
+        .select('id', { count: 'exact', head: true })
+        .eq('current_aidant_id', aidant.id)
+        .in('status', ['en_cours', 'en_attente']);
+
+      if (ordersError) {
+        console.error('❌ Erreur comptage commandes:', ordersError);
+      }
+
+      const maxAssignments = aidant.max_assignments || DEFAULT_MAX_ASSIGNMENTS;
+      const maxOrders = aidant.max_orders || DEFAULT_MAX_ORDERS;
       const isAvailable = aidant.available && (activeAssignments || 0) < maxAssignments;
 
       return {
@@ -94,13 +120,23 @@ const getAvailableAidants = async (filters = {}) => {
         user: aidant.user_id ? profileMap[aidant.user_id] || null : null,
         active_assignments: activeAssignments || 0,
         max_assignments: maxAssignments,
+        current_orders: currentOrders || 0,
+        max_orders: maxOrders,
         is_available: isAvailable,
         availability_status: isAvailable ? 'available' : 
           ((activeAssignments || 0) >= maxAssignments ? 'full' : 'unavailable'),
+        available_slots: Math.max(0, maxAssignments - (activeAssignments || 0)),
+        orders_available: Math.max(0, maxOrders - (currentOrders || 0)),
       };
     }));
 
-    return aidantsWithStats;
+    // ✅ Filtrer par quota si demandé
+    let result = aidantsWithStats;
+    if (filters.hasQuota === true) {
+      result = result.filter(a => a.available_slots > 0);
+    }
+
+    return result;
   } catch (error) {
     console.error('❌ Get available aidants error:', error);
     throw error;
@@ -137,6 +173,16 @@ const getAidantById = async (aidantId) => {
 
     if (countError) {
       console.error('❌ Erreur comptage assignations:', countError);
+    }
+
+    const { count: currentOrders, error: ordersError } = await supabase
+      .from('commandes')
+      .select('id', { count: 'exact', head: true })
+      .eq('current_aidant_id', aidant.id)
+      .in('status', ['en_cours', 'en_attente']);
+
+    if (ordersError) {
+      console.error('❌ Erreur comptage commandes:', ordersError);
     }
 
     const { data: assignments, error: assignmentsError } = await supabase
@@ -208,18 +254,23 @@ const getAidantById = async (aidantId) => {
       ? reviews.reduce((sum, r) => sum + r.rating, 0) / totalReviews
       : aidant.rating || 0;
 
-    const maxAssignments = aidant.max_assignments || 4;
+    const maxAssignments = aidant.max_assignments || DEFAULT_MAX_ASSIGNMENTS;
+    const maxOrders = aidant.max_orders || DEFAULT_MAX_ORDERS;
     const isAvailable = aidant.available && (activeAssignments || 0) < maxAssignments;
 
     return {
       ...aidant,
       active_assignments: activeAssignments || 0,
       max_assignments: maxAssignments,
+      current_orders: currentOrders || 0,
+      max_orders: maxOrders,
       avg_rating: Math.round(avgRating * 10) / 10,
       total_reviews: totalReviews,
       is_available: isAvailable,
       availability_status: isAvailable ? 'available' : 
         ((activeAssignments || 0) >= maxAssignments ? 'full' : 'unavailable'),
+      available_slots: Math.max(0, maxAssignments - (activeAssignments || 0)),
+      orders_available: Math.max(0, maxOrders - (currentOrders || 0)),
       patients: patients || [],
       reviews: reviews || [],
       assignments: assignments || [],
@@ -231,7 +282,7 @@ const getAidantById = async (aidantId) => {
 };
 
 // ============================================================
-// ✅ ASSIGNER UN AIDANT (NOUVELLE VERSION)
+// ✅ ASSIGNER UN AIDANT (AVEC PATIENT OPTIONNEL)
 // ============================================================
 const assignAidantToPatient = async (aidantId, familyId, patientId = null, assignmentType = 'permanente') => {
   try {
@@ -393,6 +444,9 @@ const getFamilyAssignments = async (familyId) => {
         target_name: isPatient 
           ? `${item.target_patient?.first_name || ''} ${item.target_patient?.last_name || ''}`.trim()
           : item.target_profile?.full_name || 'Compte personnel',
+        expires_at: item.expires_at,
+        status: item.status,
+        assignment_type: item.assignment_type,
       };
     });
 
@@ -580,7 +634,7 @@ const getAidantAssignmentsLegacy = async (aidantUserId) => {
 };
 
 // ============================================================
-// ✅ RÉVOQUER UNE ASSIGNATION - NOUVELLE VERSION
+// ✅ RÉVOQUER UNE ASSIGNATION
 // ============================================================
 const revokeAssignment = async (assignmentId, familyId) => {
   try {
@@ -645,13 +699,288 @@ const revokeAssignmentLegacy = async (assignmentId, familyId) => {
 };
 
 // ============================================================
+// 🆕 NOUVELLES FONCTIONS
+// ============================================================
+
+// ============================================================
+// RÉCUPÉRER LES AIDANTS DISPONIBLES POUR UNE FAMILLE
+// ============================================================
+const getAvailableAidantsForFamilyCatalog = async (familyId, filters = {}) => {
+  try {
+    // Utiliser la fonction existante de aidantAssignment.service
+    const aidants = await getAvailableAidantsForFamily(familyId, filters);
+
+    // Enrichir avec les informations de commandes
+    const aidantsWithOrders = await Promise.all((aidants || []).map(async (aidant) => {
+      const { count: currentOrders, error: ordersError } = await supabase
+        .from('commandes')
+        .select('id', { count: 'exact', head: true })
+        .eq('current_aidant_id', aidant.id)
+        .in('status', ['en_cours', 'en_attente']);
+
+      if (ordersError) {
+        console.error('❌ Erreur comptage commandes:', ordersError);
+      }
+
+      const maxOrders = aidant.max_orders || DEFAULT_MAX_ORDERS;
+
+      return {
+        ...aidant,
+        current_orders: currentOrders || 0,
+        max_orders: maxOrders,
+        orders_available: Math.max(0, maxOrders - (currentOrders || 0)),
+        can_take_order: (currentOrders || 0) < maxOrders,
+      };
+    }));
+
+    return aidantsWithOrders;
+  } catch (error) {
+    console.error('❌ getAvailableAidantsForFamilyCatalog error:', error);
+    throw error;
+  }
+};
+
+// ============================================================
+// RÉCUPÉRER LES AIDANTS AVEC LEUR QUOTA
+// ============================================================
+const getAidantsByAvailability = async (filters = {}) => {
+  try {
+    const aidants = await getAidantsWithQuota(filters);
+
+    // Enrichir avec les informations de commandes
+    const aidantsWithOrders = await Promise.all((aidants || []).map(async (aidant) => {
+      const { count: currentOrders, error: ordersError } = await supabase
+        .from('commandes')
+        .select('id', { count: 'exact', head: true })
+        .eq('current_aidant_id', aidant.id)
+        .in('status', ['en_cours', 'en_attente']);
+
+      if (ordersError) {
+        console.error('❌ Erreur comptage commandes:', ordersError);
+      }
+
+      const maxOrders = aidant.max_orders || DEFAULT_MAX_ORDERS;
+
+      return {
+        ...aidant,
+        current_orders: currentOrders || 0,
+        max_orders: maxOrders,
+        orders_available: Math.max(0, maxOrders - (currentOrders || 0)),
+        can_take_order: (currentOrders || 0) < maxOrders,
+        is_full: (aidant.current_assignments || 0) >= (aidant.max_assignments || DEFAULT_MAX_ASSIGNMENTS),
+        available_slots: Math.max(0, (aidant.max_assignments || DEFAULT_MAX_ASSIGNMENTS) - (aidant.current_assignments || 0)),
+      };
+    }));
+
+    // Filtrer par disponibilité si demandé
+    let result = aidantsWithOrders;
+    if (filters.onlyAvailable === true) {
+      result = result.filter(a => a.is_available && a.available_slots > 0);
+    }
+
+    // Trier
+    if (filters.sortBy) {
+      const sortField = filters.sortBy;
+      const sortOrder = filters.sortOrder || 'desc';
+      result = result.sort((a, b) => {
+        const aVal = a[sortField] || 0;
+        const bVal = b[sortField] || 0;
+        return sortOrder === 'desc' ? bVal - aVal : aVal - bVal;
+      });
+    }
+
+    return result;
+  } catch (error) {
+    console.error('❌ getAidantsByAvailability error:', error);
+    throw error;
+  }
+};
+
+// ============================================================
+// VÉRIFIER SI UN AIDANT PEUT PRENDRE UNE COMMANDE
+// ============================================================
+const canAidantTakeOrder = async (aidantUserId) => {
+  try {
+    const { data: aidant, error } = await supabase
+      .from('aidants')
+      .select('id, current_orders, max_orders, available, is_verified, status')
+      .eq('user_id', aidantUserId)
+      .single();
+
+    if (error || !aidant) {
+      return {
+        canTake: false,
+        reason: 'Aidant non trouvé',
+        current: 0,
+        max: DEFAULT_MAX_ORDERS,
+      };
+    }
+
+    if (!aidant.available || !aidant.is_verified || aidant.status !== 'approved') {
+      return {
+        canTake: false,
+        reason: 'Aidant non disponible ou non approuvé',
+        current: aidant.current_orders || 0,
+        max: aidant.max_orders || DEFAULT_MAX_ORDERS,
+      };
+    }
+
+    const current = aidant.current_orders || 0;
+    const max = aidant.max_orders || DEFAULT_MAX_ORDERS;
+
+    return {
+      canTake: current < max,
+      reason: current < max ? 'Disponible' : 'Quota atteint',
+      current,
+      max,
+      available: Math.max(0, max - current),
+    };
+  } catch (error) {
+    console.error('❌ canAidantTakeOrder error:', error);
+    return {
+      canTake: false,
+      reason: 'Erreur',
+      current: 0,
+      max: DEFAULT_MAX_ORDERS,
+    };
+  }
+};
+
+// ============================================================
+// RÉCUPÉRER LES AIDANTS PAR SPÉCIALITÉ
+// ============================================================
+const getAidantsBySpecialty = async (specialty, filters = {}) => {
+  try {
+    let query = supabase
+      .from('aidants')
+      .select(`
+        *,
+        user:profiles!user_id(
+          id,
+          full_name,
+          email,
+          phone,
+          avatar_url
+        )
+      `)
+      .eq('is_verified', true)
+      .eq('status', 'approved')
+      .contains('specialties', [specialty]);
+
+    if (filters.available === true) {
+      query = query.eq('available', true);
+    }
+
+    if (filters.minRating) {
+      query = query.gte('rating', filters.minRating);
+    }
+
+    const { data: aidants, error } = await query;
+
+    if (error) throw error;
+
+    // Enrichir avec les quotas
+    const enriched = await Promise.all((aidants || []).map(async (aidant) => {
+      const { count: activeAssignments } = await supabase
+        .from('aidant_assignments')
+        .select('id', { count: 'exact', head: true })
+        .eq('aidant_user_id', aidant.user_id)
+        .eq('status', 'active');
+
+      const maxAssignments = aidant.max_assignments || DEFAULT_MAX_ASSIGNMENTS;
+
+      return {
+        ...aidant,
+        active_assignments: activeAssignments || 0,
+        max_assignments: maxAssignments,
+        available_slots: Math.max(0, maxAssignments - (activeAssignments || 0)),
+        is_available: aidant.available && (activeAssignments || 0) < maxAssignments,
+      };
+    }));
+
+    return enriched;
+  } catch (error) {
+    console.error('❌ getAidantsBySpecialty error:', error);
+    throw error;
+  }
+};
+
+// ============================================================
+// RÉCUPÉRER LES AIDANTS PAR ZONE
+// ============================================================
+const getAidantsByZone = async (zone, filters = {}) => {
+  try {
+    let query = supabase
+      .from('aidants')
+      .select(`
+        *,
+        user:profiles!user_id(
+          id,
+          full_name,
+          email,
+          phone,
+          avatar_url
+        )
+      `)
+      .eq('is_verified', true)
+      .eq('status', 'approved')
+      .contains('zones', [zone]);
+
+    if (filters.available === true) {
+      query = query.eq('available', true);
+    }
+
+    if (filters.minRating) {
+      query = query.gte('rating', filters.minRating);
+    }
+
+    const { data: aidants, error } = await query;
+
+    if (error) throw error;
+
+    // Enrichir avec les quotas
+    const enriched = await Promise.all((aidants || []).map(async (aidant) => {
+      const { count: activeAssignments } = await supabase
+        .from('aidant_assignments')
+        .select('id', { count: 'exact', head: true })
+        .eq('aidant_user_id', aidant.user_id)
+        .eq('status', 'active');
+
+      const maxAssignments = aidant.max_assignments || DEFAULT_MAX_ASSIGNMENTS;
+
+      return {
+        ...aidant,
+        active_assignments: activeAssignments || 0,
+        max_assignments: maxAssignments,
+        available_slots: Math.max(0, maxAssignments - (activeAssignments || 0)),
+        is_available: aidant.available && (activeAssignments || 0) < maxAssignments,
+      };
+    }));
+
+    return enriched;
+  } catch (error) {
+    console.error('❌ getAidantsByZone error:', error);
+    throw error;
+  }
+};
+
+// ============================================================
 // EXPORTS
 // ============================================================
+
 module.exports = {
+  // Fonctions existantes
   getAvailableAidants,
   getAidantById,
   assignAidantToPatient,
   getFamilyAssignments,
   getAidantAssignments,
   revokeAssignment,
+
+  // 🆕 Nouvelles fonctions
+  getAvailableAidantsForFamilyCatalog,
+  getAidantsByAvailability,
+  canAidantTakeOrder,
+  getAidantsBySpecialty,
+  getAidantsByZone,
 };
