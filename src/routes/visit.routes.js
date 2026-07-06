@@ -1,5 +1,4 @@
 // 📁 backend/src/routes/visit.routes.js
- 
 
 const express = require('express');
 const router = express.Router();
@@ -8,6 +7,11 @@ const authMiddleware = require('../middleware/auth.middleware');
 const roleMiddleware = require('../middleware/role.middleware');
 const { createNotification } = require('../services/notification.service');
 const { getActiveAidantForTarget } = require('../services/aidantAssignment.service');
+const {
+  getVisitPrice,
+  checkSubscriptionForVisits,
+  decrementVisit,
+} = require('../services/visitPayment.service');
 
 router.use(authMiddleware);
 
@@ -117,7 +121,7 @@ router.get('/accounts', roleMiddleware(['admin', 'coordinator']), async (req, re
 });
 
 // =============================================
-// ✅ LISTE DES VISITES - CORRIGÉ (visites au lieu de commandes)
+// ✅ LISTE DES VISITES - CORRIGÉ
 // =============================================
 router.get('/', async (req, res) => {
   try {
@@ -133,7 +137,7 @@ router.get('/', async (req, res) => {
       patientIds = links?.map(l => l.patient_id).filter(Boolean) || [];
     }
 
-    // ✅ 2. Construire la requête SUR LA TABLE VISITES (pas commandes)
+    // ✅ 2. Construire la requête SUR LA TABLE VISITES
     let query = supabase
       .from('visites')
       .select(`
@@ -218,7 +222,7 @@ router.get('/', async (req, res) => {
 });
 
 // =============================================
-// ✅ DÉTAILS D'UNE VISITE - CORRIGÉ
+// ✅ DÉTAILS D'UNE VISITE
 // =============================================
 router.get('/:id', async (req, res) => {
   try {
@@ -312,7 +316,7 @@ router.get('/:id', async (req, res) => {
 });
 
 // =============================================
-// ✅ CRÉER UNE VISITE - AVEC LOGIQUE UNIFIÉE
+// ✅ CRÉER UNE VISITE - LOGIQUE UNIFIÉE AVEC ABONNEMENT
 // =============================================
 router.post('/', async (req, res) => {
   try {
@@ -337,7 +341,7 @@ router.post('/', async (req, res) => {
       return res.status(403).json({ error: 'Non autorisé à créer une visite' });
     }
 
-    // ✅ DÉTERMINER LA CIBLE (inchangé)
+    // ✅ DÉTERMINER LA CIBLE
     let finalPatientId = null;
     let finalTargetType = 'personal';
     let finalTargetName = target_name || null;
@@ -462,31 +466,50 @@ router.post('/', async (req, res) => {
       }
     }
 
-    // ✅ LOGIQUE UNIFIÉE - VÉRIFICATION DU PAIEMENT REQUIS
+    // ✅ LOGIQUE UNIFIÉE - VÉRIFICATION DE L'ABONNEMENT
     let requiresPayment = false;
     let status = 'planifiee';
     let paymentAmount = 0;
+    let subscriptionId = null;
+
+    // ✅ Vérifier l'abonnement
+    const subscriptionCheck = await checkSubscriptionForVisits(finalUserId || user.id);
+    console.log('📊 Vérification abonnement pour visite:', {
+      userId: finalUserId || user.id,
+      hasActiveSubscription: subscriptionCheck.hasActiveSubscription,
+      remainingVisits: subscriptionCheck.remainingVisits,
+    });
 
     if (is_ponctual) {
+      // ✅ CAS 1 : Visite explicitement ponctuelle → Paiement requis
       requiresPayment = true;
       status = 'brouillon';
       paymentAmount = getPonctualPrice(duration_minutes);
+      console.log('⚡ Visite ponctuelle explicitement demandée');
+      
+    } else if (subscriptionCheck.hasActiveSubscription && subscriptionCheck.remainingVisits > 0) {
+      // ✅ CAS 2 : Abonnement actif avec visites disponibles
+      status = 'planifiee';
+      requiresPayment = false;
+      subscriptionId = subscriptionCheck.subscription?.id || null;
+      console.log('✅ Visite avec abonnement - décompte à la validation');
+      
+    } else if (subscriptionCheck.hasActiveSubscription && subscriptionCheck.remainingVisits === 0) {
+      // ✅ CAS 3 : Abonnement actif mais plus de visites
+      requiresPayment = true;
+      status = 'brouillon';
+      paymentAmount = getPonctualPrice(duration_minutes);
+      console.log('⚠️ Abonnement actif mais plus de visites - mode ponctuel');
+      
     } else {
-      const { data: subscription } = await supabase
-        .from('abonnements')
-        .select('id, remaining_visits, status')
-        .eq('user_id', finalUserId)
-        .eq('status', 'actif')
-        .maybeSingle();
-
-      if (!subscription || subscription.remaining_visits <= 0) {
-        requiresPayment = true;
-        status = 'brouillon';
-        paymentAmount = getPonctualPrice(duration_minutes);
-      }
+      // ✅ CAS 4 : Pas d'abonnement → Mode ponctuel
+      requiresPayment = true;
+      status = 'brouillon';
+      paymentAmount = getPonctualPrice(duration_minutes);
+      console.log('❌ Pas d\'abonnement - mode ponctuel');
     }
 
-    // ✅ DÉTERMINER L'AIDANT À ASSIGNER - AVEC CONVERSION
+    // ✅ DÉTERMINER L'AIDANT À ASSIGNER
     let finalAidantId = aidant_id || null;
 
     // Si un aidant_id est fourni, vérifier s'il s'agit d'un user_id ou aidant_id
@@ -541,6 +564,7 @@ router.post('/', async (req, res) => {
       assignment_type: assignment_type || 'ponctuelle',
       requested_by: user.id,
       draft_expires_at: requiresPayment ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() : null,
+      subscription_id: subscriptionId,
       metadata: {
         created_by: user.id,
         created_at: new Date().toISOString(),
@@ -552,6 +576,8 @@ router.post('/', async (req, res) => {
         target_user_id: finalUserId,
         target_has_patient: targetHasPatient,
         auto_assigned_aidant: !!finalAidantId && !aidant_id,
+        subscription_used: subscriptionId ? true : false,
+        ponctual_mode: requiresPayment ? true : false,
       }
     };
 
@@ -562,6 +588,7 @@ router.post('/', async (req, res) => {
       finalAidantId,
       status,
       requiresPayment,
+      subscriptionId,
     });
 
     const { data: visit, error: insertError } = await supabase
@@ -680,6 +707,7 @@ router.post('/', async (req, res) => {
       visit,
       requires_payment: false,
       auto_assigned_aidant: !!finalAidantId && !aidant_id,
+      subscription_used: !!subscriptionId,
     });
   } catch (error) {
     console.error('❌ Create visit error:', error);
@@ -1404,7 +1432,7 @@ router.post('/:id/validate', roleMiddleware(['admin', 'coordinator']), async (re
 
     const { data: visit, error: visitError } = await supabase
       .from('visites')
-      .select('patient_id, aidant_id, metadata, user_id, target_type, target_name, status')
+      .select('patient_id, aidant_id, metadata, user_id, target_type, target_name, status, subscription_id')
       .eq('id', id)
       .single();
 
@@ -1451,49 +1479,34 @@ router.post('/:id/validate', roleMiddleware(['admin', 'coordinator']), async (re
 
     if (error) throw error;
 
-    // ✅ VÉRIFIER SI LA VISITE ÉTAIT PONCTUELLE (payée)
-    const isPonctual = visit.metadata?.is_ponctual === true || visit.metadata?.is_draft === true;
+    // ✅ DÉCOMPTER UNIQUEMENT SI CE N'EST PAS PONCTUEL PAYÉ
+    const isPonctual = visit.metadata?.is_ponctual === true || visit.metadata?.ponctual_mode === true;
     const wasPaid = visit.metadata?.payment_completed === true;
 
-    // ✅ Si visite ponctuelle payée, NE PAS DÉCOMPTER DE L'ABONNEMENT
+    // ✅ Si visite ponctuelle payée, NE PAS DÉCOMPTER
     if (!isPonctual || !wasPaid) {
-      const { data: subscription, error: subError } = await supabase
-        .from('abonnements')
-        .select('id, remaining_visits, used_visits, total_visits, user_id')
-        .eq('user_id', data.user_id)
-        .eq('status', 'actif')
-        .maybeSingle();
-
-      if (subscription && !subError && subscription.remaining_visits > 0) {
-        const { error: updateError } = await supabase
-          .from('abonnements')
-          .update({
-            used_visits: subscription.used_visits + 1,
-            remaining_visits: subscription.remaining_visits - 1,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', subscription.id);
-
-        if (updateError) {
-          console.error('❌ Erreur décompte visites:', updateError);
+      // ✅ Si abonnement associé, décompter
+      if (visit.subscription_id) {
+        const result = await decrementVisit(visit.subscription_id);
+        if (result.success) {
+          console.log(`✅ Visite ${id} décomptée de l'abonnement ${visit.subscription_id}`);
         } else {
-          if (subscription.remaining_visits - 1 === 0) {
-            await createNotification({
-              userId: subscription.user_id,
-              title: '⚠️ Plus de visites disponibles',
-              body: 'Votre abonnement a atteint le nombre maximum de visites. Pensez à renouveler.',
-              type: 'system',
-              data: { subscription_id: subscription.id },
-            });
-          }
+          console.warn(`⚠️ Échec décompte visite ${id}:`, result.error);
+        }
+      } else {
+        // ✅ Rechercher un abonnement actif
+        const { data: subscription, error: subError } = await supabase
+          .from('abonnements')
+          .select('id, remaining_visits, used_visits, total_visits, user_id')
+          .eq('user_id', data.user_id)
+          .eq('status', 'actif')
+          .maybeSingle();
 
-          await createNotification({
-            userId: subscription.user_id,
-            title: '📊 Visite décomptée',
-            body: `Il vous reste ${subscription.remaining_visits - 1} visite(s) sur votre abonnement.`,
-            type: 'system',
-            data: { subscription_id: subscription.id, remaining: subscription.remaining_visits - 1 },
-          });
+        if (subscription && !subError && subscription.remaining_visits > 0) {
+          const result = await decrementVisit(subscription.id);
+          if (result.success) {
+            console.log(`✅ Visite ${id} décomptée de l'abonnement ${subscription.id}`);
+          }
         }
       }
     } else {
