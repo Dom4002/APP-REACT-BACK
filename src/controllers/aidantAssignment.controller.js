@@ -13,6 +13,9 @@ const {
   TARGET_TYPES,
   ASSIGNMENT_TYPES,
   mapTargetTypeForResponse,
+  getAvailableAidantsForFamily,
+  getAidantsWithQuota,
+  adminAssignAidantToVisit,
 } = require('../services/aidantAssignment.service');
 const { asyncWrapper } = require('../utils/errorHandler');
 
@@ -51,13 +54,10 @@ const getActiveAidant = asyncWrapper(async (req, res) => {
     }
     // ✅ Une famille peut accéder à ses assignations personnelles
     else if (userRole === 'family') {
-      // ✅ Cas 1 : Assignation personnelle (compte personnel)
       if ((targetType === 'personal' || targetType === 'personal_account') && targetId === userId) {
         hasPermission = true;
-      }
-      // ✅ Cas 2 : Patient - vérifier le lien
-      else if (targetType === 'patient') {
-        const { data: link, error: linkError } = await supabase
+      } else if (targetType === 'patient') {
+        const { data: link } = await supabase
           .from('patient_family_links')
           .select('id')
           .eq('family_id', userId)
@@ -67,16 +67,13 @@ const getActiveAidant = asyncWrapper(async (req, res) => {
         if (!linkError && link) {
           hasPermission = true;
         }
-      }
-      // ✅ Cas 3 : Famille - si targetId correspond à userId
-      else if (targetType === 'family' && targetId === userId) {
+      } else if (targetType === 'family' && targetId === userId) {
         hasPermission = true;
       }
     }
     // ✅ Un aidant ne peut voir que ses propres patients
     else if (userRole === 'aidant') {
-      // Vérifier via les assignations
-      const { data: assignment, error: assignError } = await supabase
+      const { data: assignment } = await supabase
         .from('aidant_assignments')
         .select('id')
         .eq('aidant_user_id', userId)
@@ -154,44 +151,33 @@ const getAllAidants = asyncWrapper(async (req, res) => {
       });
     }
 
-    // ✅ VÉRIFICATION DES PERMISSIONS
+    // ✅ VÉRIFICATION DES PERMISSIONS (identique à getActiveAidant)
     const userId = req.user.id;
     const userRole = req.profile?.role;
 
     let hasPermission = false;
 
-    // Admin/Coordinator ont tout accès
     if (['admin', 'coordinator'].includes(userRole)) {
       hasPermission = true;
-    }
-    // ✅ Une famille peut accéder à ses assignations personnelles
-    else if (userRole === 'family') {
-      // ✅ Cas 1 : Assignation personnelle (compte personnel)
+    } else if (userRole === 'family') {
       if ((targetType === 'personal' || targetType === 'personal_account') && targetId === userId) {
         hasPermission = true;
-      }
-      // ✅ Cas 2 : Patient - vérifier le lien
-      else if (targetType === 'patient') {
-        const { data: link, error: linkError } = await supabase
+      } else if (targetType === 'patient') {
+        const { data: link } = await supabase
           .from('patient_family_links')
           .select('id')
           .eq('family_id', userId)
           .eq('patient_id', targetId)
           .maybeSingle();
 
-        if (!linkError && link) {
+        if (link) {
           hasPermission = true;
         }
-      }
-      // ✅ Cas 3 : Famille - si targetId correspond à userId
-      else if (targetType === 'family' && targetId === userId) {
+      } else if (targetType === 'family' && targetId === userId) {
         hasPermission = true;
       }
-    }
-    // ✅ Un aidant ne peut voir que ses propres patients
-    else if (userRole === 'aidant') {
-      // Vérifier via les assignations
-      const { data: assignment, error: assignError } = await supabase
+    } else if (userRole === 'aidant') {
+      const { data: assignment } = await supabase
         .from('aidant_assignments')
         .select('id')
         .eq('aidant_user_id', userId)
@@ -200,7 +186,7 @@ const getAllAidants = asyncWrapper(async (req, res) => {
         .eq('status', 'active')
         .maybeSingle();
 
-      if (!assignError && assignment) {
+      if (assignment) {
         hasPermission = true;
       }
     }
@@ -302,14 +288,14 @@ const assignAidant = asyncWrapper(async (req, res) => {
     }
 
     if (!hasPermission && targetType === TARGET_TYPES.PATIENT) {
-      const { data: links, error: linksError } = await supabase
+      const { data: links } = await supabase
         .from('patient_family_links')
         .select('id')
         .eq('family_id', userId)
         .eq('patient_id', targetId)
         .maybeSingle();
 
-      if (!linksError && links) {
+      if (links) {
         hasPermission = true;
       }
     }
@@ -342,8 +328,6 @@ const assignAidant = asyncWrapper(async (req, res) => {
       });
     }
 
-    console.log('✅ Aidant assigné avec succès:', result);
-
     res.status(201).json({
       success: true,
       message: 'Aidant assigné avec succès',
@@ -368,8 +352,6 @@ const revokeAssignmentController = asyncWrapper(async (req, res) => {
     const userId = req.user.id;
     const userRole = req.profile?.role;
 
-    console.log('📤 Révocation assignation:', id);
-
     const { data: assignment, error: fetchError } = await supabase
       .from('aidant_assignments')
       .select('*')
@@ -393,14 +375,14 @@ const revokeAssignmentController = asyncWrapper(async (req, res) => {
         hasPermission = assignment.target_id === userId;
       }
       if (assignment.target_type === TARGET_TYPES.PATIENT) {
-        const { data: links, error: linksError } = await supabase
+        const { data: links } = await supabase
           .from('patient_family_links')
           .select('id')
           .eq('family_id', userId)
           .eq('patient_id', assignment.target_id)
           .maybeSingle();
 
-        if (!linksError && links) {
+        if (links) {
           hasPermission = true;
         }
       }
@@ -496,7 +478,6 @@ const getTargetAssignments = asyncWrapper(async (req, res) => {
       });
     }
 
-    // ✅ VÉRIFICATION DES PERMISSIONS
     const isAdmin = ['admin', 'coordinator'].includes(userRole);
     let hasPermission = isAdmin;
 
@@ -505,14 +486,14 @@ const getTargetAssignments = asyncWrapper(async (req, res) => {
     }
 
     if (!hasPermission && targetType === TARGET_TYPES.PATIENT) {
-      const { data: links, error: linksError } = await supabase
+      const { data: links } = await supabase
         .from('patient_family_links')
         .select('id')
         .eq('family_id', userId)
         .eq('patient_id', targetId)
         .maybeSingle();
 
-      if (!linksError && links) {
+      if (links) {
         hasPermission = true;
       }
     }
@@ -585,9 +566,175 @@ const checkAssignment = asyncWrapper(async (req, res) => {
 });
 
 // ============================================================
+// 🆕 ADMIN : FORCER UNE ASSIGNATION
+// ============================================================
+const adminForceAssign = asyncWrapper(async (req, res) => {
+  try {
+    const {
+      aidantUserId,
+      targetType,
+      targetId,
+      familyId = null,
+      assignmentType = ASSIGNMENT_TYPES.PRIMARY,
+      reason = null,
+      expiresAt = null,
+    } = req.body;
+
+    if (!aidantUserId || !targetType || !targetId) {
+      return res.status(400).json({
+        success: false,
+        error: 'aidantUserId, targetType et targetId sont requis',
+      });
+    }
+
+    // Vérifier que l'utilisateur est admin
+    if (!['admin', 'coordinator'].includes(req.profile?.role)) {
+      return res.status(403).json({
+        success: false,
+        error: 'Non autorisé',
+        code: 'ACCESS_DENIED',
+      });
+    }
+
+    // Vérifier que l'aidant existe
+    const { data: aidant, error: aidantError } = await supabase
+      .from('aidants')
+      .select('id, user_id, is_verified, status')
+      .eq('user_id', aidantUserId)
+      .single();
+
+    if (aidantError || !aidant) {
+      return res.status(404).json({
+        success: false,
+        error: 'Aidant non trouvé',
+      });
+    }
+
+    if (!aidant.is_verified || aidant.status !== 'approved') {
+      return res.status(400).json({
+        success: false,
+        error: 'Cet aidant n\'est pas approuvé',
+      });
+    }
+
+    // Forcer l'assignation (ignore le quota)
+    const result = await assignAidantToTarget({
+      aidantUserId,
+      targetType,
+      targetId,
+      familyId: familyId || null,
+      assignmentType,
+      createdBy: req.user.id,
+      reason: reason || `Assignation forcée par admin (${req.user.id})`,
+      expiresAt: expiresAt || null,
+    });
+
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        error: result.error,
+        code: result.code,
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Assignation forcée effectuée avec succès',
+      data: result,
+    });
+  } catch (error) {
+    console.error('❌ adminForceAssign error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erreur lors de l\'assignation forcée',
+    });
+  }
+});
+
+// ============================================================
+// 🆕 RÉCUPÉRER LES AIDANTS DISPONIBLES POUR UNE FAMILLE
+// ============================================================
+const getAvailableForFamily = asyncWrapper(async (req, res) => {
+  try {
+    const { familyId, zone, specialty, minRating } = req.query;
+
+    if (!familyId) {
+      return res.status(400).json({
+        success: false,
+        error: 'familyId est requis',
+      });
+    }
+
+    // Vérifier les permissions
+    const userId = req.user.id;
+    const userRole = req.profile?.role;
+
+    const isAdmin = ['admin', 'coordinator'].includes(userRole);
+    const isOwnProfile = familyId === userId;
+
+    if (!isAdmin && !isOwnProfile) {
+      return res.status(403).json({
+        success: false,
+        error: 'Non autorisé à voir ces aidants',
+        code: 'ACCESS_DENIED',
+      });
+    }
+
+    const aidants = await getAvailableAidantsForFamily(familyId, {
+      zone,
+      specialty,
+      minRating: minRating ? parseFloat(minRating) : undefined,
+    });
+
+    res.json({
+      success: true,
+      data: aidants,
+      count: aidants.length,
+    });
+  } catch (error) {
+    console.error('❌ getAvailableForFamily error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erreur lors de la récupération des aidants',
+    });
+  }
+});
+
+// ============================================================
+// 🆕 RÉCUPÉRER LES AIDANTS AVEC LEUR QUOTA
+// ============================================================
+const getAidantsWithQuotaController = asyncWrapper(async (req, res) => {
+  try {
+    const { available, sortBy, sortOrder, limit, offset } = req.query;
+
+    const aidants = await getAidantsWithQuota({
+      available: available === 'true',
+      sortBy: sortBy || 'rating',
+      sortOrder: sortOrder || 'desc',
+      limit: limit ? parseInt(limit) : 20,
+      offset: offset ? parseInt(offset) : 0,
+    });
+
+    res.json({
+      success: true,
+      data: aidants,
+      count: aidants.length,
+    });
+  } catch (error) {
+    console.error('❌ getAidantsWithQuotaController error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erreur lors de la récupération des aidants',
+    });
+  }
+});
+
+// ============================================================
 // EXPORTS
 // ============================================================
+
 module.exports = {
+  // Fonctions existantes
   getActiveAidant,
   getAllAidants,
   assignAidant,
@@ -595,4 +742,9 @@ module.exports = {
   getAidantAssignments,
   getTargetAssignments,
   checkAssignment,
+
+  // 🆕 Nouvelles fonctions
+  adminForceAssign,
+  getAvailableForFamily,
+  getAidantsWithQuotaController,
 };
