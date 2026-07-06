@@ -4,7 +4,7 @@ const express = require('express');
 const { supabase } = require('../services/supabase.service');
 const router = express.Router();
 const authMiddleware = require('../middleware/auth.middleware');
-const roleMiddleware = require('../middleware/role.middleware');
+const { roleMiddleware } = require('../middleware/role.middleware');
 const {
   getCatalog,
   getAidant,
