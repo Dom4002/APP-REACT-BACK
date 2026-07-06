@@ -6,7 +6,14 @@ const { supabase } = require('../services/supabase.service');
 const authMiddleware = require('../middleware/auth.middleware');
 const roleMiddleware = require('../middleware/role.middleware');
 const { createNotification } = require('../services/notification.service');
-const { getActiveAidantForTarget } = require('../services/aidantAssignment.service');
+const { 
+  getActiveAidantForTarget,
+  getAvailableAidantsForFamily,
+  getVisitWizardOptions,
+  adminAssignAidantToVisit,
+  getPendingAidantVisits,
+  isAidantFull,
+} = require('../services/aidantAssignment.service');
 const {
   getVisitPrice,
   checkSubscriptionForVisits,
@@ -316,7 +323,7 @@ router.get('/:id', async (req, res) => {
 });
 
 // =============================================
-// ✅ CRÉER UNE VISITE - LOGIQUE UNIFIÉE AVEC ABONNEMENT
+// ✅ CRÉER UNE VISITE - LOGIQUE UNIFIÉE AVEC WIZARD
 // =============================================
 router.post('/', async (req, res) => {
   try {
@@ -333,7 +340,9 @@ router.post('/', async (req, res) => {
       is_urgent,
       is_ponctual = false,
       assignment_type = 'ponctuelle',
-      aidant_id = null
+      aidant_id = null,
+      wizard_choice = null, // 'ponctuelle' | 'permanente' | 'without_aidant'
+      selected_aidant_id = null,
     } = req.body;
 
     const canCreate = ['admin', 'coordinator'].includes(profile.role) || profile.role === 'family';
@@ -521,11 +530,14 @@ router.post('/', async (req, res) => {
       }
     }
 
-    // Si pas d'aidant fourni et pas de paiement requis, chercher automatiquement
+    // ============================================================
+    // 🆕 LOGIQUE WIZARD - SI PAS D'AIDANT ASSIGNÉ
+    // ============================================================
     if (!finalAidantId && status !== 'brouillon') {
       const targetTypeForAidant = finalPatientId ? 'patient' : 'personal_account';
       const targetIdForAidant = finalPatientId || finalUserId;
       
+      // 1. Vérifier si un aidant est déjà assigné à la cible
       let foundId = await getActiveAidantForTarget(
         targetTypeForAidant,
         targetIdForAidant,
@@ -537,11 +549,176 @@ router.post('/', async (req, res) => {
         if (convertedId) {
           finalAidantId = convertedId;
           console.log(`✅ Aidant automatique trouvé pour la visite: ${finalAidantId}`);
-        } else {
-          console.log(`⚠️ L'aidant trouvé ${foundId} n'est pas valide`);
         }
       } else {
-        console.log(`ℹ️ Aucun aidant actif trouvé pour la cible ${targetTypeForAidant}/${targetIdForAidant}`);
+        // 2. Aucun aidant assigné → Utiliser le wizard
+        console.log('🔍 Aucun aidant assigné, utilisation du wizard...');
+        
+        // Récupérer les options du wizard
+        const wizardOptions = await getVisitWizardOptions(
+          targetTypeForAidant,
+          targetIdForAidant,
+          familyId
+        );
+
+        // Si l'utilisateur est une famille et qu'il n'y a pas d'aidant disponible
+        if (profile.role === 'family' && wizardOptions.allFull) {
+          // ✅ Option : Planifier sans aidant
+          if (wizard_choice === 'without_aidant') {
+            status = 'en_attente_aidant';
+            finalAidantId = null;
+            console.log('📋 Visite planifiée SANS aidant - en attente');
+            
+            // ✅ NOTIFICATION URGENTE AUX ADMINS
+            const { data: admins } = await supabase
+              .from('profiles')
+              .select('id')
+              .in('role', ['admin', 'coordinator']);
+
+            if (admins && admins.length > 0) {
+              const targetDisplay2 = finalTargetName || 'Patient';
+              for (const admin of admins) {
+                await createNotification({
+                  userId: admin.id,
+                  title: '🚨 Visite planifiée sans aidant disponible !',
+                  body: `Visite pour ${targetDisplay2} le ${scheduled_date} à ${scheduled_time}. Tous les aidants sont complets (4/4).`,
+                  type: 'alert',
+                  data: { 
+                    visit_id: null, // Sera mis à jour après création
+                    action: 'assign_aidant',
+                    urgency: 'high',
+                    target_name: targetDisplay2,
+                    scheduled_date,
+                    scheduled_time,
+                  },
+                });
+              }
+            }
+
+            // Notification à la famille
+            await createNotification({
+              userId: finalUserId,
+              title: '⏳ Visite en attente d\'aidant',
+              body: `Votre visite pour ${finalTargetName || 'le patient'} est en attente d'assignation d'un aidant. L'administration a été notifiée.`,
+              type: 'visite',
+              data: { 
+                status: 'en_attente_aidant',
+                target_name: finalTargetName,
+              },
+            });
+
+          } else {
+            // Annulation
+            return res.status(400).json({
+              success: false,
+              error: 'Tous les aidants sont complets (4/4). Utilisez l\'option "Planifier sans aidant" ou contactez l\'administration.',
+              code: 'ALL_AIDANTS_FULL',
+              allFull: true,
+            });
+          }
+        } 
+        // Si l'utilisateur est une famille et qu'il y a des aidants disponibles
+        else if (profile.role === 'family' && wizardOptions.hasAvailableAidants) {
+          // ✅ L'utilisateur a choisi un aidant via le wizard
+          if (selected_aidant_id && wizard_choice) {
+            const selectedAidantId = await getAidantIdFromUserIdOrId(selected_aidant_id);
+            if (selectedAidantId) {
+              if (wizard_choice === 'ponctuelle') {
+                // ⚡ Visite ponctuelle - NE CONSOMME PAS DE QUOTA
+                finalAidantId = selectedAidantId;
+                console.log('⚡ Visite ponctuelle assignée à l\'aidant:', finalAidantId);
+              } else if (wizard_choice === 'permanente') {
+                // 📌 Visite permanente - CONSOMME 1 QUOTA
+                // Vérifier le quota avant d'assigner
+                const quotaCheck = await isAidantFull(selected_aidant_id);
+                if (quotaCheck.isFull) {
+                  return res.status(400).json({
+                    success: false,
+                    error: `Cet aidant a déjà ${quotaCheck.current}/${quotaCheck.max} assignations. Choisissez un autre aidant ou passez en mode ponctuel.`,
+                    code: 'AIDANT_FULL',
+                    current: quotaCheck.current,
+                    max: quotaCheck.max,
+                  });
+                }
+                finalAidantId = selectedAidantId;
+                
+                // Créer l'assignation permanente
+                await assignAidantToTarget({
+                  aidantUserId: selected_aidant_id,
+                  targetType: targetTypeForAidant,
+                  targetId: targetIdForAidant,
+                  familyId: familyId,
+                  assignmentType: 'primary',
+                  createdBy: user.id,
+                  reason: `Assigné via wizard pour la visite`,
+                });
+                
+                console.log('📌 Assignation permanente créée pour l\'aidant:', finalAidantId);
+              }
+            } else {
+              return res.status(400).json({
+                success: false,
+                error: 'Aidant sélectionné invalide',
+                code: 'INVALID_AIDANT',
+              });
+            }
+          } else {
+            // ✅ L'utilisateur n'a pas fait de choix → Retourner les options
+            return res.status(400).json({
+              success: false,
+              error: 'Veuillez sélectionner un aidant et un type d\'assignation',
+              code: 'WIZARD_REQUIRED',
+              wizard: {
+                options: wizardOptions.options,
+                aidants: wizardOptions.aidants,
+                allFull: false,
+              },
+            });
+          }
+        }
+        // Si l'utilisateur est un admin
+        else if (['admin', 'coordinator'].includes(profile.role)) {
+          if (selected_aidant_id && wizard_choice) {
+            const selectedAidantId = await getAidantIdFromUserIdOrId(selected_aidant_id);
+            if (selectedAidantId) {
+              // Admin peut forcer même si full
+              finalAidantId = selectedAidantId;
+              
+              if (wizard_choice === 'permanente') {
+                // Créer l'assignation permanente (peut dépasser 4)
+                await assignAidantToTarget({
+                  aidantUserId: selected_aidant_id,
+                  targetType: targetTypeForAidant,
+                  targetId: targetIdForAidant,
+                  familyId: familyId,
+                  assignmentType: 'primary',
+                  createdBy: user.id,
+                  reason: `Assigné par admin via wizard pour la visite`,
+                });
+                console.log('👔 Admin: Assignation permanente forcée pour l\'aidant:', finalAidantId);
+              }
+              // Sinon ponctuelle - pas de quota
+            }
+          } else {
+            // Admin doit choisir un aidant
+            const allAidants = await getAvailableAidantsForFamily(familyId);
+            return res.status(400).json({
+              success: false,
+              error: 'Veuillez sélectionner un aidant',
+              code: 'WIZARD_REQUIRED',
+              wizard: {
+                options: [
+                  { type: 'ponctuelle', label: '⚡ Pour cette visite uniquement', quota: 0 },
+                  { type: 'permanente', label: '📌 Permanent', quota: 1 },
+                  { type: 'force', label: '👔 Force (dépasse quota)', quota: 'illimité' },
+                ],
+                aidants: allAidants,
+                allFull: false,
+                isAdmin: true,
+              },
+            });
+          }
+        }
       }
     }
 
@@ -565,6 +742,10 @@ router.post('/', async (req, res) => {
       requested_by: user.id,
       draft_expires_at: requiresPayment ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() : null,
       subscription_id: subscriptionId,
+      is_permanent: wizard_choice === 'permanente',
+      assigned_by_admin: ['admin', 'coordinator'].includes(profile.role),
+      admin_assigned_at: ['admin', 'coordinator'].includes(profile.role) ? new Date().toISOString() : null,
+      waiting_for_aidant_since: status === 'en_attente_aidant' ? new Date().toISOString() : null,
       metadata: {
         created_by: user.id,
         created_at: new Date().toISOString(),
@@ -575,9 +756,12 @@ router.post('/', async (req, res) => {
         scheduled_from_draft: false,
         target_user_id: finalUserId,
         target_has_patient: targetHasPatient,
-        auto_assigned_aidant: !!finalAidantId && !aidant_id,
+        auto_assigned_aidant: !!finalAidantId && !aidant_id && !selected_aidant_id,
         subscription_used: subscriptionId ? true : false,
         ponctual_mode: requiresPayment ? true : false,
+        wizard_choice: wizard_choice || null,
+        waiting_for_aidant: status === 'en_attente_aidant',
+        assigned_by_admin: ['admin', 'coordinator'].includes(profile.role),
       }
     };
 
@@ -589,6 +773,7 @@ router.post('/', async (req, res) => {
       status,
       requiresPayment,
       subscriptionId,
+      wizard_choice,
     });
 
     const { data: visit, error: insertError } = await supabase
@@ -622,6 +807,33 @@ router.post('/', async (req, res) => {
       return res.status(500).json({ error: insertError.message });
     }
 
+    // ✅ METTRE À JOUR LA NOTIFICATION POUR LES ADMINS (si en_attente_aidant)
+    if (status === 'en_attente_aidant') {
+      const { data: admins } = await supabase
+        .from('profiles')
+        .select('id')
+        .in('role', ['admin', 'coordinator']);
+
+      if (admins && admins.length > 0) {
+        for (const admin of admins) {
+          await createNotification({
+            userId: admin.id,
+            title: '🚨 Visite planifiée sans aidant disponible !',
+            body: `Visite pour ${finalTargetName || 'Patient'} le ${scheduled_date} à ${scheduled_time}. Tous les aidants sont complets.`,
+            type: 'alert',
+            data: { 
+              visit_id: visit.id,
+              action: 'assign_aidant',
+              urgency: 'high',
+              target_name: finalTargetName || 'Patient',
+              scheduled_date,
+              scheduled_time,
+            },
+          });
+        }
+      }
+    }
+
     const targetDisplay = finalTargetName || (visit.patient ? `${visit.patient.first_name} ${visit.patient.last_name}` : 'Personnel');
 
     // ✅ SI PAIEMENT REQUIS
@@ -640,23 +852,6 @@ router.post('/', async (req, res) => {
         },
       });
 
-      const { data: admins } = await supabase
-        .from('profiles')
-        .select('id')
-        .in('role', ['admin', 'coordinator']);
-
-      if (admins) {
-        for (const admin of admins) {
-          await createNotification({
-            userId: admin.id,
-            title: '📅 Visite créée en brouillon',
-            body: `Visite pour ${targetDisplay} - En attente de paiement.`,
-            type: 'system',
-            data: { visit_id: visit.id, status: 'brouillon' },
-          });
-        }
-      }
-
       return res.status(201).json({
         success: true,
         visit,
@@ -666,7 +861,18 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // ✅ PAS DE PAIEMENT REQUIS
+    // ✅ SI VISITE EN ATTENTE D'AIDANT
+    if (status === 'en_attente_aidant') {
+      return res.status(201).json({
+        success: true,
+        visit,
+        requires_payment: false,
+        waiting_for_aidant: true,
+        message: 'Visite créée en attente d\'aidant. L\'administration a été notifiée.',
+      });
+    }
+
+    // ✅ PAS DE PAIEMENT REQUIS - VISITE PLANIFIÉE NORMALEMENT
     await createNotification({
       userId: finalUserId,
       title: '📅 Nouvelle visite planifiée',
@@ -685,32 +891,241 @@ router.post('/', async (req, res) => {
       });
     }
 
-    const { data: admins } = await supabase
-      .from('profiles')
-      .select('id')
-      .in('role', ['admin', 'coordinator']);
-
-    if (admins && admins.length > 0) {
-      for (const admin of admins) {
-        await createNotification({
-          userId: admin.id,
-          title: '📅 Nouvelle visite planifiée',
-          body: `Visite pour ${targetDisplay} le ${visit.scheduled_date} à ${visit.scheduled_time}`,
-          type: 'system',
-          data: { visit_id: visit.id, status: 'planifiee' },
-        });
-      }
-    }
-
     res.status(201).json({
       success: true,
       visit,
       requires_payment: false,
-      auto_assigned_aidant: !!finalAidantId && !aidant_id,
+      auto_assigned_aidant: !!finalAidantId && !aidant_id && !selected_aidant_id,
       subscription_used: !!subscriptionId,
+      waiting_for_aidant: status === 'en_attente_aidant',
+      wizard_choice: wizard_choice || null,
     });
   } catch (error) {
     console.error('❌ Create visit error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =============================================
+// ✅ ADMIN ASSIGNER UN AIDANT À UNE VISITE (NOUVEAU)
+// =============================================
+router.post('/admin/assign-aidant', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
+  try {
+    const { visitId, aidantId, assignmentType = 'permanente', reason = null, force = false } = req.body;
+
+    if (!visitId || !aidantId) {
+      return res.status(400).json({
+        success: false,
+        error: 'visitId et aidantId sont requis',
+      });
+    }
+
+    const result = await adminAssignAidantToVisit({
+      visitId,
+      aidantUserId: aidantId,
+      assignmentType,
+      adminId: req.user.id,
+      reason: reason || `Assigné par admin ${req.user.id}`,
+      force,
+    });
+
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        error: result.error,
+        code: result.code,
+        current: result.current,
+        max: result.max,
+      });
+    }
+
+    // ✅ Récupérer la visite mise à jour
+    const { data: visit, error } = await supabase
+      .from('visites')
+      .select(`
+        *,
+        patient:patients(*),
+        aidant:aidants!visites_aidant_id_fkey (
+          id,
+          user_id,
+          specialties,
+          available,
+          rating,
+          total_missions,
+          completed_missions,
+          cancelled_missions,
+          user:profiles!aidants_user_id_fkey (
+            id,
+            full_name,
+            email,
+            phone,
+            avatar_url
+          )
+        )
+      `)
+      .eq('id', visitId)
+      .single();
+
+    if (error) {
+      console.error('❌ Erreur récupération visite:', error);
+    }
+
+    res.json({
+      success: true,
+      message: result.message,
+      visit: visit || result.visit,
+      assignment_type: result.assignment_type,
+      is_permanent: result.is_permanent,
+      forced: result.forced,
+      current_assignments: result.current_assignments,
+    });
+  } catch (error) {
+    console.error('❌ Admin assign aidant error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =============================================
+// ✅ RÉCUPÉRER LES VISITES EN ATTENTE D'AIDANT (NOUVEAU)
+// =============================================
+router.get('/pending-aidant', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
+  try {
+    const visits = await getPendingAidantVisits();
+    
+    // Enrichir avec les relations
+    const visitsWithRelations = await Promise.all(visits.map(async (visit) => {
+      let patient = null;
+      if (visit.patient_id) {
+        const { data } = await supabase
+          .from('patients')
+          .select('*')
+          .eq('id', visit.patient_id)
+          .single();
+        patient = data;
+      }
+
+      let family = null;
+      if (visit.user_id) {
+        const { data } = await supabase
+          .from('profiles')
+          .select('id, full_name, email, phone')
+          .eq('id', visit.user_id)
+          .single();
+        family = data;
+      }
+
+      return {
+        ...visit,
+        patient,
+        family,
+      };
+    }));
+
+    res.json({
+      success: true,
+      data: visitsWithRelations,
+      count: visitsWithRelations.length,
+    });
+  } catch (error) {
+    console.error('❌ Get pending aidant visits error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =============================================
+// ✅ RÉCUPÉRER LES AIDANTS DISPONIBLES POUR UNE FAMILLE (NOUVEAU)
+// =============================================
+router.get('/available-aidants', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { targetType, targetId } = req.query;
+
+    // Vérifier que l'utilisateur est une famille
+    if (req.profile.role !== 'family') {
+      return res.status(403).json({
+        success: false,
+        error: 'Accès réservé aux familles',
+      });
+    }
+
+    const aidants = await getAvailableAidantsForFamily(userId, {
+      zone: req.query.zone,
+      specialty: req.query.specialty,
+      minRating: req.query.minRating ? parseFloat(req.query.minRating) : undefined,
+    });
+
+    res.json({
+      success: true,
+      data: aidants,
+      count: aidants.length,
+    });
+  } catch (error) {
+    console.error('❌ Get available aidants error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =============================================
+// ✅ RÉCUPÉRER LES OPTIONS DU WIZARD (NOUVEAU)
+// =============================================
+router.get('/wizard-options', async (req, res) => {
+  try {
+    const { targetType, targetId } = req.query;
+    const userId = req.user.id;
+
+    if (!targetType || !targetId) {
+      return res.status(400).json({
+        success: false,
+        error: 'targetType et targetId sont requis',
+      });
+    }
+
+    // Vérifier les permissions
+    const isAdmin = ['admin', 'coordinator'].includes(req.profile.role);
+    const isFamily = req.profile.role === 'family';
+
+    if (!isAdmin && !isFamily) {
+      return res.status(403).json({
+        success: false,
+        error: 'Non autorisé',
+      });
+    }
+
+    // Si famille, vérifier que la cible lui appartient
+    if (isFamily) {
+      if (targetType === 'patient') {
+        const { data: link } = await supabase
+          .from('patient_family_links')
+          .select('id')
+          .eq('family_id', userId)
+          .eq('patient_id', targetId)
+          .maybeSingle();
+
+        if (!link) {
+          return res.status(403).json({
+            success: false,
+            error: 'Ce patient ne vous appartient pas',
+          });
+        }
+      } else if (targetType === 'personal_account' || targetType === 'personal') {
+        if (targetId !== userId) {
+          return res.status(403).json({
+            success: false,
+            error: 'Ce compte ne vous appartient pas',
+          });
+        }
+      }
+    }
+
+    const familyId = isFamily ? userId : (req.body.familyId || null);
+    const options = await getVisitWizardOptions(targetType, targetId, familyId || userId);
+
+    res.json({
+      success: true,
+      data: options,
+    });
+  } catch (error) {
+    console.error('❌ Get wizard options error:', error);
     res.status(500).json({ error: error.message });
   }
 });
