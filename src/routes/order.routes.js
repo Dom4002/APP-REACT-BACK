@@ -1,5 +1,4 @@
 // 📁 backend/src/routes/order.routes.js
- 
 
 const express = require('express');
 const router = express.Router();
@@ -8,6 +7,11 @@ const authMiddleware = require('../middleware/auth.middleware');
 const roleMiddleware = require('../middleware/role.middleware');
 const { createNotification } = require('../services/notification.service');
 const { getActiveAidantForTarget } = require('../services/aidantAssignment.service');
+const {
+  getPonctualOrderPrice,
+  checkSubscriptionForOrders,
+  decrementOrder,
+} = require('../services/visitPayment.service');
 
 router.use(authMiddleware);
 
@@ -26,7 +30,7 @@ const ORDER_PONCTUAL_PRICES = {
 
 const DEFAULT_ORDER_PRICE = 2500;
 
-const getPonctualOrderPrice = (type, items) => {
+const getPonctualOrderPriceLocal = (type, items) => {
   if (items && items.length > 0) {
     const total = items.reduce((sum, item) => sum + (item.quantity * item.price), 0);
     if (total > 0) return total;
@@ -35,10 +39,9 @@ const getPonctualOrderPrice = (type, items) => {
 };
 
 // =============================================
-// ✅ RÉCUPÉRER L'AIDANT_ID DEPUIS UN USER_ID (AVEC CONVERSION)
+// RÉCUPÉRER L'AIDANT_ID
 // =============================================
 const getAidantIdFromUserIdOrId = async (userIdOrId) => {
-  // 1. Vérifier si c'est déjà un aidant_id
   const { data: aidantById, error: errorById } = await supabase
     .from('aidants')
     .select('id')
@@ -49,7 +52,6 @@ const getAidantIdFromUserIdOrId = async (userIdOrId) => {
     return aidantById.id;
   }
 
-  // 2. Vérifier si c'est un user_id
   const { data: aidantByUser, error: errorByUser } = await supabase
     .from('aidants')
     .select('id')
@@ -104,7 +106,7 @@ router.get('/', async (req, res) => {
 });
 
 // =============================================
-// ✅ CRÉER UNE COMMANDE - AVEC ASSIGNATION AUTOMATIQUE DE L'AIDANT
+// ✅ CRÉER UNE COMMANDE - LOGIQUE UNIFIÉE AVEC ABONNEMENT
 // =============================================
 router.post('/', async (req, res) => {
   try {
@@ -112,8 +114,8 @@ router.post('/', async (req, res) => {
 
     const { 
       patient_id,
-      target_type,          // 'personal' | 'patient'
-      target_name,          // Nom à afficher
+      target_type,
+      target_name,
       type,
       description,
       address,
@@ -147,33 +149,50 @@ router.post('/', async (req, res) => {
     const finalTargetName = target_name || (patient_id ? null : profile.full_name);
     const familyId = user.id;
 
-    // ✅ LOGIQUE UNIFIÉE : Déterminer le statut et paiement
+    // ✅ LOGIQUE UNIFIÉE : Vérifier l'abonnement
     let status = 'creee';
     let requiresPayment = false;
     let paymentAmount = 0;
+    let subscriptionId = null;
+
+    // ✅ Vérifier l'abonnement
+    const subscriptionCheck = await checkSubscriptionForOrders(user.id);
+    console.log('📊 Vérification abonnement pour commande:', {
+      hasActiveSubscription: subscriptionCheck.hasActiveSubscription,
+      remainingOrders: subscriptionCheck.remainingOrders,
+    });
+
+    if (subscriptionCheck.hasActiveSubscription && subscriptionCheck.remainingOrders > 0) {
+      // ✅ CAS 1 : Abonnement actif avec commandes disponibles
+      status = 'creee';
+      requiresPayment = false;
+      subscriptionId = subscriptionCheck.subscription?.id || null;
+      console.log('✅ Commande avec abonnement - décompte à la validation');
+      
+    } else if (subscriptionCheck.hasActiveSubscription && subscriptionCheck.remainingOrders === 0) {
+      // ✅ CAS 2 : Abonnement actif mais plus de commandes
+      status = 'attente_paiement';
+      requiresPayment = true;
+      paymentAmount = getPonctualOrderPriceLocal(type, items);
+      console.log('⚠️ Abonnement actif mais plus de commandes - mode ponctuel');
+      
+    } else {
+      // ✅ CAS 3 : Pas d'abonnement → Mode ponctuel
+      status = 'attente_paiement';
+      requiresPayment = true;
+      paymentAmount = getPonctualOrderPriceLocal(type, items);
+      console.log('❌ Pas d\'abonnement - mode ponctuel');
+    }
 
     // ✅ Si mode ponctuel explicitement demandé
     if (is_ponctual || order_type === 'ponctual') {
       status = 'attente_paiement';
       requiresPayment = true;
-      paymentAmount = getPonctualOrderPrice(type, items);
-    } else {
-      // ✅ Vérifier l'abonnement sur le COMPTE (pas le patient)
-      const { data: subscription } = await supabase
-        .from('abonnements')
-        .select('id, remaining_orders, status')
-        .eq('user_id', user.id)
-        .eq('status', 'actif')
-        .maybeSingle();
-
-      if (!subscription || subscription.remaining_orders <= 0) {
-        status = 'attente_paiement';
-        requiresPayment = true;
-        paymentAmount = getPonctualOrderPrice(type, items);
-      }
+      paymentAmount = getPonctualOrderPriceLocal(type, items);
+      console.log('⚡ Mode ponctuel explicitement demandé');
     }
 
-    // ✅ DÉTERMINER L'AIDANT À ASSIGNER (si pas ponctuel et pas en attente paiement)
+    // ✅ DÉTERMINER L'AIDANT À ASSIGNER (si pas de paiement requis)
     let finalAidantId = null;
 
     if (status !== 'attente_paiement') {
@@ -210,15 +229,18 @@ router.post('/', async (req, res) => {
       items: items || [],
       prescription_url: prescription_url || null,
       status: status,
-      order_type: order_type || (is_ponctual ? 'ponctual' : 'subscription'),
-      is_paid: is_paid || false,
+      order_type: order_type || (requiresPayment ? 'ponctual' : 'subscription'),
+      is_paid: !requiresPayment,
       aidant_id: finalAidantId,
+      subscription_id: subscriptionId,
       metadata: {
         requires_payment: requiresPayment,
         created_by: user.id,
         created_at: new Date().toISOString(),
         auto_assigned_aidant: !!finalAidantId,
         payment_amount: requiresPayment ? paymentAmount : null,
+        subscription_used: subscriptionId ? true : false,
+        ponctual_mode: requiresPayment ? true : false,
       }
     };
 
@@ -237,6 +259,7 @@ router.post('/', async (req, res) => {
 
     console.log('✅ Commande créée avec succès, ID:', data.id);
 
+    // ✅ Récupérer les relations
     let patient = null;
     if (data.patient_id) {
       const { data: patientData } = await supabase
@@ -263,16 +286,21 @@ router.post('/', async (req, res) => {
       family,
     };
 
-    // ✅ Notification selon le statut
+    // ✅ NOTIFICATION SELON LE STATUT
     const targetDisplay = finalTargetName || (patient ? `${patient.first_name} ${patient.last_name}` : 'Personnel');
 
-    if (status === 'attente_paiement') {
+    if (requiresPayment) {
       await createNotification({
         userId: user.id,
-        title: '💳 Commande en attente de paiement',
-        body: `Votre commande "${description}" pour ${targetDisplay} est en attente de paiement (${paymentAmount} FCFA).`,
+        title: '💳 Paiement requis pour la commande',
+        body: `Un paiement de ${paymentAmount} FCFA est requis pour valider votre commande "${description}" pour ${targetDisplay}.`,
         type: 'commande',
-        data: { order_id: data.id, status: 'attente_paiement', amount: paymentAmount },
+        data: { 
+          order_id: data.id, 
+          status: 'attente_paiement', 
+          action: 'pay',
+          amount: paymentAmount,
+        },
       });
     } else {
       // ✅ Si un aidant a été assigné automatiquement
@@ -312,13 +340,231 @@ router.post('/', async (req, res) => {
       auto_assigned_aidant: !!finalAidantId,
       requires_payment: requiresPayment,
       payment_amount: requiresPayment ? paymentAmount : null,
+      subscription_used: !!subscriptionId,
     });
+
   } catch (error) {
     console.error('❌ Create order error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
+// =============================================
+// ✅ CONFIRMER PAIEMENT COMMANDE PONCTUELLE
+// =============================================
+router.post('/:id/confirm-payment', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { transaction_id } = req.body;
+
+    const { data: order, error: orderError } = await supabase
+      .from('commandes')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (orderError) throw orderError;
+
+    // ✅ Vérifier que la commande est en attente de paiement
+    if (order.status !== 'attente_paiement') {
+      return res.status(400).json({ 
+        error: 'Cette commande n\'est pas en attente de paiement. Statut actuel: ' + order.status 
+      });
+    }
+
+    // ✅ Récupérer l'aidant actif après paiement
+    const targetType = order.patient_id ? 'patient' : 'personal_account';
+    const targetId = order.patient_id || order.user_id;
+    const familyId = order.family_id || order.user_id;
+
+    let aidantId = order.aidant_id || null;
+
+    if (aidantId) {
+      const convertedId = await getAidantIdFromUserIdOrId(aidantId);
+      if (convertedId) {
+        aidantId = convertedId;
+      } else {
+        aidantId = null;
+      }
+    }
+
+    if (!aidantId) {
+      let foundId = await getActiveAidantForTarget(targetType, targetId, familyId);
+      if (foundId) {
+        const convertedId = await getAidantIdFromUserIdOrId(foundId);
+        if (convertedId) {
+          aidantId = convertedId;
+          console.log(`✅ Aidant trouvé après paiement de la commande: ${aidantId}`);
+        }
+      }
+    }
+
+    const { data, error } = await supabase
+      .from('commandes')
+      .update({
+        status: 'creee',
+        is_paid: true,
+        aidant_id: aidantId,
+        metadata: {
+          ...(order.metadata || {}),
+          payment_confirmed_at: new Date().toISOString(),
+          transaction_id: transaction_id,
+          aidant_assigned_after_payment: !!aidantId,
+          paid_at: new Date().toISOString(),
+        }
+      })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    // ✅ Notification
+    const targetDisplay = order.target_name || 'un client';
+
+    if (aidantId) {
+      await createNotification({
+        userId: aidantId,
+        title: '🛒 Nouvelle commande à prendre',
+        body: `Commande de ${targetDisplay} - ${order.description}`,
+        type: 'commande',
+        data: { order_id: id, action: 'take', assigned_after_payment: true },
+      });
+    } else {
+      const { data: aidants } = await supabase
+        .from('aidants')
+        .select('user_id')
+        .eq('available', true)
+        .eq('is_verified', true);
+
+      if (aidants && aidants.length > 0) {
+        for (const aidant of aidants) {
+          await createNotification({
+            userId: aidant.user_id,
+            title: '🛒 Nouvelle commande disponible',
+            body: `Commande de ${targetDisplay} - ${order.description}`,
+            type: 'commande',
+            data: { order_id: id, action: 'take' },
+          });
+        }
+      }
+    }
+
+    if (order.family_id) {
+      await createNotification({
+        userId: order.family_id,
+        title: '✅ Paiement confirmé',
+        body: `Votre paiement pour la commande "${order.description}" a été confirmé.`,
+        type: 'commande',
+        data: { order_id: id, status: 'creee' },
+      });
+    }
+
+    res.json({ success: true, order: data });
+  } catch (error) {
+    console.error('❌ Confirm payment error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =============================================
+// ✅ VALIDER UNE COMMANDE (avec décompte)
+// =============================================
+router.post('/:id/validate', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { comment } = req.body;
+    const now = new Date().toISOString();
+
+    const { data: existingOrder, error: checkError } = await supabase
+      .from('commandes')
+      .select('status, family_id, user_id, patient_id, order_type, is_paid, metadata, subscription_id')
+      .eq('id', id)
+      .single();
+
+    if (checkError) {
+      return res.status(404).json({ error: 'Commande non trouvée' });
+    }
+
+    if (existingOrder.status !== 'livree') {
+      return res.status(400).json({ 
+        error: 'Seules les commandes livrées peuvent être validées' 
+      });
+    }
+
+    const { data, error } = await supabase
+      .from('commandes')
+      .update({ 
+        status: 'validee',
+        updated_at: now,
+        metadata: {
+          ...(existingOrder.metadata || {}),
+          validated_by: req.user.id,
+          validated_at: now,
+          validation_comment: comment || null,
+        }
+      })
+      .eq('id', id)
+      .select('*')
+      .single();
+
+    if (error) throw error;
+
+    // ✅ DÉCOMPTER UNIQUEMENT SI CE N'EST PAS PONCTUEL PAYÉ
+    const isPonctual = existingOrder.order_type === 'ponctual' || existingOrder.metadata?.ponctual_mode === true;
+    const wasPaid = existingOrder.is_paid === true;
+
+    // ✅ Si commande ponctuelle payée, NE PAS DÉCOMPTER
+    if (!isPonctual || !wasPaid) {
+      // ✅ Si abonnement associé, décompter
+      if (existingOrder.subscription_id) {
+        const result = await decrementOrder(existingOrder.subscription_id);
+        if (result.success) {
+          console.log(`✅ Commande ${id} décomptée de l'abonnement ${existingOrder.subscription_id}`);
+        } else {
+          console.warn(`⚠️ Échec décompte commande ${id}:`, result.error);
+        }
+      } else {
+        // ✅ Rechercher un abonnement actif
+        const { data: subscription, error: subError } = await supabase
+          .from('abonnements')
+          .select('id, remaining_orders, used_orders, total_orders, user_id')
+          .eq('user_id', existingOrder.user_id)
+          .eq('status', 'actif')
+          .maybeSingle();
+
+        if (subscription && !subError && subscription.remaining_orders > 0) {
+          const result = await decrementOrder(subscription.id);
+          if (result.success) {
+            console.log(`✅ Commande ${id} décomptée de l'abonnement ${subscription.id}`);
+          }
+        }
+      }
+    } else {
+      console.log(`ℹ️ Commande ponctuelle payée - Pas de décompte d'abonnement pour la commande ${id}`);
+    }
+
+    // ✅ Notification à la famille
+    const targetDisplay = data.target_name || 'un client';
+
+    if (data.family_id) {
+      await createNotification({
+        userId: data.family_id,
+        title: '✅ Commande validée',
+        body: `La commande pour ${targetDisplay} a été validée.`,
+        type: 'commande',
+        data: { order_id: id, status: 'validee' },
+      });
+    }
+
+    res.json({ success: true, order: data });
+  } catch (error) {
+    console.error('❌ Validate order error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+ 
 // =============================================
 // ✅ PRENDRE UNE COMMANDE (par un aidant)
 // =============================================
@@ -417,150 +663,6 @@ router.post('/:id/take', async (req, res) => {
   }
 });
 
-// =============================================
-// ✅ CONFIRMER PAIEMENT COMMANDE PONCTUELLE
-// =============================================
-router.post('/:id/confirm-payment', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { transaction_id } = req.body;
-
-    const { data: order, error: orderError } = await supabase
-      .from('commandes')
-      .select('*')
-      .eq('id', id)
-      .single();
-
-    if (orderError) throw orderError;
-
-    // ✅ Vérifier que la commande est en attente de paiement
-    if (order.status !== 'attente_paiement') {
-      return res.status(400).json({ 
-        error: 'Cette commande n\'est pas en attente de paiement. Statut actuel: ' + order.status 
-      });
-    }
-
-    // ✅ Récupérer l'aidant actif après paiement
-    const targetType = order.patient_id ? 'patient' : 'personal_account';
-    const targetId = order.patient_id || order.user_id;
-    const familyId = order.family_id || order.user_id;
-
-    let aidantId = order.aidant_id || null;
-
-    // Si un aidant est déjà assigné, vérifier que c'est un aidant_id valide
-    if (aidantId) {
-      const convertedId = await getAidantIdFromUserIdOrId(aidantId);
-      if (convertedId) {
-        aidantId = convertedId;
-      } else {
-        aidantId = null;
-      }
-    }
-
-    // Si pas d'aidant, chercher automatiquement
-    if (!aidantId) {
-      let foundId = await getActiveAidantForTarget(targetType, targetId, familyId);
-      if (foundId) {
-        const convertedId = await getAidantIdFromUserIdOrId(foundId);
-        if (convertedId) {
-          aidantId = convertedId;
-          console.log(`✅ Aidant trouvé après paiement de la commande: ${aidantId}`);
-        }
-      }
-    }
-
-    const { data, error } = await supabase
-      .from('commandes')
-      .update({
-        status: 'creee',
-        is_paid: true,
-        aidant_id: aidantId,
-        metadata: {
-          ...(order.metadata || {}),
-          payment_confirmed_at: new Date().toISOString(),
-          transaction_id: transaction_id,
-          aidant_assigned_after_payment: !!aidantId,
-        }
-      })
-      .eq('id', id)
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    // ✅ Mettre à jour current_assignments si aidant trouvé
-    if (aidantId) {
-      const { data: aidant, error: aidantError } = await supabase
-        .from('aidants')
-        .select('max_assignments, current_assignments')
-        .eq('id', aidantId)
-        .single();
-
-      if (!aidantError && aidant) {
-        const maxAssignments = aidant.max_assignments || 4;
-        const currentAssignments = aidant.current_assignments || 0;
-        if (currentAssignments < maxAssignments) {
-          await supabase
-            .from('aidants')
-            .update({
-              current_assignments: currentAssignments + 1,
-              available: (currentAssignments + 1) < maxAssignments,
-              updated_at: new Date().toISOString(),
-            })
-            .eq('id', aidantId);
-        }
-      }
-    }
-
-    // ✅ Si un aidant a été trouvé, le notifier directement
-    const targetDisplay = order.target_name || 'un client';
-
-    if (aidantId) {
-      await createNotification({
-        userId: aidantId,
-        title: '🛒 Nouvelle commande à prendre',
-        body: `Commande de ${targetDisplay} - ${order.description}`,
-        type: 'commande',
-        data: { order_id: id, action: 'take', assigned_after_payment: true },
-      });
-    } else {
-      // ✅ Notifier tous les aidants disponibles
-      const { data: aidants } = await supabase
-        .from('aidants')
-        .select('user_id')
-        .eq('available', true)
-        .eq('is_verified', true);
-
-      if (aidants && aidants.length > 0) {
-        for (const aidant of aidants) {
-          await createNotification({
-            userId: aidant.user_id,
-            title: '🛒 Nouvelle commande disponible',
-            body: `Commande de ${targetDisplay} - ${order.description}`,
-            type: 'commande',
-            data: { order_id: id, action: 'take' },
-          });
-        }
-      }
-    }
-
-    // ✅ Notification à la famille
-    if (order.family_id) {
-      await createNotification({
-        userId: order.family_id,
-        title: '✅ Paiement confirmé',
-        body: `Votre paiement pour la commande "${order.description}" a été confirmé.`,
-        type: 'commande',
-        data: { order_id: id, status: 'creee' },
-      });
-    }
-
-    res.json({ success: true, order: data });
-  } catch (error) {
-    console.error('❌ Confirm payment error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
 
 // =============================================
 // ✅ METTRE À JOUR LE STATUT D'UNE COMMANDE
@@ -705,105 +807,6 @@ router.post('/:id/deliver', async (req, res) => {
   }
 });
 
-// =============================================
-// ✅ VALIDER UNE COMMANDE (avec décompte)
-// =============================================
-router.post('/:id/validate', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { comment } = req.body;
-
-    const { data: existingOrder, error: checkError } = await supabase
-      .from('commandes')
-      .select('status, family_id, user_id, patient_id, order_type, is_paid, metadata')
-      .eq('id', id)
-      .single();
-
-    if (checkError) {
-      return res.status(404).json({ error: 'Commande non trouvée' });
-    }
-
-    if (existingOrder.status !== 'livree') {
-      return res.status(400).json({ 
-        error: 'Seules les commandes livrées peuvent être validées' 
-      });
-    }
-
-    const { data, error } = await supabase
-      .from('commandes')
-      .update({ 
-        status: 'validee',
-        updated_at: new Date().toISOString(),
-        metadata: {
-          ...(existingOrder.metadata || {}),
-          validated_by: req.user.id,
-          validated_at: new Date().toISOString(),
-          validation_comment: comment || null,
-        }
-      })
-      .eq('id', id)
-      .select('*')
-      .single();
-
-    if (error) throw error;
-
-    // ✅ Vérifier si la commande est ponctuelle payée → NE PAS DÉCOMPTER
-    const isPonctual = existingOrder.order_type === 'ponctual' || existingOrder.metadata?.is_ponctual === true;
-    const wasPaid = existingOrder.is_paid === true;
-
-    // ✅ Si commande ponctuelle payée, NE PAS DÉCOMPTER
-    if (!isPonctual || !wasPaid) {
-      const { data: subscription, error: subError } = await supabase
-        .from('abonnements')
-        .select('id, remaining_orders, used_orders, total_orders, user_id')
-        .eq('user_id', existingOrder.user_id)
-        .eq('status', 'actif')
-        .maybeSingle();
-
-      if (subscription && !subError && subscription.remaining_orders > 0) {
-        await supabase
-          .from('abonnements')
-          .update({
-            used_orders: subscription.used_orders + 1,
-            remaining_orders: subscription.remaining_orders - 1,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', subscription.id);
-
-        // ✅ Notification si plus de commandes
-        if (subscription.remaining_orders - 1 === 0) {
-          await createNotification({
-            userId: subscription.user_id,
-            title: '⚠️ Plus de commandes disponibles',
-            body: 'Votre abonnement a atteint le nombre maximum de commandes.',
-            type: 'system',
-            data: { subscription_id: subscription.id },
-          });
-        }
-      }
-    } else {
-      console.log(`ℹ️ Commande ponctuelle payée - Pas de décompte d'abonnement pour la commande ${id}`);
-    }
-
-    // ✅ Notification à la famille
-    const targetDisplay = data.target_name || 'un client';
-
-    if (data.family_id) {
-      await createNotification({
-        userId: data.family_id,
-        title: '✅ Commande validée',
-        body: `La commande pour ${targetDisplay} a été validée.`,
-        type: 'commande',
-        data: { order_id: id, status: 'validee' },
-      });
-    }
-
-    res.json({ success: true, order: data });
-  } catch (error) {
-    console.error('❌ Validate order error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
 
 // =============================================
 // ✅ ANNULER UNE COMMANDE
