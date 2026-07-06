@@ -14,7 +14,14 @@ const {
   checkAssignment,
 } = require('../controllers/aidantAssignment.controller');
 const { supabase } = require('../services/supabase.service');
-const { mapTargetTypeForResponse, assignAidantToTarget } = require('../services/aidantAssignment.service');
+const { 
+  mapTargetTypeForResponse, 
+  assignAidantToTarget,
+  getAvailableAidantsForFamily,
+  adminAssignAidantToVisit,
+  getPendingAidantVisits,
+} = require('../services/aidantAssignment.service');
+const { createNotification } = require('../services/notification.service');
 
 // Toutes les routes nécessitent une authentification
 router.use(authMiddleware);
@@ -628,7 +635,7 @@ router.post(
 
       res.status(201).json({
         success: true,
-        message: `Assignation ${force ? 'forcée ' : ''}rÉussie`,
+        message: `Assignation ${force ? 'forcée ' : ''}réussie`,
         data: result,
         forced: force || false,
       });
@@ -642,6 +649,272 @@ router.post(
   }
 );
 
+// ============================================================
+// 🆕 NOUVELLES ROUTES
+// ============================================================
+
+// ============================================================
+// ✅ ROUTE : ADMIN ASSIGNER UN AIDANT À UNE VISITE
+// ============================================================
+router.post(
+  '/admin/assign-to-visit',
+  roleMiddleware(['admin', 'coordinator']),
+  async (req, res) => {
+    try {
+      const { visitId, aidantId, assignmentType = 'permanente', reason = null, force = false } = req.body;
+
+      if (!visitId || !aidantId) {
+        return res.status(400).json({
+          success: false,
+          error: 'visitId et aidantId sont requis',
+        });
+      }
+
+      const result = await adminAssignAidantToVisit({
+        visitId,
+        aidantUserId: aidantId,
+        assignmentType,
+        adminId: req.user.id,
+        reason: reason || `Assigné par admin ${req.user.id}`,
+        force,
+      });
+
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          error: result.error,
+          code: result.code,
+          current: result.current,
+          max: result.max,
+        });
+      }
+
+      // ✅ Récupérer la visite mise à jour
+      const { data: visit, error } = await supabase
+        .from('visites')
+        .select(`
+          *,
+          patient:patients(*),
+          aidant:aidants!visites_aidant_id_fkey (
+            id,
+            user_id,
+            specialties,
+            available,
+            rating,
+            total_missions,
+            completed_missions,
+            cancelled_missions,
+            user:profiles!aidants_user_id_fkey (
+              id,
+              full_name,
+              email,
+              phone,
+              avatar_url
+            )
+          )
+        `)
+        .eq('id', visitId)
+        .single();
+
+      if (error) {
+        console.error('❌ Erreur récupération visite:', error);
+      }
+
+      res.json({
+        success: true,
+        message: result.message,
+        visit: visit || result.visit,
+        assignment_type: result.assignment_type,
+        is_permanent: result.is_permanent,
+        forced: result.forced,
+        current_assignments: result.current_assignments,
+      });
+    } catch (error) {
+      console.error('❌ Admin assign aidant to visit error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+// ============================================================
+// ✅ ROUTE : RÉCUPÉRER LES VISITES EN ATTENTE D'AIDANT
+// ============================================================
+router.get(
+  '/admin/pending-aidant',
+  roleMiddleware(['admin', 'coordinator']),
+  async (req, res) => {
+    try {
+      const visits = await getPendingAidantVisits();
+
+      // Enrichir avec les relations
+      const visitsWithRelations = await Promise.all(visits.map(async (visit) => {
+        let patient = null;
+        if (visit.patient_id) {
+          const { data } = await supabase
+            .from('patients')
+            .select('*')
+            .eq('id', visit.patient_id)
+            .single();
+          patient = data;
+        }
+
+        let family = null;
+        if (visit.user_id) {
+          const { data } = await supabase
+            .from('profiles')
+            .select('id, full_name, email, phone')
+            .eq('id', visit.user_id)
+            .single();
+          family = data;
+        }
+
+        return {
+          ...visit,
+          patient,
+          family,
+        };
+      }));
+
+      res.json({
+        success: true,
+        data: visitsWithRelations,
+        count: visitsWithRelations.length,
+      });
+    } catch (error) {
+      console.error('❌ Get pending aidant visits error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+// ============================================================
+// ✅ ROUTE : RÉCUPÉRER LES AIDANTS DISPONIBLES POUR UNE FAMILLE
+// ============================================================
+router.get(
+  '/available-for-family',
+  authMiddleware,
+  async (req, res) => {
+    try {
+      const userId = req.user.id;
+      const userRole = req.profile?.role;
+
+      // ✅ Seules les familles peuvent voir les aidants disponibles
+      if (userRole !== 'family') {
+        return res.status(403).json({
+          success: false,
+          error: 'Accès réservé aux familles',
+        });
+      }
+
+      const { zone, specialty, minRating } = req.query;
+
+      const aidants = await getAvailableAidantsForFamily(userId, {
+        zone,
+        specialty,
+        minRating: minRating ? parseFloat(minRating) : undefined,
+      });
+
+      res.json({
+        success: true,
+        data: aidants,
+        count: aidants.length,
+      });
+    } catch (error) {
+      console.error('❌ Get available aidants for family error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+// ============================================================
+// ✅ ROUTE : RÉCUPÉRER TOUTES LES ASSIGNATIONS (AVEC STATUT)
+// ============================================================
+router.get(
+  '/admin/all-with-status',
+  roleMiddleware(['admin', 'coordinator']),
+  async (req, res) => {
+    try {
+      const { status, targetType, targetId, aidantUserId } = req.query;
+
+      let query = supabase
+        .from('aidant_assignments_view')
+        .select('*');
+
+      if (status) {
+        query = query.eq('status', status);
+      }
+      if (targetType) {
+        query = query.eq('target_type', targetType);
+      }
+      if (targetId) {
+        query = query.eq('target_id', targetId);
+      }
+      if (aidantUserId) {
+        query = query.eq('aidant_user_id', aidantUserId);
+      }
+
+      const { data, error } = await query.order('created_at', { ascending: false });
+
+      if (error) {
+        console.error('❌ Get all assignments with status error:', error);
+        return res.status(500).json({
+          success: false,
+          error: error.message,
+        });
+      }
+
+      // ✅ Formater les données
+      const formattedAssignments = (data || []).map((item) => ({
+        id: item.id,
+        aidant_user_id: item.aidant_user_id,
+        target_type: mapTargetTypeForResponse(item.target_type),
+        target_id: item.target_id,
+        assignment_type: item.assignment_type,
+        status: item.status,
+        priority: item.priority,
+        expires_at: item.expires_at,
+        created_at: item.created_at,
+        updated_at: item.updated_at,
+        created_by: item.created_by,
+        reason: item.reason,
+        aidant: item.aidant_id ? {
+          id: item.aidant_id,
+          full_name: item.aidant_name,
+          email: item.aidant_email,
+          phone: item.aidant_phone,
+          avatar_url: item.aidant_avatar,
+        } : null,
+        target_patient: item.target_type === 'patient' && item.patient_id ? {
+          id: item.patient_id,
+          first_name: item.patient_first_name,
+          last_name: item.patient_last_name,
+          address: item.patient_address,
+          category: item.patient_category,
+          status: item.patient_status,
+        } : null,
+        target_profile: item.target_type !== 'patient' && item.profile_id ? {
+          id: item.profile_id,
+          full_name: item.profile_name,
+          email: item.profile_email,
+          phone: item.profile_phone,
+          role: item.profile_role,
+        } : null,
+      }));
+
+      res.json({
+        success: true,
+        data: formattedAssignments || [],
+        count: formattedAssignments?.length || 0,
+      });
+    } catch (error) {
+      console.error('❌ Get all assignments with status error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Erreur lors de la récupération des assignations',
+      });
+    }
+  }
+);
 
 // ============================================================
 // ✅ ROUTE POUR LES FAMILLES
@@ -733,4 +1006,70 @@ router.get(
     }
   }
 );
+
+// ============================================================
+// ✅ ROUTE : ADMIN RÉVOQUER UNE ASSIGNATION AVEC NOTIFICATION
+// ============================================================
+router.delete(
+  '/admin/:id/revoke',
+  roleMiddleware(['admin', 'coordinator']),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { reason } = req.body;
+
+      // Récupérer l'assignation avant suppression
+      const { data: assignment, error: fetchError } = await supabase
+        .from('aidant_assignments')
+        .select('*, aidant:profiles!aidant_user_id(full_name, email)')
+        .eq('id', id)
+        .single();
+
+      if (fetchError) {
+        return res.status(404).json({
+          success: false,
+          error: 'Assignation non trouvée',
+        });
+      }
+
+      const result = await revokeAssignment(id, req.user.id, reason || `Révoqué par admin (${req.user.id})`);
+
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          error: result.error,
+          code: result.code,
+        });
+      }
+
+      // ✅ Notification à l'aidant
+      if (assignment.aidant_user_id) {
+        await createNotification({
+          userId: assignment.aidant_user_id,
+          title: '🔄 Assignation révoquée par l\'administration',
+          body: `Votre assignation a été révoquée${reason ? ` : ${reason}` : ''}`,
+          type: 'system',
+          data: {
+            assignment_id: id,
+            revoked_by: req.user.id,
+            reason: reason || 'Non spécifié',
+          },
+        });
+      }
+
+      res.json({
+        success: true,
+        message: 'Assignation révoquée avec succès',
+        data: result,
+      });
+    } catch (error) {
+      console.error('❌ Admin revoke assignment error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message || 'Erreur lors de la révocation',
+      });
+    }
+  }
+);
+
 module.exports = router;
