@@ -1,0 +1,464 @@
+// 📁 backend/src/controllers/visit.controller.js
+
+const { supabase } = require('../services/supabase.service');
+const { 
+  createVisit,
+  assignAidantToVisit,
+  getPendingAidantVisits,
+  validateVisitWithoutAidant,
+  VISIT_STATUS,
+} = require('../services/visit.service');
+const { 
+  getVisitWizardOptions,
+  checkAidantForVisit,
+} = require('../services/visitPayment.service');
+const { createNotification } = require('../services/notification.service');
+const { asyncWrapper } = require('../utils/errorHandler');
+
+// ============================================================
+// CRÉER UNE VISITE (AVEC WIZARD)
+// ============================================================
+const createVisitController = asyncWrapper(async (req, res) => {
+  try {
+    const { user, profile } = req;
+    const {
+      patient_id,
+      target_user_id,
+      target_type,
+      target_name,
+      scheduled_date,
+      scheduled_time,
+      duration_minutes,
+      notes,
+      is_urgent,
+      is_ponctual = false,
+      assignment_type = 'ponctuelle',
+      aidant_id = null,
+      wizard_choice = null,
+      selected_aidant_id = null,
+    } = req.body;
+
+    const canCreate = ['admin', 'coordinator'].includes(profile.role) || profile.role === 'family';
+    if (!canCreate) {
+      return res.status(403).json({
+        success: false,
+        error: 'Non autorisé à créer une visite',
+      });
+    }
+
+    // ✅ Déterminer la cible
+    let finalPatientId = patient_id || null;
+    let finalTargetType = target_type || (patient_id ? 'patient' : 'personal');
+    let finalTargetName = target_name || null;
+    let finalUserId = target_user_id || user.id;
+    let coordinatorId = ['admin', 'coordinator'].includes(profile.role) ? user.id : null;
+
+    // ✅ Si famille, vérifier les permissions
+    if (profile.role === 'family' && patient_id) {
+      const { data: link } = await supabase
+        .from('patient_family_links')
+        .select('patient_id')
+        .eq('family_id', user.id)
+        .eq('patient_id', patient_id)
+        .maybeSingle();
+
+      if (!link) {
+        return res.status(403).json({
+          success: false,
+          error: 'Vous n\'êtes pas lié à ce patient',
+        });
+      }
+    }
+
+    // ✅ Créer la visite via le service
+    const result = await createVisit({
+      userId: user.id,
+      patientId: finalPatientId,
+      targetType: finalTargetType,
+      targetName: finalTargetName,
+      targetUserId: finalUserId,
+      scheduledDate: scheduled_date,
+      scheduledTime: scheduled_time,
+      durationMinutes: duration_minutes || 60,
+      notes: notes || null,
+      isUrgent: is_urgent || false,
+      isPonctual: is_ponctual || false,
+      assignmentType: assignment_type || 'ponctuelle',
+      aidantId: aidant_id || null,
+      wizardChoice: wizard_choice || null,
+      selectedAidantId: selected_aidant_id || null,
+      profile: profile,
+      coordinatorId: coordinatorId,
+    });
+
+    if (!result.success) {
+      // ✅ Si c'est une erreur de wizard, retourner les options
+      if (result.code === 'WIZARD_REQUIRED' || result.code === 'ALL_AIDANTS_FULL') {
+        return res.status(400).json({
+          success: false,
+          error: result.error,
+          code: result.code,
+          wizard: result.wizard,
+        });
+      }
+      return res.status(400).json({
+        success: false,
+        error: result.error,
+        code: result.code,
+      });
+    }
+
+    res.status(201).json({
+      success: true,
+      visit: result.visit,
+      requires_payment: result.requires_payment,
+      payment_amount: result.payment_amount,
+      subscription_used: result.subscription_used,
+      waiting_for_aidant: result.waiting_for_aidant,
+      message: result.waiting_for_aidant 
+        ? 'Visite créée en attente d\'aidant. L\'administration a été notifiée.'
+        : result.requires_payment
+          ? 'Visite créée en brouillon. Paiement requis pour la planifier.'
+          : 'Visite planifiée avec succès',
+    });
+  } catch (error) {
+    console.error('❌ createVisitController error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erreur lors de la création de la visite',
+    });
+  }
+});
+
+// ============================================================
+// RÉCUPÉRER LES OPTIONS DU WIZARD
+// ============================================================
+const getWizardOptions = asyncWrapper(async (req, res) => {
+  try {
+    const { targetType, targetId, familyId } = req.query;
+    const userId = req.user.id;
+    const userRole = req.profile?.role;
+
+    if (!targetType || !targetId) {
+      return res.status(400).json({
+        success: false,
+        error: 'targetType et targetId sont requis',
+      });
+    }
+
+    // ✅ Vérifier les permissions
+    const isAdmin = ['admin', 'coordinator'].includes(userRole);
+    const isFamily = userRole === 'family';
+
+    if (!isAdmin && !isFamily) {
+      return res.status(403).json({
+        success: false,
+        error: 'Non autorisé',
+      });
+    }
+
+    // ✅ Si famille, vérifier que la cible lui appartient
+    if (isFamily) {
+      if (targetType === 'patient') {
+        const { data: link } = await supabase
+          .from('patient_family_links')
+          .select('id')
+          .eq('family_id', userId)
+          .eq('patient_id', targetId)
+          .maybeSingle();
+
+        if (!link) {
+          return res.status(403).json({
+            success: false,
+            error: 'Ce patient ne vous appartient pas',
+          });
+        }
+      } else if (targetType === 'personal_account' || targetType === 'personal') {
+        if (targetId !== userId) {
+          return res.status(403).json({
+            success: false,
+            error: 'Ce compte ne vous appartient pas',
+          });
+        }
+      }
+    }
+
+    const finalFamilyId = isFamily ? userId : (familyId || userId);
+    const options = await getVisitWizardOptions(targetType, targetId, finalFamilyId, userRole);
+
+    res.json({
+      success: true,
+      data: options,
+    });
+  } catch (error) {
+    console.error('❌ getWizardOptions error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erreur lors de la récupération des options',
+    });
+  }
+});
+
+// ============================================================
+// ADMIN : ASSIGNER UN AIDANT À UNE VISITE
+// ============================================================
+const adminAssignAidant = asyncWrapper(async (req, res) => {
+  try {
+    const { visitId, aidantId, assignmentType = 'permanente', reason = null, force = false } = req.body;
+
+    if (!visitId || !aidantId) {
+      return res.status(400).json({
+        success: false,
+        error: 'visitId et aidantId sont requis',
+      });
+    }
+
+    const result = await assignAidantToVisit({
+      visitId,
+      aidantUserId: aidantId,
+      assignmentType,
+      adminId: req.user.id,
+      reason: reason || `Assigné par admin ${req.user.id}`,
+      force,
+    });
+
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        error: result.error,
+        code: result.code,
+        current: result.current,
+        max: result.max,
+      });
+    }
+
+    res.json({
+      success: true,
+      message: result.message || 'Aidant assigné avec succès',
+      visit: result.visit,
+      assignment_type: result.assignment_type,
+      is_permanent: result.is_permanent,
+      forced: result.forced || false,
+    });
+  } catch (error) {
+    console.error('❌ adminAssignAidant error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erreur lors de l\'assignation',
+    });
+  }
+});
+
+// ============================================================
+// RÉCUPÉRER LES VISITES EN ATTENTE D'AIDANT (ADMIN)
+// ============================================================
+const getPendingAidantVisitsController = asyncWrapper(async (req, res) => {
+  try {
+    const visits = await getPendingAidantVisits();
+
+    // Enrichir avec les relations
+    const visitsWithRelations = await Promise.all(visits.map(async (visit) => {
+      let patient = null;
+      if (visit.patient_id) {
+        const { data } = await supabase
+          .from('patients')
+          .select('*')
+          .eq('id', visit.patient_id)
+          .single();
+        patient = data;
+      }
+
+      let family = null;
+      if (visit.user_id) {
+        const { data } = await supabase
+          .from('profiles')
+          .select('id, full_name, email, phone')
+          .eq('id', visit.user_id)
+          .single();
+        family = data;
+      }
+
+      return {
+        ...visit,
+        patient,
+        family,
+      };
+    }));
+
+    res.json({
+      success: true,
+      data: visitsWithRelations,
+      count: visitsWithRelations.length,
+    });
+  } catch (error) {
+    console.error('❌ getPendingAidantVisitsController error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erreur lors de la récupération des visites',
+    });
+  }
+});
+
+// ============================================================
+// RÉCUPÉRER LES AIDANTS DISPONIBLES POUR UNE FAMILLE
+// ============================================================
+const getAvailableAidants = asyncWrapper(async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { targetType, targetId, zone, specialty, minRating } = req.query;
+
+    // Vérifier que l'utilisateur est une famille
+    if (req.profile?.role !== 'family') {
+      return res.status(403).json({
+        success: false,
+        error: 'Accès réservé aux familles',
+      });
+    }
+
+    // Vérifier que la cible appartient à la famille
+    if (targetType === 'patient' && targetId) {
+      const { data: link } = await supabase
+        .from('patient_family_links')
+        .select('id')
+        .eq('family_id', userId)
+        .eq('patient_id', targetId)
+        .maybeSingle();
+
+      if (!link) {
+        return res.status(403).json({
+          success: false,
+          error: 'Ce patient ne vous appartient pas',
+        });
+      }
+    }
+
+    const { getAvailableAidantsForFamilyCatalog } = require('../services/aidantCatalog.service');
+    
+    const aidants = await getAvailableAidantsForFamilyCatalog(userId, {
+      zone,
+      specialty,
+      minRating: minRating ? parseFloat(minRating) : undefined,
+    });
+
+    res.json({
+      success: true,
+      data: aidants,
+      count: aidants.length,
+    });
+  } catch (error) {
+    console.error('❌ getAvailableAidants error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erreur lors de la récupération des aidants',
+    });
+  }
+});
+
+// ============================================================
+// VALIDER UNE VISITE EN ATTENTE D'AIDANT
+// ============================================================
+const validatePendingAidantVisit = asyncWrapper(async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { aidantId, assignmentType = 'permanente' } = req.body;
+
+    // Vérifier que la visite existe
+    const { data: visit, error: visitError } = await supabase
+      .from('visites')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (visitError || !visit) {
+      return res.status(404).json({
+        success: false,
+        error: 'Visite non trouvée',
+      });
+    }
+
+    if (visit.status !== VISIT_STATUS.WAITING_AIDANT) {
+      return res.status(400).json({
+        success: false,
+        error: `La visite n'est pas en attente d'aidant. Statut: ${visit.status}`,
+      });
+    }
+
+    const result = await validateVisitWithoutAidant({
+      visitId: id,
+      adminId: req.user.id,
+      aidantId: aidantId || null,
+      assignmentType,
+    });
+
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        error: result.error,
+        code: result.code,
+      });
+    }
+
+    res.json({
+      success: true,
+      message: result.assigned 
+        ? 'Aidant assigné avec succès'
+        : 'Visite validée sans aidant',
+      visit: result.visit,
+      assigned: result.assigned,
+    });
+  } catch (error) {
+    console.error('❌ validatePendingAidantVisit error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erreur lors de la validation',
+    });
+  }
+});
+
+// ============================================================
+// VÉRIFIER SI UN AIDANT EST DISPONIBLE POUR UNE VISITE
+// ============================================================
+const checkAidantAvailability = asyncWrapper(async (req, res) => {
+  try {
+    const { targetType, targetId, familyId } = req.query;
+    const userId = req.user.id;
+
+    if (!targetType || !targetId) {
+      return res.status(400).json({
+        success: false,
+        error: 'targetType et targetId sont requis',
+      });
+    }
+
+    const result = await checkAidantForVisit(
+      targetType,
+      targetId,
+      familyId || userId
+    );
+
+    res.json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    console.error('❌ checkAidantAvailability error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erreur lors de la vérification',
+    });
+  }
+});
+
+// ============================================================
+// EXPORTS
+// ============================================================
+
+module.exports = {
+  createVisitController,
+  getWizardOptions,
+  adminAssignAidant,
+  getPendingAidantVisitsController,
+  getAvailableAidants,
+  validatePendingAidantVisit,
+  checkAidantAvailability,
+};
