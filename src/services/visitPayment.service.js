@@ -1,6 +1,5 @@
 // 📁 backend/src/services/visitPayment.service.js
  
-
 const { supabase } = require('./supabase.service');
 const { createNotification } = require('./notification.service');
 
@@ -40,9 +39,9 @@ const VISIT_PONCTUAL_PRICES = {
 const DEFAULT_VISIT_PRICE = 7500;
 const DRAFT_EXPIRY_HOURS = 24;
 
-// ============================================================
-// FONCTIONS DE PRIX
-// ============================================================
+// ✅ EXPORTER LES CONSTANTES
+module.exports.VISIT_PONCTUAL_PRICES = VISIT_PONCTUAL_PRICES;
+module.exports.DEFAULT_VISIT_PRICE = DEFAULT_VISIT_PRICE;
 
 /**
  * Calcule le prix d'une visite ponctuelle en fonction de sa durée
@@ -55,6 +54,9 @@ const getVisitPrice = (durationMinutes = 60) => {
   return Math.round((durationMinutes / 60) * DEFAULT_VISIT_PRICE);
 };
 
+module.exports.getVisitPrice = getVisitPrice;
+
+ 
 /**
  * Vérifie si un paiement est requis pour une visite
  * @param {string} userId - ID de l'utilisateur
