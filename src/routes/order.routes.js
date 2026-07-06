@@ -564,7 +564,6 @@ router.post('/:id/validate', roleMiddleware(['admin', 'coordinator']), async (re
   }
 });
 
- 
 // =============================================
 // ✅ PRENDRE UNE COMMANDE (par un aidant)
 // =============================================
@@ -662,7 +661,6 @@ router.post('/:id/take', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
 
 // =============================================
 // ✅ METTRE À JOUR LE STATUT D'UNE COMMANDE
@@ -806,7 +804,6 @@ router.post('/:id/deliver', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
 
 // =============================================
 // ✅ ANNULER UNE COMMANDE
