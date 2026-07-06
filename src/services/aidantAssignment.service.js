@@ -988,4 +988,353 @@ const createAidantAssignmentNotifications = async ({
     // 1. Notification à l'aidant
     const aidantMessage = isPermanent
       ? `Vous avez été assigné en tant qu'aidant permanent pour ${targetName}${force ? ' (forcé)' : ''}`
-      : `Vous avez été assigné pour la visite de ${targetName}${force
+      : `Vous avez été assigné pour la visite de ${targetName}${force ? ' (forcé)' : ''}`;
+
+    await supabase.from('notifications').insert({
+      user_id: aidantUserId,
+      title: '📅 Nouvelle visite assignée',
+      body: aidantMessage,
+      type: 'visite',
+      data: {
+        visit_id: visitId,
+        assignment_type: assignmentType,
+        is_permanent: isPermanent,
+        forced: force || false,
+        action: 'approve',
+      },
+    });
+
+    // 2. Notification à la famille
+    const { data: visit } = await supabase
+      .from('visites')
+      .select('user_id, patient_id')
+      .eq('id', visitId)
+      .single();
+
+    if (visit) {
+      await supabase.from('notifications').insert({
+        user_id: visit.user_id,
+        title: '✅ Un aidant a été assigné à votre visite',
+        body: `Un aidant a été assigné pour la visite de ${targetName}`,
+        type: 'visite',
+        data: {
+          visit_id: visitId,
+          assignment_type: assignmentType,
+          is_permanent: isPermanent,
+        },
+      });
+    }
+
+    // 3. Notification aux admins si force
+    if (force) {
+      const { data: admins } = await supabase
+        .from('profiles')
+        .select('id')
+        .in('role', ['admin', 'coordinator']);
+
+      if (admins && admins.length > 0) {
+        const adminNotifications = admins.map((admin) => ({
+          user_id: admin.id,
+          title: '👔 Assignation forcée effectuée',
+          body: `${adminId ? 'Un admin' : 'Le système'} a forcé l'assignation de ${targetName}`,
+          type: 'alert',
+          data: {
+            visit_id: visitId,
+            aidant_user_id: aidantUserId,
+            assignment_type: assignmentType,
+            forced: true,
+          },
+        }));
+
+        await supabase.from('notifications').insert(adminNotifications);
+      }
+    }
+
+    // 4. Notification si dépassement de quota
+    if (force && isPermanent) {
+      const { data: aidant } = await supabase
+        .from('aidants')
+        .select('current_assignments, max_assignments')
+        .eq('user_id', aidantUserId)
+        .single();
+
+      if (aidant && aidant.current_assignments > aidant.max_assignments) {
+        const { data: admins } = await supabase
+          .from('profiles')
+          .select('id')
+          .in('role', ['admin', 'coordinator']);
+
+        if (admins && admins.length > 0) {
+          const adminNotifications = admins.map((admin) => ({
+            user_id: admin.id,
+            title: '⚠️ Quota d\'assignations dépassé',
+            body: `L'aidant ${aidantUserId} a maintenant ${aidant.current_assignments}/${aidant.max_assignments} assignations`,
+            type: 'alert',
+            data: {
+              aidant_user_id: aidantUserId,
+              current: aidant.current_assignments,
+              max: aidant.max_assignments,
+            },
+          }));
+
+          await supabase.from('notifications').insert(adminNotifications);
+        }
+      }
+    }
+  } catch (error) {
+    console.error('❌ createAidantAssignmentNotifications error:', error);
+  }
+};
+
+/**
+ * Récupère toutes les visites en attente d'aidant
+ * 
+ * @returns {Promise<Array>} - Liste des visites en attente d'aidant
+ */
+const getPendingAidantVisits = async () => {
+  try {
+    const { data, error } = await supabase
+      .from('visites')
+      .select(`
+        *,
+        patient:patients(*),
+        family:profiles!visites_user_id_fkey(
+          id,
+          full_name,
+          email,
+          phone
+        )
+      `)
+      .eq('status', 'en_attente_aidant')
+      .order('created_at', { ascending: true });
+
+    if (error) {
+      console.error('❌ getPendingAidantVisits error:', error);
+      return [];
+    }
+
+    return data || [];
+  } catch (error) {
+    console.error('❌ getPendingAidantVisits error:', error);
+    return [];
+  }
+};
+
+/**
+ * Récupère les options du wizard pour une visite
+ * 
+ * @param {string} targetType - 'patient' | 'personal_account'
+ * @param {string} targetId - UUID de la cible
+ * @param {string} familyId - UUID de la famille
+ * @returns {Promise<Object>} - Options du wizard
+ */
+const getVisitWizardOptions = async (targetType, targetId, familyId) => {
+  try {
+    // 1. Vérifier si un aidant est déjà assigné
+    const existingAidant = await getActiveAidantForTarget(targetType, targetId, familyId);
+
+    if (existingAidant) {
+      return {
+        hasAidant: true,
+        aidantId: existingAidant,
+        options: [
+          {
+            type: 'auto',
+            label: '✅ Aidant automatique',
+            description: 'Un aidant est déjà assigné à ce compte',
+          },
+        ],
+        canProceed: true,
+      };
+    }
+
+    // 2. Récupérer tous les aidants disponibles
+    const availableAidants = await getAvailableAidantsForFamily(familyId);
+
+    if (availableAidants.length > 0) {
+      return {
+        hasAidant: false,
+        hasAvailableAidants: true,
+        aidants: availableAidants,
+        options: [
+          {
+            type: 'ponctuelle',
+            label: '⚡ Pour cette visite uniquement',
+            description: 'Ne consomme pas de quota',
+            quota: 0,
+          },
+          {
+            type: 'permanente',
+            label: '📌 Permanent',
+            description: 'Consomme 1 quota',
+            quota: 1,
+          },
+        ],
+        canProceed: true,
+        allFull: false,
+      };
+    }
+
+    // 3. Tous les aidants sont full
+    return {
+      hasAidant: false,
+      hasAvailableAidants: false,
+      aidants: [],
+      options: [
+        {
+          type: 'without_aidant',
+          label: '⚡ Planifier sans aidant',
+          description: 'L\'admin sera notifié pour assigner un aidant',
+          quota: 0,
+        },
+      ],
+      canProceed: true,
+      allFull: true,
+      message: 'Tous les aidants sont actuellement complets (4/4)',
+    };
+  } catch (error) {
+    console.error('❌ getVisitWizardOptions error:', error);
+    return {
+      hasAidant: false,
+      hasAvailableAidants: false,
+      aidants: [],
+      options: [],
+      canProceed: false,
+      error: error.message,
+    };
+  }
+};
+
+// ============================================================
+// FONCTIONS PRIVÉES (INTERNES)
+// ============================================================
+
+/**
+ * Crée les notifications pour une assignation
+ */
+const createAssignmentNotifications = async ({
+  assignmentId,
+  aidantUserId,
+  targetType,
+  targetId,
+  targetName,
+  assignmentType,
+  createdBy,
+  priority,
+}) => {
+  try {
+    const priorityLabel = priority === 1 ? 'prioritaire' : priority === 2 ? 'standard' : 'fallback';
+    
+    // 1. Notification à l'aidant
+    await supabase.from('notifications').insert({
+      user_id: aidantUserId,
+      title: '📋 Nouvelle assignation',
+      body: `Vous avez été assigné à ${targetName} (${assignmentType}) - ${priorityLabel}`,
+      type: 'system',
+      data: {
+        assignment_id: assignmentId,
+        target_type: targetType,
+        target_id: targetId,
+        assignment_type: assignmentType,
+        priority: priority,
+      },
+    });
+
+    // 2. Notification au propriétaire de la cible
+    let ownerId = null;
+
+    if (targetType === TARGET_TYPES.PATIENT) {
+      // Récupérer la famille du patient
+      const { data: links, error: linksError } = await supabase
+        .from('patient_family_links')
+        .select('family_id')
+        .eq('patient_id', targetId)
+        .eq('is_primary', true)
+        .maybeSingle();
+
+      if (!linksError && links) {
+        ownerId = links.family_id;
+      }
+    } else if (targetType === TARGET_TYPES.PERSONAL_ACCOUNT) {
+      ownerId = targetId;
+    } else if (targetType === TARGET_TYPES.FAMILY) {
+      ownerId = targetId;
+    }
+
+    if (ownerId) {
+      await supabase.from('notifications').insert({
+        user_id: ownerId,
+        title: '✅ Aidant assigné',
+        body: `Un aidant a été assigné à ${targetName} (${assignmentType})`,
+        type: 'system',
+        data: {
+          assignment_id: assignmentId,
+          aidant_user_id: aidantUserId,
+          target_type: targetType,
+          target_id: targetId,
+          assignment_type: assignmentType,
+          priority: priority,
+        },
+      });
+    }
+
+    // 3. Notification aux admins
+    const { data: admins } = await supabase
+      .from('profiles')
+      .select('id')
+      .in('role', ['admin', 'coordinator']);
+
+    if (admins && admins.length > 0) {
+      const adminNotifications = admins.map((admin) => ({
+        user_id: admin.id,
+        title: '📋 Nouvelle assignation créée',
+        body: `Un aidant a été assigné à ${targetName} par ${createdBy || 'le système'} (${priorityLabel})`,
+        type: 'alert',
+        data: {
+          assignment_id: assignmentId,
+          aidant_user_id: aidantUserId,
+          target_type: targetType,
+          target_id: targetId,
+          priority: priority,
+        },
+      }));
+
+      await supabase.from('notifications').insert(adminNotifications);
+    }
+  } catch (error) {
+    console.error('❌ createAssignmentNotifications error:', error);
+  }
+};
+
+// ============================================================
+// EXPORTS
+// ============================================================
+
+module.exports = {
+  // Constantes
+  TARGET_TYPES,
+  ASSIGNMENT_TYPES,
+  ASSIGNMENT_STATUS,
+  PRIORITY,
+
+  // Fonctions de mapping
+  mapTargetType,
+  mapTargetTypeForResponse,
+
+  // Fonctions principales existantes
+  getActiveAidantForTarget,
+  getAllAidantsForTarget,
+  assignAidantToTarget,
+  revokeAssignment,
+  getAssignmentsByAidant,
+  getAssignmentsByTarget,
+  isAidantAssignedToTarget,
+
+  // 🆕 Nouvelles fonctions
+  isAidantFull,
+  getAvailableAidantsForFamily,
+  getAidantsWithQuota,
+  adminAssignAidantToVisit,
+  getPendingAidantVisits,
+  getVisitWizardOptions,
+};
