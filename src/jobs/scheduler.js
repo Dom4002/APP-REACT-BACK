@@ -12,7 +12,7 @@ const {
   checkMissedVisits,
 } = require('../services/reminder.service');
 
-// ✅ IMPORTER le job de nettoyage des assignations
+const { cleanExpiredDrafts } = require('../services/visitPayment.service');
 const { cleanExpiredAssignments } = require('./clean-expired-assignments.job');
 
 // =============================================
@@ -112,6 +112,7 @@ cron.schedule('0 3 * * *', () => {
 // LOG DE DÉMARRAGE
 // =============================================
 console.log('✅ Scheduler démarré avec les jobs suivants:');
+console.log('  - Nettoyage des brouillons expirés (toutes les heures)');
 console.log('  - Auto-validation des commandes (toutes les heures)');
 console.log('  - Vérification des visites non approuvées (toutes les heures)');
 console.log('  - Vérification des commandes sans réponse (toutes les 15min)');
@@ -135,5 +136,6 @@ module.exports = {
   checkSubscriptionExpiry,
   checkExpiredSubscriptions,
   checkMissedVisits,
-  cleanExpiredAssignments,  // ✅ EXPORTÉ POUR LES TESTS
+  cleanExpiredAssignments,
+  cleanExpiredDrafts,  
 };
