@@ -188,7 +188,8 @@ const decrementAidantOrders = async (aidantUserId) => {
 // =============================================
 // ✅ LISTE DES COMMANDES - AVEC FILTRE DISPONIBLE
 // =============================================
-router.get('/', async (req, res) => {
+ 
+ router.get('/', async (req, res) => {
   try {
     const { user, profile } = req;
     const { status, available } = req.query;
@@ -198,10 +199,10 @@ router.get('/', async (req, res) => {
       .select(`
         *,
         patient:patients(*),
-        aidant:aidants(*, user:profiles(*))
+        aidant:aidants!commandes_aidant_id_fkey(*, user:profiles(*))
       `);
 
-    // ✅ Filtre par rôle
+    // Filtre par rôle
     if (profile.role === 'family') {
       query = query.eq('user_id', user.id);
     } else if (profile.role === 'aidant') {
@@ -218,12 +219,12 @@ router.get('/', async (req, res) => {
       }
     }
 
-    // ✅ Filtre par statut
+    // Filtre par statut
     if (status) {
       query = query.eq('status', status);
     }
 
-    // ✅ Filtre "disponible" : commandes que l'aidant peut prendre
+    // Filtre "disponible" pour les aidants
     if (available === 'true' && profile.role === 'aidant') {
       query = query.in('status', ['creee', 'en_attente', 'disponible']);
     }
@@ -236,7 +237,6 @@ router.get('/', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
 // =============================================
 // ✅ LISTE DES COMMANDES DISPONIBLES (POUR AIDANTS)
 // =============================================
