@@ -18,6 +18,7 @@ const mapTargetType = (type) => {
   if (!type) return type;
   const normalized = type.toLowerCase();
   
+  // 🔄 Normaliser 'personal' → 'personal_account'
   if (normalized === 'personal') return TARGET_TYPES.PERSONAL_ACCOUNT;
   if (normalized === 'personal_account') return TARGET_TYPES.PERSONAL_ACCOUNT;
   if (normalized === 'patient') return TARGET_TYPES.PATIENT;
@@ -26,7 +27,7 @@ const mapTargetType = (type) => {
   return type;
 };
 
-// ✅ Mapping inverse pour les réponses
+// ✅ Mapping inverse pour les réponses (si le frontend attend 'personal')
 const mapTargetTypeForResponse = (type) => {
   if (!type) return type;
   if (type === TARGET_TYPES.PERSONAL_ACCOUNT) return 'personal';
@@ -48,173 +49,158 @@ const ASSIGNMENT_STATUS = {
 };
 
 const PRIORITY = {
-  PATIENT: 1,
-  PERSONAL_ACCOUNT: 2,
-  FAMILY: 3,
+  PATIENT: 1,           // ✅ Priorité la plus haute
+  PERSONAL_ACCOUNT: 2,  // ✅ Priorité intermédiaire (fallback)
+  FAMILY: 3,            // ✅ Priorité la plus basse (dernier fallback)
 };
 
 // ============================================================
-// FONCTIONS EXISTANTES (gardées intactes)
-// ============================================================
-
-// ... [Toutes les fonctions existantes: getActiveAidantForTarget, getAllAidantsForTarget, assignAidantToTarget, revokeAssignment, getAssignmentsByAidant, getAssignmentsByTarget, isAidantAssignedToTarget, createAssignmentNotifications]
-
-// ============================================================
-// ✅ NOUVELLES FONCTIONS - ADMIN ASSIGNATION
+// FONCTIONS PRINCIPALES EXISTANTES
 // ============================================================
 
 /**
- * Vérifie si un aidant est full (current_assignments >= max_assignments)
- * @param {string} aidantUserId - UUID de l'aidant (user_id)
- * @returns {Promise<{isFull: boolean, current: number, max: number}>}
- */
-const isAidantFull = async (aidantUserId) => {
-  try {
-    const { data, error } = await supabase
-      .from('aidants')
-      .select('current_assignments, max_assignments')
-      .eq('user_id', aidantUserId)
-      .single();
-
-    if (error) {
-      console.error('❌ isAidantFull error:', error);
-      return { isFull: true, current: 0, max: 4 };
-    }
-
-    const current = data?.current_assignments || 0;
-    const max = data?.max_assignments || 4;
-    
-    return {
-      isFull: current >= max,
-      current,
-      max,
-    };
-  } catch (error) {
-    console.error('❌ isAidantFull error:', error);
-    return { isFull: true, current: 0, max: 4 };
-  }
-};
-
-/**
- * Récupère les aidants disponibles pour une famille
- * (ceux qui ont current_assignments < max_assignments)
+ * Récupère l'aidant actif pour une cible donnée
+ * Utilise la règle de priorité : patient > personal_account > family
+ * 
+ * @param {string} targetType - 'patient' | 'personal_account' | 'family'
+ * @param {string} targetId - UUID de la cible
  * @param {string} familyId - UUID de la famille (optionnel)
- * @returns {Promise<Array>} - Liste des aidants disponibles
+ * @returns {Promise<string|null>} - UUID de l'aidant ou null
  */
-const getAvailableAidantsForFamily = async (familyId = null) => {
+const getActiveAidantForTarget = async (targetType, targetId, familyId = null) => {
   try {
-    // Récupérer tous les aidants approuvés
-    let query = supabase
-      .from('aidants')
-      .select(`
-        *,
-        user:profiles!aidants_user_id_fkey (
-          id,
-          full_name,
-          email,
-          phone,
-          avatar_url
-        )
-      `)
-      .eq('is_verified', true)
-      .eq('status', 'approved')
-      .eq('available', true);
-
-    const { data: aidants, error } = await query;
+    const dbTargetType = mapTargetType(targetType);
+    
+    const { data, error } = await supabase.rpc('get_active_aidant_for_target', {
+      p_target_type: dbTargetType,
+      p_target_id: targetId,
+      p_family_id: familyId,
+    });
 
     if (error) {
-      console.error('❌ getAvailableAidantsForFamily error:', error);
+      console.error('❌ get_active_aidant_for_target error:', error);
+      return null;
+    }
+
+    if (!data) {
+      console.log(`ℹ️ Aucun aidant trouvé pour ${targetType}/${targetId}`);
+      return null;
+    }
+
+    // ✅ VÉRIFIER SI data EST UN aidant_id OU un user_id
+    // 1. Vérifier si data est un aidant_id (dans la table aidants)
+    const { data: aidantById, error: errorById } = await supabase
+      .from('aidants')
+      .select('id')
+      .eq('id', data)
+      .maybeSingle();
+
+    if (!errorById && aidantById) {
+      // ✅ data est déjà un aidant_id, le retourner directement
+      console.log(`✅ getActiveAidantForTarget: data est un aidant_id: ${data}`);
+      return data;
+    }
+
+    // 2. Vérifier si data est un user_id
+    const { data: aidantByUser, error: errorByUser } = await supabase
+      .from('aidants')
+      .select('id')
+      .eq('user_id', data)
+      .maybeSingle();
+
+    if (!errorByUser && aidantByUser) {
+      // ✅ data est un user_id, retourner l'aidant_id correspondant
+      console.log(`🔄 Conversion user_id ${data} → aidant_id ${aidantByUser.id}`);
+      return aidantByUser.id;
+    }
+
+    // 3. Fallback: si data est un ID valide mais non trouvé, essayer de le chercher
+    const { data: aidantByAny, error: errorAny } = await supabase
+      .from('aidants')
+      .select('id')
+      .or(`id.eq.${data}, user_id.eq.${data}`)
+      .maybeSingle();
+
+    if (!errorAny && aidantByAny) {
+      console.log(`🔄 Fallback: ${data} → aidant_id ${aidantByAny.id}`);
+      return aidantByAny.id;
+    }
+
+    console.warn(`⚠️ Aucun aidant trouvé pour ${data}`);
+    return null;
+  } catch (error) {
+    console.error('❌ getActiveAidantForTarget error:', error);
+    return null;
+  }
+};
+
+/**
+ * Récupère tous les aidants pour une cible (principal + secondaires)
+ * Inclut les aidants du compte et de la famille en fallback
+ * 
+ * @param {string} targetType - 'patient' | 'personal_account' | 'family'
+ * @param {string} targetId - UUID de la cible
+ * @param {string} familyId - UUID de la famille (optionnel)
+ * @returns {Promise<Array>} - Liste des aidants avec leur priorité
+ */
+const getAllAidantsForTarget = async (targetType, targetId, familyId = null) => {
+  try {
+    // ✅ Normaliser le type pour la base de données
+    const dbTargetType = mapTargetType(targetType);
+    
+    const { data, error } = await supabase.rpc('get_all_aidants_for_target', {
+      p_target_type: dbTargetType,
+      p_target_id: targetId,
+      p_family_id: familyId,
+    });
+
+    if (error) {
+      console.error('❌ get_all_aidants_for_target error:', error);
       return [];
     }
 
-    // Filtrer ceux qui ont de la place
-    const available = (aidants || []).filter(a => {
-      const current = a.current_assignments || 0;
-      const max = a.max_assignments || 4;
-      return current < max;
-    });
-
-    return available;
+    // ✅ Trier par priorité (1 = plus haute)
+    const sortedData = (data || []).sort((a, b) => (a.priority || 99) - (b.priority || 99));
+    
+    return sortedData;
   } catch (error) {
-    console.error('❌ getAvailableAidantsForFamily error:', error);
+    console.error('❌ getAllAidantsForTarget error:', error);
     return [];
   }
 };
 
 /**
- * Récupère tous les aidants avec leur quota (pour admin)
- * @param {boolean} includeFull - Inclure les aidants full
- * @returns {Promise<Array>} - Liste des aidants avec quota
- */
-const getAidantsWithQuota = async (includeFull = true) => {
-  try {
-    const { data: aidants, error } = await supabase
-      .from('aidants')
-      .select(`
-        *,
-        user:profiles!aidants_user_id_fkey (
-          id,
-          full_name,
-          email,
-          phone,
-          avatar_url
-        )
-      `)
-      .eq('is_verified', true)
-      .eq('status', 'approved')
-      .order('rating', { ascending: false });
-
-    if (error) {
-      console.error('❌ getAidantsWithQuota error:', error);
-      return [];
-    }
-
-    // Enrichir avec les infos de quota
-    const enriched = (aidants || []).map(a => {
-      const current = a.current_assignments || 0;
-      const max = a.max_assignments || 4;
-      return {
-        ...a,
-        current_assignments: current,
-        max_assignments: max,
-        is_full: current >= max,
-        available_slots: Math.max(0, max - current),
-      };
-    });
-
-    if (!includeFull) {
-      return enriched.filter(a => !a.is_full);
-    }
-
-    return enriched;
-  } catch (error) {
-    console.error('❌ getAidantsWithQuota error:', error);
-    return [];
-  }
-};
-
-/**
- * ADMIN - Assigne un aidant à une visite (même si full)
+ * Assigne un aidant à une cible
+ * 
  * @param {Object} params
- * @param {string} params.visitId - UUID de la visite
  * @param {string} params.aidantUserId - UUID de l'aidant (user_id)
- * @param {string} params.assignmentType - 'permanente' | 'ponctuelle'
- * @param {string} params.adminId - UUID de l'admin
+ * @param {string} params.targetType - 'patient' | 'personal_account' | 'family'
+ * @param {string} params.targetId - UUID de la cible
+ * @param {string} params.familyId - UUID de la famille (optionnel)
+ * @param {string} params.assignmentType - 'primary' | 'secondary' | 'temporary'
+ * @param {string} params.createdBy - UUID de l'utilisateur qui crée l'assignation
  * @param {string} params.reason - Motif (optionnel)
+ * @param {string} params.expiresAt - Date d'expiration (optionnel)
  * @returns {Promise<Object>} - Résultat de l'assignation
  */
-const adminAssignAidantToVisit = async ({
-  visitId,
+const assignAidantToTarget = async ({
   aidantUserId,
-  assignmentType = 'permanente',
-  adminId = null,
+  targetType,
+  targetId,
+  familyId = null,
+  assignmentType = ASSIGNMENT_TYPES.PRIMARY,
+  createdBy = null,
   reason = null,
+  expiresAt = null,
 }) => {
   try {
-    // 1. Vérifier que l'aidant existe et est approuvé
+    // ✅ Normaliser le type pour la base de données
+    const dbTargetType = mapTargetType(targetType);
+    
+    // 1. Vérifier que l'aidant existe et est disponible
     const { data: aidant, error: aidantError } = await supabase
       .from('aidants')
-      .select('id, user_id, is_verified, status, current_assignments, max_assignments')
+      .select('id, user_id, is_verified, status, available, max_assignments, current_assignments')
       .eq('user_id', aidantUserId)
       .single();
 
@@ -234,10 +220,618 @@ const adminAssignAidantToVisit = async ({
       };
     }
 
-    // 2. Récupérer la visite
+    // 2. Vérifier que l'aidant n'a pas atteint son quota max
+    const currentAssignments = aidant.current_assignments || 0;
+    const maxAssignments = aidant.max_assignments || 4;
+    
+    if (currentAssignments >= maxAssignments) {
+      return {
+        success: false,
+        error: `Cet aidant a déjà ${currentAssignments} assignations (maximum ${maxAssignments})`,
+        code: 'AIDANT_FULL',
+        current: currentAssignments,
+        max: maxAssignments,
+      };
+    }
+
+    // 3. Vérifier la validité de la cible
+    let targetExists = false;
+    let targetName = '';
+
+    switch (dbTargetType) {
+      case TARGET_TYPES.PATIENT:
+        const { data: patient, error: patientError } = await supabase
+          .from('patients')
+          .select('id, first_name, last_name')
+          .eq('id', targetId)
+          .single();
+
+        if (!patientError && patient) {
+          targetExists = true;
+          targetName = `${patient.first_name} ${patient.last_name}`;
+        }
+        break;
+
+      case TARGET_TYPES.PERSONAL_ACCOUNT:
+      case TARGET_TYPES.FAMILY:
+        const { data: profile, error: profileError } = await supabase
+          .from('profiles')
+          .select('id, full_name')
+          .eq('id', targetId)
+          .single();
+
+        if (!profileError && profile) {
+          targetExists = true;
+          targetName = profile.full_name;
+        }
+        break;
+
+      default:
+        return {
+          success: false,
+          error: 'Type de cible invalide',
+          code: 'INVALID_TARGET_TYPE',
+        };
+    }
+
+    if (!targetExists) {
+      return {
+        success: false,
+        error: 'Cible non trouvée',
+        code: 'TARGET_NOT_FOUND',
+      };
+    }
+
+    // 4. Déterminer la priorité selon le type de cible
+    let priority = PRIORITY.PATIENT;
+    if (dbTargetType === TARGET_TYPES.PERSONAL_ACCOUNT) {
+      priority = PRIORITY.PERSONAL_ACCOUNT;
+    } else if (dbTargetType === TARGET_TYPES.FAMILY) {
+      priority = PRIORITY.FAMILY;
+    }
+
+    // 5. Appeler la fonction SQL
+    const { data: assignmentId, error: assignError } = await supabase.rpc('assign_aidant_to_target', {
+      p_aidant_user_id: aidantUserId,
+      p_target_type: dbTargetType,
+      p_target_id: targetId,
+      p_family_id: familyId,
+      p_assignment_type: assignmentType,
+      p_priority: priority,
+      p_created_by: createdBy,
+      p_reason: reason,
+      p_expires_at: expiresAt,
+    });
+
+    if (assignError) {
+      console.error('❌ assign_aidant_to_target error:', assignError);
+      return {
+        success: false,
+        error: assignError.message || 'Erreur lors de l\'assignation',
+        code: 'ASSIGN_ERROR',
+      };
+    }
+
+    // 6. Récupérer l'assignation créée via la VUE
+    const { data: assignment, error: fetchError } = await supabase
+      .from('aidant_assignments_view')
+      .select('*')
+      .eq('id', assignmentId)
+      .single();
+
+    if (fetchError) {
+      console.error('❌ Erreur récupération assignation:', fetchError);
+    }
+
+    // 7. Mettre à jour current_assignments de l'aidant
+    await supabase
+      .from('aidants')
+      .update({
+        current_assignments: currentAssignments + 1,
+        available: (currentAssignments + 1) < maxAssignments,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', aidant.id);
+
+    // 8. Créer les notifications
+    await createAssignmentNotifications({
+      assignmentId,
+      aidantUserId,
+      targetType: dbTargetType,
+      targetId,
+      targetName,
+      assignmentType,
+      createdBy,
+      priority,
+    });
+
+    return {
+      success: true,
+      assignment: assignment || { id: assignmentId },
+      target_type: mapTargetTypeForResponse(dbTargetType),
+      target_name: targetName,
+      priority: priority,
+    };
+  } catch (error) {
+    console.error('❌ assignAidantToTarget error:', error);
+    return {
+      success: false,
+      error: error.message || 'Erreur lors de l\'assignation',
+      code: 'UNKNOWN_ERROR',
+    };
+  }
+};
+
+/**
+ * Révoque une assignation
+ * 
+ * @param {string} assignmentId - UUID de l'assignation
+ * @param {string} revokedBy - UUID de l'utilisateur qui révoque
+ * @param {string} reason - Motif (optionnel)
+ * @returns {Promise<Object>} - Résultat de la révocation
+ */
+const revokeAssignment = async (assignmentId, revokedBy = null, reason = null) => {
+  try {
+    // 1. Récupérer l'assignation
+    const { data: assignment, error: fetchError } = await supabase
+      .from('aidant_assignments')
+      .select('*')
+      .eq('id', assignmentId)
+      .single();
+
+    if (fetchError || !assignment) {
+      return {
+        success: false,
+        error: 'Assignation non trouvée',
+        code: 'ASSIGNMENT_NOT_FOUND',
+      };
+    }
+
+    if (assignment.status !== ASSIGNMENT_STATUS.ACTIVE) {
+      return {
+        success: false,
+        error: 'Cette assignation n\'est pas active',
+        code: 'ASSIGNMENT_NOT_ACTIVE',
+      };
+    }
+
+    // 2. Mettre à jour le statut
+    const { data: result, error: updateError } = await supabase
+      .from('aidant_assignments')
+      .update({
+        status: ASSIGNMENT_STATUS.INACTIVE,
+        revoked_by: revokedBy,
+        revoked_at: new Date().toISOString(),
+        revocation_reason: reason || null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', assignmentId)
+      .select()
+      .single();
+
+    if (updateError) {
+      console.error('❌ revokeAssignment update error:', updateError);
+      return {
+        success: false,
+        error: updateError.message || 'Erreur lors de la révocation',
+        code: 'REVOKE_ERROR',
+      };
+    }
+
+    // 3. Mettre à jour current_assignments de l'aidant
+    const { count: currentAssignments, error: countError } = await supabase
+      .from('aidant_assignments')
+      .select('id', { count: 'exact', head: true })
+      .eq('aidant_user_id', assignment.aidant_user_id)
+      .eq('status', ASSIGNMENT_STATUS.ACTIVE);
+
+    if (!countError) {
+      const { data: aidant, error: aidantError } = await supabase
+        .from('aidants')
+        .select('max_assignments')
+        .eq('user_id', assignment.aidant_user_id)
+        .single();
+
+      if (!aidantError && aidant) {
+        const maxAssignments = aidant.max_assignments || 4;
+        await supabase
+          .from('aidants')
+          .update({
+            current_assignments: currentAssignments || 0,
+            available: (currentAssignments || 0) < maxAssignments,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('user_id', assignment.aidant_user_id);
+      }
+    }
+
+    // 4. Notification
+    await supabase.from('notifications').insert({
+      user_id: assignment.aidant_user_id,
+      title: '🔄 Assignation révoquée',
+      body: `Votre assignation a été révoquée${reason ? ` : ${reason}` : ''}`,
+      type: 'system',
+      data: {
+        assignment_id: assignmentId,
+        revoked_by: revokedBy,
+        reason: reason,
+      },
+    });
+
+    return {
+      success: true,
+      assignment: result,
+    };
+  } catch (error) {
+    console.error('❌ revokeAssignment error:', error);
+    return {
+      success: false,
+      error: error.message || 'Erreur lors de la révocation',
+      code: 'UNKNOWN_ERROR',
+    };
+  }
+};
+
+/**
+ * Récupère toutes les assignations d'un aidant - ✅ UTILISE LA VUE
+ * 
+ * @param {string} aidantUserId - UUID de l'aidant
+ * @param {string} status - Statut des assignations (optionnel)
+ * @returns {Promise<Array>} - Liste des assignations
+ */
+const getAssignmentsByAidant = async (aidantUserId, status = null) => {
+  try {
+    let query = supabase
+      .from('aidant_assignments_view')
+      .select('*')
+      .eq('aidant_user_id', aidantUserId);
+
+    if (status) {
+      query = query.eq('status', status);
+    }
+
+    const { data, error } = await query.order('priority', { ascending: true });
+    
+    if (error) {
+      console.error('❌ getAssignmentsByAidant error:', error);
+      return [];
+    }
+
+    // ✅ Formater les données avec les relations
+    const formattedData = (data || []).map((item) => ({
+      id: item.id,
+      aidant_user_id: item.aidant_user_id,
+      target_type: mapTargetTypeForResponse(item.target_type),
+      target_id: item.target_id,
+      assignment_type: item.assignment_type,
+      status: item.status,
+      priority: item.priority,
+      expires_at: item.expires_at,
+      created_at: item.created_at,
+      updated_at: item.updated_at,
+      created_by: item.created_by,
+      reason: item.reason,
+      aidant: item.aidant_id ? {
+        id: item.aidant_id,
+        full_name: item.aidant_name,
+        email: item.aidant_email,
+        phone: item.aidant_phone,
+        avatar_url: item.aidant_avatar,
+      } : null,
+      target_patient: item.target_type === 'patient' && item.patient_id ? {
+        id: item.patient_id,
+        first_name: item.patient_first_name,
+        last_name: item.patient_last_name,
+        address: item.patient_address,
+        category: item.patient_category,
+        status: item.patient_status,
+      } : null,
+      target_profile: item.target_type !== 'patient' && item.profile_id ? {
+        id: item.profile_id,
+        full_name: item.profile_name,
+        email: item.profile_email,
+        phone: item.profile_phone,
+        role: item.profile_role,
+      } : null,
+    }));
+
+    return formattedData;
+  } catch (error) {
+    console.error('❌ getAssignmentsByAidant error:', error);
+    return [];
+  }
+};
+
+/**
+ * Récupère toutes les assignations pour une cible - ✅ UTILISE LA VUE
+ * 
+ * @param {string} targetType - 'patient' | 'personal_account' | 'family'
+ * @param {string} targetId - UUID de la cible
+ * @param {string} status - Statut des assignations (optionnel)
+ * @returns {Promise<Array>} - Liste des assignations
+ */
+const getAssignmentsByTarget = async (targetType, targetId, status = null) => {
+  try {
+    // ✅ Normaliser le type pour la base de données
+    const dbTargetType = mapTargetType(targetType);
+    
+    let query = supabase
+      .from('aidant_assignments_view')
+      .select('*')
+      .eq('target_type', dbTargetType)
+      .eq('target_id', targetId);
+
+    if (status) {
+      query = query.eq('status', status);
+    }
+
+    const { data, error } = await query.order('priority', { ascending: true });
+    
+    if (error) {
+      console.error('❌ getAssignmentsByTarget error:', error);
+      return [];
+    }
+
+    // ✅ Formater les données
+    const formattedData = (data || []).map((item) => ({
+      id: item.id,
+      aidant_user_id: item.aidant_user_id,
+      target_type: mapTargetTypeForResponse(item.target_type),
+      target_id: item.target_id,
+      assignment_type: item.assignment_type,
+      status: item.status,
+      priority: item.priority,
+      expires_at: item.expires_at,
+      created_at: item.created_at,
+      updated_at: item.updated_at,
+      created_by: item.created_by,
+      reason: item.reason,
+      aidant: item.aidant_id ? {
+        id: item.aidant_id,
+        full_name: item.aidant_name,
+        email: item.aidant_email,
+        phone: item.aidant_phone,
+        avatar_url: item.aidant_avatar,
+      } : null,
+      target_patient: item.target_type === 'patient' && item.patient_id ? {
+        id: item.patient_id,
+        first_name: item.patient_first_name,
+        last_name: item.patient_last_name,
+        address: item.patient_address,
+        category: item.patient_category,
+        status: item.patient_status,
+      } : null,
+      target_profile: item.target_type !== 'patient' && item.profile_id ? {
+        id: item.profile_id,
+        full_name: item.profile_name,
+        email: item.profile_email,
+        phone: item.profile_phone,
+        role: item.profile_role,
+      } : null,
+    }));
+
+    return formattedData;
+  } catch (error) {
+    console.error('❌ getAssignmentsByTarget error:', error);
+    return [];
+  }
+};
+
+/**
+ * Vérifie si un aidant est assigné à une cible
+ * 
+ * @param {string} aidantUserId - UUID de l'aidant
+ * @param {string} targetType - 'patient' | 'personal_account' | 'family'
+ * @param {string} targetId - UUID de la cible
+ * @returns {Promise<Object|null>} - L'assignation ou null
+ */
+const isAidantAssignedToTarget = async (aidantUserId, targetType, targetId) => {
+  try {
+    // ✅ Normaliser le type pour la base de données
+    const dbTargetType = mapTargetType(targetType);
+    
+    const { data, error } = await supabase
+      .from('aidant_assignments')
+      .select('*')
+      .eq('aidant_user_id', aidantUserId)
+      .eq('target_type', dbTargetType)
+      .eq('target_id', targetId)
+      .eq('status', ASSIGNMENT_STATUS.ACTIVE)
+      .maybeSingle();
+
+    if (error) throw error;
+    
+    // ✅ Transformer pour le frontend
+    if (data) {
+      data.target_type = mapTargetTypeForResponse(data.target_type);
+    }
+    
+    return data;
+  } catch (error) {
+    console.error('❌ isAidantAssignedToTarget error:', error);
+    return null;
+  }
+};
+
+// ============================================================
+// 🆕 NOUVELLES FONCTIONS POUR LE SYSTÈME COMPLET
+// ============================================================
+
+/**
+ * Vérifie si un aidant est full (plus de quota disponible)
+ * 
+ * @param {string} aidantUserId - UUID de l'aidant (user_id)
+ * @returns {Promise<Object>} - { isFull, current, max }
+ */
+const isAidantFull = async (aidantUserId) => {
+  try {
+    const { data: aidant, error } = await supabase
+      .from('aidants')
+      .select('current_assignments, max_assignments')
+      .eq('user_id', aidantUserId)
+      .single();
+
+    if (error || !aidant) {
+      return { isFull: true, current: 0, max: 4 };
+    }
+
+    const current = aidant.current_assignments || 0;
+    const max = aidant.max_assignments || 4;
+
+    return {
+      isFull: current >= max,
+      current,
+      max,
+      remaining: Math.max(0, max - current),
+    };
+  } catch (error) {
+    console.error('❌ isAidantFull error:', error);
+    return { isFull: true, current: 0, max: 4 };
+  }
+};
+
+/**
+ * Récupère les aidants disponibles pour une famille
+ * (ceux qui ont encore de la place pour des assignations)
+ * 
+ * @param {string} familyId - UUID de la famille
+ * @param {Object} filters - Filtres optionnels
+ * @returns {Promise<Array>} - Liste des aidants disponibles
+ */
+const getAvailableAidantsForFamily = async (familyId, filters = {}) => {
+  try {
+    // 1. Récupérer TOUS les aidants approuvés
+    let query = supabase
+      .from('aidants')
+      .select(`
+        *,
+        user:profiles!aidants_user_id_fkey(
+          id,
+          full_name,
+          email,
+          phone,
+          avatar_url
+        )
+      `)
+      .eq('status', 'approved')
+      .eq('is_verified', true);
+
+    // 2. Appliquer les filtres
+    if (filters.zone) {
+      query = query.contains('zones', [filters.zone]);
+    }
+
+    if (filters.specialty) {
+      query = query.contains('specialties', [filters.specialty]);
+    }
+
+    if (filters.minRating) {
+      query = query.gte('rating', filters.minRating);
+    }
+
+    const { data: aidants, error } = await query;
+
+    if (error) {
+      console.error('❌ getAvailableAidantsForFamily error:', error);
+      return [];
+    }
+
+    // 3. Filtrer ceux qui ont de la place
+    const availableAidants = (aidants || []).filter((aidant) => {
+      const current = aidant.current_assignments || 0;
+      const max = aidant.max_assignments || 4;
+      return current < max;
+    });
+
+    // 4. Enrichir avec les informations de quota
+    return availableAidants.map((aidant) => ({
+      ...aidant,
+      current_assignments: aidant.current_assignments || 0,
+      max_assignments: aidant.max_assignments || 4,
+      available_slots: Math.max(0, (aidant.max_assignments || 4) - (aidant.current_assignments || 0)),
+      is_available: (aidant.current_assignments || 0) < (aidant.max_assignments || 4),
+    }));
+  } catch (error) {
+    console.error('❌ getAvailableAidantsForFamily error:', error);
+    return [];
+  }
+};
+
+/**
+ * Récupère les aidants avec leur quota actuel
+ * 
+ * @param {Object} filters - Filtres optionnels
+ * @returns {Promise<Array>} - Liste des aidants avec quota
+ */
+const getAidantsWithQuota = async (filters = {}) => {
+  try {
+    let query = supabase
+      .from('aidants')
+      .select(`
+        *,
+        user:profiles!aidants_user_id_fkey(
+          id,
+          full_name,
+          email,
+          phone,
+          avatar_url
+        )
+      `)
+      .eq('status', 'approved')
+      .eq('is_verified', true);
+
+    if (filters.available === true) {
+      // Filtrer côté serveur pour les aidants disponibles
+      // On va filtrer côté client après
+    }
+
+    const { data: aidants, error } = await query;
+
+    if (error) {
+      console.error('❌ getAidantsWithQuota error:', error);
+      return [];
+    }
+
+    // Enrichir avec les informations de quota
+    return (aidants || []).map((aidant) => ({
+      ...aidant,
+      current_assignments: aidant.current_assignments || 0,
+      max_assignments: aidant.max_assignments || 4,
+      available_slots: Math.max(0, (aidant.max_assignments || 4) - (aidant.current_assignments || 0)),
+      is_available: (aidant.current_assignments || 0) < (aidant.max_assignments || 4),
+    }));
+  } catch (error) {
+    console.error('❌ getAidantsWithQuota error:', error);
+    return [];
+  }
+};
+
+/**
+ * Assigne un aidant à une visite (admin - force)
+ * Peut dépasser le quota max (5/4, 6/4, etc.)
+ * 
+ * @param {Object} params
+ * @param {string} params.visitId - UUID de la visite
+ * @param {string} params.aidantUserId - UUID de l'aidant (user_id)
+ * @param {string} params.assignmentType - 'permanente' | 'ponctuelle'
+ * @param {string} params.adminId - UUID de l'admin qui assigne
+ * @param {string} params.reason - Motif (optionnel)
+ * @param {boolean} params.force - True pour ignorer le quota
+ * @returns {Promise<Object>} - Résultat de l'assignation
+ */
+const adminAssignAidantToVisit = async ({
+  visitId,
+  aidantUserId,
+  assignmentType = 'permanente',
+  adminId = null,
+  reason = null,
+  force = false,
+}) => {
+  try {
+    // 1. Récupérer la visite
     const { data: visit, error: visitError } = await supabase
       .from('visites')
-      .select('*, patient:patients(*)')
+      .select('*')
       .eq('id', visitId)
       .single();
 
@@ -249,18 +843,46 @@ const adminAssignAidantToVisit = async ({
       };
     }
 
-    // 3. Vérifier que la visite n'a pas déjà un aidant
-    if (visit.aidant_id) {
+    // 2. Vérifier que l'aidant existe et est approuvé
+    const { data: aidant, error: aidantError } = await supabase
+      .from('aidants')
+      .select('*')
+      .eq('user_id', aidantUserId)
+      .single();
+
+    if (aidantError || !aidant) {
       return {
         success: false,
-        error: 'Cette visite a déjà un aidant assigné',
-        code: 'VISIT_HAS_AIDANT',
-        current_aidant_id: visit.aidant_id,
+        error: 'Aidant non trouvé',
+        code: 'AIDANT_NOT_FOUND',
       };
     }
 
-    // 4. Déterminer si c'est permanent
+    if (!aidant.is_verified || aidant.status !== 'approved') {
+      return {
+        success: false,
+        error: 'Cet aidant n\'est pas approuvé',
+        code: 'AIDANT_NOT_APPROVED',
+      };
+    }
+
+    // 3. Vérifier le quota (sauf si force)
+    const currentAssignments = aidant.current_assignments || 0;
+    const maxAssignments = aidant.max_assignments || 4;
+
+    if (!force && currentAssignments >= maxAssignments) {
+      return {
+        success: false,
+        error: `Cet aidant a déjà ${currentAssignments} assignations (maximum ${maxAssignments})`,
+        code: 'AIDANT_FULL',
+        current: currentAssignments,
+        max: maxAssignments,
+      };
+    }
+
+    // 4. Déterminer le type d'assignation
     const isPermanent = assignmentType === 'permanente';
+    const assignmentTypeValue = isPermanent ? ASSIGNMENT_TYPES.PRIMARY : ASSIGNMENT_TYPES.TEMPORARY;
 
     // 5. Mettre à jour la visite
     const updateData = {
@@ -270,18 +892,10 @@ const adminAssignAidantToVisit = async ({
       is_permanent: isPermanent,
       assigned_by_admin: true,
       admin_assigned_at: new Date().toISOString(),
-      metadata: {
-        ...(visit.metadata || {}),
-        admin_assigned: true,
-        admin_assigned_at: new Date().toISOString(),
-        admin_id: adminId,
-        assignment_reason: reason || null,
-        forced_assignment: aidant.current_assignments >= aidant.max_assignments,
-      },
       updated_at: new Date().toISOString(),
     };
 
-    // Si la visite était en attente d'aidant, changer le statut
+    // Si la visite était en attente d'aidant, on change le statut
     if (visit.status === 'en_attente_aidant') {
       updateData.waiting_for_aidant_since = null;
     }
@@ -290,275 +904,88 @@ const adminAssignAidantToVisit = async ({
       .from('visites')
       .update(updateData)
       .eq('id', visitId)
-      .select(`
-        *,
-        patient:patients(*),
-        aidant:aidants!visites_aidant_id_fkey (
-          id,
-          user_id,
-          specialties,
-          available,
-          rating,
-          total_missions,
-          completed_missions,
-          cancelled_missions,
-          user:profiles!aidants_user_id_fkey (
-            id,
-            full_name,
-            email,
-            phone,
-            avatar_url
-          )
-        )
-      `)
+      .select()
       .single();
 
     if (updateError) {
       console.error('❌ adminAssignAidantToVisit update error:', updateError);
       return {
         success: false,
-        error: updateError.message || 'Erreur lors de l\'assignation',
+        error: updateError.message || 'Erreur lors de la mise à jour de la visite',
         code: 'UPDATE_ERROR',
       };
     }
 
-    // 6. Si permanent, créer l'assignation et incrémenter current_assignments
-    let assignment = null;
-    let newCurrentAssignments = aidant.current_assignments || 0;
-
+    // 6. Si permanent, créer l'assignation dans aidant_assignments
     if (isPermanent) {
-      // Créer l'assignation permanente
-      const targetType = visit.patient_id ? 'patient' : 'personal_account';
+      // Déterminer la cible
+      const targetType = visit.patient_id ? TARGET_TYPES.PATIENT : TARGET_TYPES.PERSONAL_ACCOUNT;
       const targetId = visit.patient_id || visit.user_id;
-      const familyId = visit.user_id;
 
-      const result = await assignAidantToTarget({
-        aidantUserId: aidant.user_id,
+      const assignmentResult = await assignAidantToTarget({
+        aidantUserId: aidantUserId,
         targetType: targetType,
         targetId: targetId,
-        familyId: familyId,
+        familyId: visit.user_id,
         assignmentType: ASSIGNMENT_TYPES.PRIMARY,
-        createdBy: adminId || null,
-        reason: reason || `Assigné par admin à la visite ${visitId}`,
+        createdBy: adminId,
+        reason: reason || `Assignation forcée par admin pour la visite ${visitId}`,
         expiresAt: null,
       });
 
-      if (result.success) {
-        assignment = result.assignment;
-        newCurrentAssignments = (aidant.current_assignments || 0) + 1;
-
-        // Mettre à jour current_assignments (peut dépasser max_assignments)
-        await supabase
-          .from('aidants')
-          .update({
-            current_assignments: newCurrentAssignments,
-            available: false,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', aidant.id);
+      if (!assignmentResult.success) {
+        console.warn('⚠️ Échec création assignation permanente:', assignmentResult.error);
+        // On continue quand même, la visite est assignée
       }
+    } else {
+      // 7. Si ponctuelle, NE PAS incrémenter current_assignments
+      // On ne fait rien de plus
     }
 
-    // 7. Notifications
-    const targetDisplay = visit.target_name || (visit.patient ? `${visit.patient.first_name} ${visit.patient.last_name}` : 'Personnel');
-
-    // À l'aidant
-    await supabase.from('notifications').insert({
-      user_id: aidant.user_id,
-      title: '📅 Nouvelle visite assignée par l\'admin',
-      body: `Visite pour ${targetDisplay} le ${visit.scheduled_date} à ${visit.scheduled_time}${isPermanent ? ' (Assignation permanente)' : ' (Ponctuelle)'}`,
-      type: 'visite',
-      data: {
-        visit_id: visitId,
-        action: 'approve',
-        assigned_by_admin: true,
-        is_permanent: isPermanent,
-      },
+    // 8. Notifications
+    await createAidantAssignmentNotifications({
+      visitId,
+      aidantUserId,
+      targetName: visit.target_name || visit.patient?.first_name || 'Patient',
+      assignmentType,
+      adminId,
+      isPermanent,
+      force,
     });
-
-    // À la famille
-    if (visit.user_id) {
-      await supabase.from('notifications').insert({
-        user_id: visit.user_id,
-        title: '✅ Un aidant a été assigné à votre visite',
-        body: `${aidant.user?.full_name || 'Un aidant'} a été assigné à votre visite du ${visit.scheduled_date}`,
-        type: 'visite',
-        data: {
-          visit_id: visitId,
-          aidant_id: aidant.user_id,
-          assigned_by_admin: true,
-        },
-      });
-    }
-
-    // Aux admins (si assignment permanent et dépassement)
-    if (isPermanent && newCurrentAssignments > (aidant.max_assignments || 4)) {
-      const { data: admins } = await supabase
-        .from('profiles')
-        .select('id')
-        .in('role', ['admin', 'coordinator']);
-
-      if (admins && admins.length > 0) {
-        const adminNotifications = admins.map((admin) => ({
-          user_id: admin.id,
-          title: '⚠️ Aidant a dépassé son quota',
-          body: `${aidant.user?.full_name || 'L\'aidant'} a maintenant ${newCurrentAssignments} assignations (max ${aidant.max_assignments || 4})`,
-          type: 'alert',
-          data: {
-            aidant_id: aidant.id,
-            current_assignments: newCurrentAssignments,
-            max_assignments: aidant.max_assignments || 4,
-            visit_id: visitId,
-          },
-        }));
-
-        await supabase.from('notifications').insert(adminNotifications);
-      }
-    }
 
     return {
       success: true,
+      message: `Aidant assigné avec succès${force ? ' (force)' : ''}`,
       visit: updatedVisit,
-      assignment: assignment,
+      assignment_type: assignmentType,
       is_permanent: isPermanent,
-      current_assignments: newCurrentAssignments,
-      max_assignments: aidant.max_assignments || 4,
-      exceeded_quota: newCurrentAssignments > (aidant.max_assignments || 4),
+      forced: force,
+      current_assignments: isPermanent ? currentAssignments + 1 : currentAssignments,
     };
   } catch (error) {
     console.error('❌ adminAssignAidantToVisit error:', error);
     return {
       success: false,
-      error: error.message || 'Erreur lors de l\'assignation admin',
+      error: error.message || 'Erreur lors de l\'assignation',
       code: 'UNKNOWN_ERROR',
     };
   }
 };
 
 /**
- * Récupère toutes les visites en attente d'aidant
- * @param {Object} filters - Filtres optionnels
- * @returns {Promise<Array>} - Liste des visites
+ * Crée les notifications pour une assignation admin
  */
-const getPendingAidantVisits = async (filters = {}) => {
+const createAidantAssignmentNotifications = async ({
+  visitId,
+  aidantUserId,
+  targetName,
+  assignmentType,
+  adminId,
+  isPermanent,
+  force,
+}) => {
   try {
-    let query = supabase
-      .from('visites')
-      .select(`
-        *,
-        patient:patients(*),
-        aidant:aidants!visites_aidant_id_fkey (
-          id,
-          user_id,
-          specialties,
-          available,
-          rating,
-          total_missions,
-          completed_missions,
-          cancelled_missions,
-          user:profiles!aidants_user_id_fkey (
-            id,
-            full_name,
-            email,
-            phone,
-            avatar_url
-          )
-        )
-      `)
-      .eq('status', 'en_attente_aidant')
-      .is('aidant_id', null)
-      .order('waiting_for_aidant_since', { ascending: true });
-
-    // Filtre par date
-    if (filters.date) {
-      query = query.eq('scheduled_date', filters.date);
-    }
-
-    // Filtre par patient
-    if (filters.patientId) {
-      query = query.eq('patient_id', filters.patientId);
-    }
-
-    // Filtre par famille
-    if (filters.familyId) {
-      query = query.eq('user_id', filters.familyId);
-    }
-
-    const { data, error } = await query;
-
-    if (error) {
-      console.error('❌ getPendingAidantVisits error:', error);
-      return [];
-    }
-
-    return data || [];
-  } catch (error) {
-    console.error('❌ getPendingAidantVisits error:', error);
-    return [];
-  }
-};
-
-/**
- * Compte les visites en attente d'aidant
- * @param {string} familyId - UUID de la famille (optionnel)
- * @returns {Promise<number>}
- */
-const countPendingAidantVisits = async (familyId = null) => {
-  try {
-    let query = supabase
-      .from('visites')
-      .select('id', { count: 'exact', head: true })
-      .eq('status', 'en_attente_aidant')
-      .is('aidant_id', null);
-
-    if (familyId) {
-      query = query.eq('user_id', familyId);
-    }
-
-    const { count, error } = await query;
-
-    if (error) {
-      console.error('❌ countPendingAidantVisits error:', error);
-      return 0;
-    }
-
-    return count || 0;
-  } catch (error) {
-    console.error('❌ countPendingAidantVisits error:', error);
-    return 0;
-  }
-};
-
-// ============================================================
-// EXPORTS
-// ============================================================
-
-module.exports = {
-  // Constantes
-  TARGET_TYPES,
-  ASSIGNMENT_TYPES,
-  ASSIGNMENT_STATUS,
-  PRIORITY,
-
-  // Fonctions de mapping
-  mapTargetType,
-  mapTargetTypeForResponse,
-
-  // Fonctions principales existantes
-  getActiveAidantForTarget,
-  getAllAidantsForTarget,
-  assignAidantToTarget,
-  revokeAssignment,
-  getAssignmentsByAidant,
-  getAssignmentsByTarget,
-  isAidantAssignedToTarget,
-  createAssignmentNotifications,
-
-  // ✅ NOUVELLES FONCTIONS
-  isAidantFull,
-  getAvailableAidantsForFamily,
-  getAidantsWithQuota,
-  adminAssignAidantToVisit,
-  getPendingAidantVisits,
-  countPendingAidantVisits,
-};
+    // 1. Notification à l'aidant
+    const aidantMessage = isPermanent
+      ? `Vous avez été assigné en tant qu'aidant permanent pour ${targetName}${force ? ' (forcé)' : ''}`
+      : `Vous avez été assigné pour la visite de ${targetName}${force
