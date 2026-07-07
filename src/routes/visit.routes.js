@@ -748,12 +748,15 @@ router.post('/', async (req, res) => {
         }
       }
     }
-
+ 
+    
     const visitData = {
       user_id: finalUserId,
       patient_id: finalPatientId,
-      target_type: finalTargetType,
+      
+       target_type: finalTargetType, // déjà 'patient' ou 'personal'
       target_name: finalTargetName,
+      
       aidant_id: finalAidantId,
       coordinator_id: ['admin', 'coordinator'].includes(profile.role) ? user.id : null,
       scheduled_date,
@@ -763,15 +766,22 @@ router.post('/', async (req, res) => {
       actions: [],
       notes: notes || null,
       is_urgent: is_urgent || false,
-      visit_type: finalPatientId ? 'patient' : 'personal',
-      assignment_type: assignment_type || 'ponctuelle',
+      
+       visit_type: is_ponctual || requiresPayment ? 'ponctuelle' : 'permanente',
+      
+       assignment_type: assignment_type || 'ponctuelle',
+      
       requested_by: user.id,
       draft_expires_at: requiresPayment ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() : null,
       subscription_id: subscriptionId,
+      
+      // ✅ is_permanent : booléen pour les visites permanentes
       is_permanent: wizard_choice === 'permanente',
+      
       assigned_by_admin: ['admin', 'coordinator'].includes(profile.role),
       admin_assigned_at: ['admin', 'coordinator'].includes(profile.role) ? new Date().toISOString() : null,
       waiting_for_aidant_since: status === 'en_attente_aidant' ? new Date().toISOString() : null,
+      
       metadata: {
         created_by: user.id,
         created_at: new Date().toISOString(),
@@ -788,6 +798,8 @@ router.post('/', async (req, res) => {
         wizard_choice: wizard_choice || null,
         waiting_for_aidant: status === 'en_attente_aidant',
         assigned_by_admin: ['admin', 'coordinator'].includes(profile.role),
+         is_personal_account: finalTargetType === 'personal' && !finalPatientId,
+        target_patient_id: finalPatientId,
       }
     };
 
