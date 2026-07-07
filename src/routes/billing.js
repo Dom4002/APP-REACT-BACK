@@ -401,7 +401,7 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
     };
 
     if (visit.target_type === 'personal') {
-      delete (updateData as any).patient_id;
+      delete updateData.patient_id;
     }
 
     const { data, error } = await supabase
