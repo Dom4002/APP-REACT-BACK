@@ -1,4 +1,5 @@
 // 📁 backend/src/routes/aidantAssignments.routes.js
+// Corrigé et complet pour la synchronisation multi-appareil et multi-type
 
 const express = require('express');
 const router = express.Router();
@@ -20,6 +21,7 @@ const {
   getAvailableAidantsForFamily,
   adminAssignAidantToVisit,
   getPendingAidantVisits,
+  revokeAssignment,
 } = require('../services/aidantAssignment.service');
 const { createNotification } = require('../services/notification.service');
 
@@ -44,7 +46,7 @@ router.get('/check', checkAssignment);
 
 // ============================================================
 // ✅ ROUTE GET /api/assignments - UTILISE LA VUE
-// Récupère toutes les assignations (admin uniquement)
+// Récupère toutes les assignations actives (admin uniquement)
 // ============================================================
 router.get(
   '/',
@@ -351,14 +353,12 @@ router.get(
 // ============================================================
 // ROUTE FAMILY ASSIGN
 // ============================================================
-
 router.post('/family/assign', authMiddleware, async (req, res) => {
   try {
     const { aidantUserId, targetType, targetId, assignmentType, patientId } = req.body;
     const userId = req.user.id;
     const userRole = req.profile?.role;
 
-    // ✅ Vérifier que l'utilisateur est une famille
     if (userRole !== 'family') {
       return res.status(403).json({
         success: false,
@@ -366,12 +366,10 @@ router.post('/family/assign', authMiddleware, async (req, res) => {
       });
     }
 
-    // ✅ Déterminer la cible
     let finalTargetType = targetType || 'personal_account';
     let finalTargetId = targetId || userId;
     let finalFamilyId = userId;
 
-    // ✅ Si c'est pour un patient, vérifier que le patient appartient à la famille
     if (targetType === 'patient' && patientId) {
       const { data: link, error: linkError } = await supabase
         .from('patient_family_links')
@@ -389,7 +387,6 @@ router.post('/family/assign', authMiddleware, async (req, res) => {
       finalTargetId = patientId;
     }
 
-    // ✅ Vérifier que l'aidant existe et est disponible
     const { data: aidant, error: aidantError } = await supabase
       .from('aidants')
       .select('id, user_id, is_verified, status, available')
@@ -410,7 +407,6 @@ router.post('/family/assign', authMiddleware, async (req, res) => {
       });
     }
 
-    // ✅ Vérifier le quota de l'aidant
     const { count: currentAssignments, error: countError } = await supabase
       .from('aidant_assignments')
       .select('id', { count: 'exact', head: true })
@@ -430,7 +426,6 @@ router.post('/family/assign', authMiddleware, async (req, res) => {
       });
     }
 
-    // ✅ Appeler la fonction d'assignation
     const result = await assignAidantToTarget({
       aidantUserId: aidant.user_id,
       targetType: finalTargetType,
@@ -467,9 +462,6 @@ router.post('/family/assign', authMiddleware, async (req, res) => {
 // ============================================================
 // ROUTES POUR L'ADMIN - ASSIGNATION FORCÉE
 // ============================================================
-
-// POST /api/assignments/admin/force
-// Assignation forcée par un admin (ignore les quotas)
 router.post(
   '/admin/force',
   roleMiddleware(['admin', 'coordinator']),
@@ -486,7 +478,6 @@ router.post(
         force = false,
       } = req.body;
 
-      // ✅ Validation
       if (!aidantUserId || !targetType || !targetId) {
         return res.status(400).json({
           success: false,
@@ -494,7 +485,6 @@ router.post(
         });
       }
 
-      // ✅ Vérifier que l'aidant existe
       const { data: aidant, error: aidantError } = await supabase
         .from('aidants')
         .select('id, user_id, is_verified, status')
@@ -515,7 +505,6 @@ router.post(
         });
       }
 
-      // ✅ Vérifier que la cible existe
       let targetExists = false;
       let targetName = '';
 
@@ -561,7 +550,6 @@ router.post(
         });
       }
 
-      // ✅ Vérifier le quota de l'aidant
       const { count: currentAssignments, error: countError } = await supabase
         .from('aidant_assignments')
         .select('id', { count: 'exact', head: true })
@@ -575,7 +563,6 @@ router.post(
       const maxAssignments = aidant.max_assignments || 4;
       const isFull = (currentAssignments || 0) >= maxAssignments;
 
-      // ✅ Si l'aidant est full et que force n'est pas activé
       if (isFull && !force) {
         return res.status(400).json({
           success: false,
@@ -586,9 +573,7 @@ router.post(
         });
       }
 
-      // ✅ Si force est activé, libérer une place
       if (isFull && force) {
-        // Supprimer l'assignation la moins prioritaire
         const { data: oldestAssignment, error: oldestError } = await supabase
           .from('aidant_assignments')
           .select('id')
@@ -613,7 +598,6 @@ router.post(
         }
       }
 
-      // ✅ Appeler la fonction d'assignation
       const result = await assignAidantToTarget({
         aidantUserId,
         targetType,
@@ -648,10 +632,6 @@ router.post(
     }
   }
 );
-
-// ============================================================
-// 🆕 NOUVELLES ROUTES
-// ============================================================
 
 // ============================================================
 // ✅ ROUTE : ADMIN ASSIGNER UN AIDANT À UNE VISITE
@@ -689,7 +669,6 @@ router.post(
         });
       }
 
-      // ✅ Récupérer la visite mise à jour
       const { data: visit, error } = await supabase
         .from('visites')
         .select(`
@@ -746,7 +725,6 @@ router.get(
     try {
       const visits = await getPendingAidantVisits();
 
-      // Enrichir avec les relations
       const visitsWithRelations = await Promise.all(visits.map(async (visit) => {
         let patient = null;
         if (visit.patient_id) {
@@ -798,7 +776,6 @@ router.get(
       const userId = req.user.id;
       const userRole = req.profile?.role;
 
-      // ✅ Seules les familles peuvent voir les aidants disponibles
       if (userRole !== 'family') {
         return res.status(403).json({
           success: false,
@@ -863,7 +840,6 @@ router.get(
         });
       }
 
-      // ✅ Formater les données
       const formattedAssignments = (data || []).map((item) => ({
         id: item.id,
         aidant_user_id: item.aidant_user_id,
@@ -919,9 +895,6 @@ router.get(
 // ============================================================
 // ✅ ROUTE POUR LES FAMILLES
 // ============================================================
-// GET /api/assignments/my
-// Récupère les assignations de la famille connectée
-// ============================================================
 router.get(
   '/my',
   authMiddleware,
@@ -930,7 +903,6 @@ router.get(
       const userId = req.user.id;
       const userRole = req.profile?.role;
 
-      // ✅ Seulement les familles
       if (userRole !== 'family') {
         return res.status(403).json({
           success: false,
@@ -938,7 +910,6 @@ router.get(
         });
       }
 
-      // ✅ Utiliser la vue pour récupérer les assignations de la famille
       const { data: assignments, error } = await supabase
         .from('aidant_assignments_view')
         .select('*')
@@ -954,7 +925,6 @@ router.get(
         });
       }
 
-      // ✅ Formater les données
       const formattedAssignments = (assignments || []).map((item) => ({
         id: item.id,
         aidant_user_id: item.aidant_user_id,
@@ -1018,10 +988,9 @@ router.delete(
       const { id } = req.params;
       const { reason } = req.body;
 
-      // Récupérer l'assignation avant suppression
       const { data: assignment, error: fetchError } = await supabase
         .from('aidant_assignments')
-        .select('*, aidant:profiles!aidant_user_id(full_name, email)')
+        .select('*')
         .eq('id', id)
         .single();
 
@@ -1042,7 +1011,6 @@ router.delete(
         });
       }
 
-      // ✅ Notification à l'aidant
       if (assignment.aidant_user_id) {
         await createNotification({
           userId: assignment.aidant_user_id,
@@ -1073,3 +1041,4 @@ router.delete(
 );
 
 module.exports = router;
+ 
