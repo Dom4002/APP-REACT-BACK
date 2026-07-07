@@ -1747,7 +1747,7 @@ router.post('/:id/complete', async (req, res) => {
           await createNotification({
             userId: link.family_id,
             title: '📋 Visite terminée - En attente de validation',
-            body: `La visite de ${targetDisplay} est terminée. L'aidant a soumis son rapport.`,
+            body: `La visite de ${targetDisplay} is terminée. L'aidant a soumis son rapport.`,
             type: 'visite',
             data: { visit_id: data.id, status: 'terminee' },
           });
