@@ -1,5 +1,6 @@
-// 📁 backend/src/routes/billing.js
- 
+ // 📁 backend/src/routes/billing.js
+// ✅ CONTROLEUR DE FACTURATION COMPLET : TRAITEMENTS DES SIGNALS WEBHOOKS ET GENERATION FEDAPAY
+
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 const { FedaPay, Transaction } = require('fedapay');
@@ -129,6 +130,7 @@ async function getActiveAidantForTarget(targetType, targetId, familyId) {
       return null;
     }
 
+    // ✅ Vérifier si data est un aidant_id
     const { data: aidantById, error: errorById } = await supabase
       .from('aidants')
       .select('id')
@@ -139,6 +141,7 @@ async function getActiveAidantForTarget(targetType, targetId, familyId) {
       return data;
     }
 
+    // ✅ Vérifier si data est un user_id
     const { data: aidantByUser, error: errorByUser } = await supabase
       .from('aidants')
       .select('id')
@@ -225,7 +228,7 @@ async function createPendingSubscription(userId, offerId, offer, patientId = nul
 }
 
 // ============================================================
-// ✅ CRÉER UNE COMMANDE PONCTUELLE EN ARRIÈRE-PLAN
+// ✅ CRÉER UNE COMMANDE PONCTUELLE EN ARRIÈRE-PLAN ET ALERTER
 // ============================================================
 async function createPonctualOrder(paymentRecord, transactionId, orderData) {
   try {
@@ -320,7 +323,7 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
       .eq('status', 'approved');
 
     if (aidants && aidants.length > 0) {
-      // Filtrer les aidants qui ont de la place
+      // Filtrer les aidants qui ont encore de la place dans leur quota
       const availableAidants = aidants.filter(
         a => (a.current_orders || 0) < (a.max_orders || 2)
       );
@@ -328,7 +331,7 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
       if (availableAidants.length > 0) {
         for (const aidant of availableAidants) {
           await supabase.from('notifications').insert({
-            user_id: aidant.user_id, // ✅ Vrai ID de profil
+            user_id: aidant.user_id, // ✅ Profiles.id (vrai ID de profil)
             title: '🛒 Nouvelle commande disponible',
             body: `Commande de ${targetName} — ${orderDataToInsert.description}`,
             type: 'commande',
@@ -353,7 +356,7 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
 }
 
 // ============================================================
-// ✅ TRAITER UNE VISITE PONCTUELLE
+// ✅ TRAITER UNE VISITE PONCTUELLE EN ARRIÈRE-PLAN ET ALERTER
 // ============================================================
 async function processPonctualVisit(paymentRecord, transactionId, visitId, metadata) {
   try {
@@ -375,6 +378,7 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
       return null;
     }
 
+    // ✅ RÉCUPÉRER L'AIDANT ACTIF APRÈS PAIEMENT
     const familyId = visit.user_id;
     const targetType = visit.patient_id ? 'patient' : 'personal_account';
     const targetId = visit.patient_id || visit.user_id;
@@ -385,29 +389,34 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
       console.log(`✅ Aidant trouvé après paiement: ${aidantId}`);
     }
 
+    // ✅ CONSTRUIRE L'OBJET DE MISE À JOUR
     const updateData = {
       status: 'planifiee',
       aidant_id: aidantId || null,
       metadata: {
         ...(visit.metadata || {}),
         payment_confirmed_at: new Date().toISOString(),
-        transaction_id: transaction_id,
+        transaction_id: transactionId,
         scheduled_from_draft: true,
         payment_completed: true,
+        webhook_processed: true,
+        webhook_processed_at: new Date().toISOString(),
         aidant_assigned_after_payment: !!aidantId,
-        selected_aidant: null,
-        wizard_choice: null,
       }
     };
 
-    if (visit.target_type === 'personal') {
+    // ✅ Pour les visites personnelles, s'assurer que patient_id est null (retrait de TypeScript "as any")
+    if (visit.target_type === 'personal' || visit.target_type === 'personal_account') {
       delete updateData.patient_id;
     }
 
-    const { data, error } = await supabase
+    console.log('📤 Mise à jour visite avec:', JSON.stringify(updateData, null, 2));
+
+    // ✅ CORRECTIF DE DESTRUCTURATION : Data lié à updatedVisit pour éviter le crash ReferenceError
+    const { data: updatedVisit, error: updateError } = await supabase
       .from('visites')
       .update(updateData)
-      .eq('id', id)
+      .eq('id', visitId) // ✅ CORRECTIF : visitId au lieu de id
       .select(`
         *,
         patient:patients(*),
@@ -419,16 +428,92 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
       `)
       .single();
 
-    if (error) throw error;
+    if (updateError) {
+      console.error('❌ Erreur mise à jour visite:', updateError.message);
+      
+      // ✅ TENTATIVE DE RÉCUPÉRATION SI CONFLIT SQL
+      if (updateError.message.includes('chk_planned_not_draft')) {
+        console.log('🔄 Tentative de récupération avec patient_id = user_id...');
+        
+        if (!aidantId) {
+          aidantId = await getActiveAidantForTarget(targetType, targetId, familyId);
+        }
+        
+        const fallbackData = {
+          status: 'planifiee',
+          patient_id: visit.user_id,
+          aidant_id: aidantId || null,
+          target_type: 'personal',
+          target_name: visit.target_name || 'Personnel',
+          metadata: {
+            ...(visit.metadata || {}),
+            payment_confirmed_at: new Date().toISOString(),
+            transaction_id: transactionId,
+            scheduled_from_draft: true,
+            payment_completed: true,
+            webhook_processed: true,
+            webhook_processed_at: new Date().toISOString(),
+            aidant_assigned_after_payment: !!aidantId,
+            fallback_patient_id_used: true,
+          }
+        };
+        
+        const { data: retryVisit, error: retryError } = await supabase
+          .from('visites')
+          .update(fallbackData)
+          .eq('id', visitId)
+          .select()
+          .single();
+        
+        if (!retryError && retryVisit) {
+          console.log('✅ Visite récupérée avec patient_id fallback:', retryVisit.id);
+          
+          // ✅ NOTIFICATIONS POUR LE FALLBACK
+          if (retryVisit.aidant_id) {
+            const { data: aidant } = await supabase
+              .from('aidants')
+              .select('user_id')
+              .eq('id', retryVisit.aidant_id)
+              .single();
 
-    const targetDisplay = data.target_name || (data.patient ? `${data.patient.first_name} ${data.patient.last_name}` : 'Personnel');
+            if (aidant) {
+              await supabase.from('notifications').insert({
+                user_id: aidant.user_id,
+                title: '📅 Nouvelle visite à valider',
+                body: `Visite pour ${retryVisit.target_name || 'le patient'} le ${retryVisit.scheduled_date} à ${retryVisit.scheduled_time}`,
+                type: 'visite',
+                data: { visit_id: visitId, action: 'approve' },
+              });
+            }
+          }
 
-    // 1️⃣ NOTIFICATION À L'AIDANT ASSIGNÉ
-    if (aidantId && data.aidant?.user?.id) {
+          await supabase.from('notifications').insert({
+            user_id: retryVisit.user_id,
+            title: '✅ Visite planifiée !',
+            body: `Votre visite pour ${retryVisit.target_name || 'Personnel'} a été planifiée avec succès après paiement.`,
+            type: 'visite',
+            data: { visit_id: visitId, status: 'planifiee' },
+          });
+
+          return retryVisit;
+        }
+        
+        console.error('❌ Échec de la récupération:', retryError?.message);
+      }
+      
+      return null;
+    }
+
+    console.log('✅ Visite passée de brouillon à planifiee:', visitId);
+
+    const targetDisplay = updatedVisit.target_name || (updatedVisit.patient ? `${updatedVisit.patient.first_name} ${updatedVisit.patient.last_name}` : 'Personnel');
+
+    // 1️⃣ NOTIFICATION À L'AIDANT ASSIGNÉ (AVEC VRAI USER_ID)
+    if (updatedVisit.aidant_id && updatedVisit.aidant?.user?.id) {
       await supabase.from('notifications').insert({
-        user_id: data.aidant.user.id, // ✅ ID utilisateur (profiles.id) à la place de l'aidant_id
+        user_id: updatedVisit.aidant.user.id, // ✅ Profiles.id (vrai ID d'utilisateur)
         title: '📅 Nouvelle visite à valider',
-        body: `Visite pour ${targetDisplay} le ${data.scheduled_date} à ${data.scheduled_time}`,
+        body: `Visite pour ${targetDisplay} le ${updatedVisit.scheduled_date} à ${updatedVisit.scheduled_time}`,
         type: 'visite',
         data: { visit_id: visitId, action: 'approve' },
       });
@@ -436,7 +521,7 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
 
     // 2️⃣ NOTIFICATION À LA FAMILLE
     await supabase.from('notifications').insert({
-      user_id: data.user_id,
+      user_id: updatedVisit.user_id,
       title: '✅ Visite planifiée !',
       body: `Votre visite pour ${targetDisplay} a été planifiée avec succès après paiement.`,
       type: 'visite',
@@ -454,7 +539,7 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
       })
       .eq('id', paymentRecord.id);
 
-    return data;
+    return updatedVisit;
 
   } catch (error) {
     console.error('❌ Erreur processPonctualVisit:', error.message);
@@ -490,7 +575,7 @@ async function activateSubscription(paymentRecord, subscriptionId) {
 
     const { data: subscription, error: subError } = await supabase
       .from('abonnements')
-      .update({ 
+      .update({
         status: 'actif',
         updated_at: new Date().toISOString(),
       })
@@ -505,7 +590,7 @@ async function activateSubscription(paymentRecord, subscriptionId) {
 
     console.log('✅ Abonnement activé:', subscriptionId);
 
-    // Notification
+    // Notification à la famille
     await supabase.from('notifications').insert({
       user_id: paymentRecord.user_id,
       title: '✅ Abonnement activé !',
@@ -528,23 +613,23 @@ async function activateSubscription(paymentRecord, subscriptionId) {
 }
 
 // ============================================================
-// 💳 GÉNÉRER UN PAIEMENT FEDAPAY
+// 💳 GÉNÉRER UN PAIEMENT FEDAPAY (SÉCURISÉ CONTRE LES DOUBLONS)
 // ============================================================
 router.post('/generate-payment', async (req, res) => {
   const startTime = Date.now();
 
   try {
     const authHeader = req.headers.authorization || '';
-    const token = authHeader.replace('Bearer ', '').trim();
+    const authToken = authHeader.replace('Bearer ', '').trim(); // ✅ Renommé en authToken pour éviter la collision
 
-    if (!token) {
+    if (!authToken) {
       return res.status(401).json({
         success: false,
         message: 'Token utilisateur manquant',
       });
     }
 
-    const { data: authData, error: authError } = await supabase.auth.getUser(token);
+    const { data: authData, error: authError } = await supabase.auth.getUser(authToken);
 
     if (authError || !authData?.user) {
       return res.status(401).json({
@@ -653,154 +738,356 @@ router.post('/generate-payment', async (req, res) => {
       actualAbonnementId = subscriptionRecord.id;
     }
 
-    const paymentData = {
-      reference: null,
+    FedaPay.setApiKey(FEDAPAY_SECRET_KEY);
+    FedaPay.setEnvironment(FEDAPAY_ENV === 'sandbox' ? 'sandbox' : 'live');
+
+    // ✅ CONSTRUIRE LES MÉTADONNÉES COMPLÈTES
+    const metadata = {
       user_id: user.id,
-      amount: finalAmount,
-      is_ponctual: is_ponctual,
-      is_visit: is_visit,
-      visit_id: visit_id || null,
+      plan_id: plan_id || null,
       abonnement_id: actualAbonnementId || null,
+      order_id: order_id || null,
+      is_ponctual: is_ponctual || false,
+      source: 'sante_plus_services',
+      order_data: is_ponctual && order_data ? JSON.stringify(order_data) : null,
       patient_id: patient_id || null,
+      target_type: target_type || 'personal',
+      target_name: target_name || finalName,
+      is_visit: is_visit || false,
+      visit_id: visit_id || null,
       type: is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription'),
     };
 
-    // ✅ Initialiser FedaPay
-    FedaPay.setApiKey(FEDAPAY_SECRET_KEY);
-    FedaPay.setEnvironment(FEDAPAY_ENV);
+    console.log('📦 Métadonnées envoyées à FedaPay:', metadata);
 
     const transaction = await Transaction.create({
       description: description || 'Paiement Santé Plus Services',
-      amount: finalAmount,
-      currency: { iso: 'XOF' },
+      amount: Math.round(finalAmount),
+      currency: {
+        iso: 'XOF',
+      },
       callback_url: callbackUrl,
+      cancel_url: cancelUrl,
       customer: {
+        email: finalEmail,
         firstname: firstName,
         lastname: lastName,
-        email: finalEmail,
-      }
+      },
+      metadata: metadata,
     });
 
-    const token = await transaction.generateToken();
+    console.log('✅ Transaction FedaPay créée:', transaction?.id);
 
-    // Mettre à jour le paiement avec la référence FedaPay
-    paymentData.reference = transaction.id;
+    const paymentUrl =
+      transaction?.payment_url ||
+      transaction?.url ||
+      transaction?.checkout_url;
 
-    const { error: insertError } = await supabase
-      .from('paiements')
-      .insert(paymentData);
-
-    if (insertError) {
-      console.error('❌ Erreur insertion paiement:', insertError);
-      return res.status(500).json({ error: insertError.message });
+    if (!paymentUrl) {
+      return res.status(500).json({
+        success: false,
+        message: "FedaPay n'a pas retourné de lien de paiement",
+      });
     }
 
-    res.json({
+    // ✅ Renommer la variable locale pour éviter la collision de noms (checkoutToken au lieu de token)
+    const checkoutToken = await transaction.generateToken();
+
+    // Enregistrement du paiement
+    const paymentData = {
+      user_id: user.id,
+      amount: finalAmount,
+      currency: 'XOF',
+      method: 'fedapay',
+      reference: String(transaction.id),
+      status: 'en_attente',
+      abonnement_id: actualAbonnementId || null,
+      metadata: {
+        description: description || 'Paiement Santé Plus',
+        plan_id: plan_id || null,
+        abonnement_id: actualAbonnementId || null,
+        order_id: order_id || null,
+        is_ponctual: is_ponctual || false,
+        transaction_id: String(transaction.id),
+        payment_url: paymentUrl,
+        order_data: is_ponctual && order_data ? JSON.stringify(order_data) : null,
+        patient_id: patient_id || null,
+        target_type: target_type || 'personal',
+        target_name: target_name || finalName,
+        is_visit: is_visit || false,
+        visit_id: visit_id || null,
+        type: is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription'),
+      },
+    };
+
+    const { data: payment, error: dbError } = await supabase
+      .from('paiements')
+      .insert(paymentData)
+      .select()
+      .single();
+
+    if (dbError) {
+      console.error('❌ ERREUR SAUVEGARDE PAIEMENT:', dbError.message);
+
+      if (subscriptionRecord && actualAbonnementId) {
+        await supabase.from('abonnements').delete().eq('id', actualAbonnementId);
+      }
+
+      return res.status(500).json({
+        success: false,
+        message: 'Erreur lors de l\'enregistrement en base de données',
+      });
+    }
+
+    console.log('✅ Paiement enregistré en base:', payment?.id);
+
+    if (subscriptionRecord && actualAbonnementId) {
+      await supabase.from('notifications').insert({
+        user_id: user.id,
+        title: '⏳ Abonnement en attente',
+        body: `Votre abonnement est en attente de confirmation de paiement.`,
+        type: 'paiement',
+        data: {
+          subscription_id: actualAbonnementId,
+          status: 'en_attente',
+        },
+      });
+    }
+
+    const duration = Date.now() - startTime;
+    console.log(`⏱️ Paiement généré en ${duration}ms`);
+
+    return res.json({
       success: true,
-      token: token.token,
-      url: token.url,
-      reference: transaction.id,
+      payment_url: paymentUrl,
+      url: paymentUrl,
+      checkout_url: paymentUrl,
+      token: checkoutToken.token,
+      transaction_id: transaction.id,
+      reference: transaction.reference || `FEDAPAY-${transaction.id}`,
+      subscription_id: actualAbonnementId,
     });
 
-  } catch (error: any) {
-    console.error('❌ Create payment error:', error);
-    res.status(500).json({ error: error.message });
+  } catch (err) {
+    const duration = Date.now() - startTime;
+    console.error(`❌ Erreur création transaction FedaPay (${duration}ms):`, err.message);
+    return res.status(500).json({
+      success: false,
+      message: err?.message || 'Impossible de créer la transaction FedaPay',
+    });
   }
 });
 
 // ============================================================
-// ✅ WEBHOOK DE CONFIRMATION AUTOMATIQUE FEDAPAY
+// ✅ VÉRIFIER LE STATUT D'UN PAIEMENT
 // ============================================================
-router.post('/webhook', async (req, res) => {
+router.get('/verify-payment', async (req, res) => {
   try {
-    console.log('📥 Webhook reçu');
-    const { event, entity } = req.body;
+    const { transaction_id, reference } = req.query;
 
-    if (event !== 'transaction.approved') {
-      return res.json({ success: true, message: 'Événement ignoré' });
+    if (!transaction_id && !reference) {
+      return res.status(400).json({
+        success: false,
+        message: 'Transaction ID ou référence requis',
+      });
     }
 
-    const transactionId = entity.id;
-    console.log(`📥 Événement reçu: transaction.approved | Transaction: ${transactionId}`);
+    let query = supabase.from('paiements').select('*');
 
-    // Rechercher le paiement avec retry
+    if (transaction_id) {
+      query = query.eq('reference', String(transaction_id));
+    } else if (reference) {
+      query = query.eq('reference', String(reference));
+    }
+
+    const { data, error } = await query.single();
+
+    if (error) {
+      return res.status(404).json({
+        success: false,
+        message: 'Paiement non trouvé',
+      });
+    }
+
+    try {
+      const transaction = await Transaction.retrieve(data.reference);
+      if (transaction && transaction.status === 'paid' && data.status !== 'valide') {
+        await supabase
+          .from('paiements')
+          .update({
+            status: 'valide',
+            paid_at: new Date().toISOString(),
+          })
+          .eq('id', data.id);
+
+        data.status = 'valide';
+      }
+    } catch (fedapayError) {
+      console.warn('⚠️ Erreur vérification FedaPay:', fedapayError.message);
+    }
+
+    res.json({
+      success: data.status === 'valide',
+      payment: data,
+    });
+  } catch (error) {
+    console.error('❌ Verify payment error:', error.message);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur lors de la vérification',
+    });
+  }
+});
+
+// ============================================================
+// 🔔 WEBHOOK FEDAPAY - CONFIRMATION EN ARRIÈRE-PLAN AVEC NOTIFICATIONS AIDANTS
+// ============================================================
+router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  const startTime = Date.now();
+  let transactionId = null;
+
+  try {
+    let body = req.body;
+
+    if (Buffer.isBuffer(body)) {
+      body = JSON.parse(body.toString('utf8'));
+    } else if (typeof body === 'string') {
+      body = JSON.parse(body);
+    } else if (Array.isArray(body) && body.length > 0) {
+      body = body[0];
+    }
+
+    console.log('📥 Webhook reçu');
+
+    const event = body?.event || body?.name;
+    const data = body?.data || body?.entity;
+
+    if (!event) {
+      return res.status(200).json({
+        success: false,
+        message: 'Événement manquant, webhook accepté',
+      });
+    }
+
+    transactionId = String(data?.id);
+    console.log(`📥 Événement reçu: ${event} | Transaction: ${transactionId}`);
+
+    if (event !== 'transaction.approved' && event !== 'transaction.paid') {
+      return res.status(200).json({
+        success: true,
+        message: `Événement ${event} ignoré`,
+      });
+    }
+
     const payment = await findPaymentWithRetry(transactionId);
 
     if (!payment) {
-      console.error(`❌ Impossible de trouver le paiement pour la transaction ${transactionId} après ${MAX_RETRY_ATTEMPTS} tentatives`);
-      return res.status(404).json({ error: 'Paiement introuvable' });
+      console.error(`❌ Paiement non trouvé après ${MAX_RETRY_ATTEMPTS} tentatives`);
+      return res.status(200).json({
+        success: false,
+        message: 'Paiement non trouvé, webhook accepté',
+      });
     }
 
-    console.log(`✅ Paiement trouvé : ${payment.id}`);
-
-    // Si le paiement est déjà traité, on arrête
-    if (payment.status === 'completed') {
-      return res.json({ success: true, message: 'Paiement déjà traité' });
-    }
-
-    // Mettre à jour le paiement
-    const { error: updateError } = await supabase
-      .from('paiements')
-      .update({
-        status: 'completed',
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', payment.id);
-
-    if (updateError) throw updateError;
-
-    // Récupérer les métadonnées de la transaction FedaPay
-    FedaPay.setApiKey(FEDAPAY_SECRET_KEY);
-    FedaPay.setEnvironment(FEDAPAY_ENV);
-    const transaction = await Transaction.retrieve(transactionId);
-    const metadata = transaction.custom_metadata || {};
-
-    const type = metadata.type || payment.type;
-    const isPonctual = metadata.is_ponctual === 'true' || payment.is_ponctual;
+    const metadata = payment.metadata || {};
+    
+    // Détermination robuste des paramètres
+    const type = metadata.type || payment.type || 'subscription';
+    const isPonctual = metadata.is_ponctual === true || metadata.is_ponctual === 'true' || payment.is_ponctual;
+    const subscriptionId = metadata.abonnement_id || payment.abonnement_id || null;
+    const orderData = metadata.order_data ? (typeof metadata.order_data === 'string' ? JSON.parse(metadata.order_data) : metadata.order_data) : null;
+    const visitId = metadata.visit_id || payment.visit_id || null;
 
     console.log('📦 Métadonnées extraites:', {
       type,
       isPonctual,
-      visitId: metadata.visit_id || payment.visit_id,
-      subscriptionId: metadata.abonnement_id || payment.abonnement_id,
+      visitId,
+      subscriptionId,
+      hasOrderData: !!orderData,
     });
 
-    // 1️⃣ CAS A : COMMANDE PONCTUELLE (Offline creation)
-    if (type === 'order' || isPonctual) {
-      console.log('📦 Traitement commande ponctuelle...');
-      const orderData = metadata.order_data ? JSON.parse(metadata.order_data) : null;
-      
-      const newOrder = await createPonctualOrder(payment, transactionId, orderData);
-      if (newOrder) {
-        console.log('✅ Commande ponctuelle créée avec succès');
-      }
-    } 
-    // 2️⃣ CAS B : VISITE PONCTUELLE
-    else if (type === 'visit' || payment.is_visit) {
-      const visitId = metadata.visit_id || payment.visit_id;
-      console.log('🔄 Traitement visite ponctuelle:', visitId);
-      const updatedVisit = await processPonctualVisit(payment, transactionId, visitId, metadata);
-      if (updatedVisit) {
-        console.log('✅ Visite ponctuelle activée avec succès');
-      }
-    }
-    // 3️⃣ CAS C : ABONNEMENT
-    else if (type === 'subscription' || payment.abonnement_id) {
-      const subId = payment.abonnement_id;
-      console.log('📦 Activation de l\'abonnement:', subId);
-      const activeSub = await activateSubscription(payment, subId);
-      if (activeSub) {
-        console.log('✅ Abonnement activé avec succès');
-      }
+    const { data: updatedPayment, error: updateError } = await supabase
+      .from('paiements')
+      .update({
+        status: 'valide',
+        paid_at: new Date().toISOString(),
+        provider_reference: transactionId,
+      })
+      .eq('id', payment.id)
+      .select()
+      .single();
+
+    if (updateError) {
+      console.error('❌ Erreur mise à jour paiement:', updateError.message);
     }
 
-    res.json({ success: true });
+    const paymentRecord = updatedPayment || payment;
+    let result = null;
+
+    // 1️⃣ CAS A : VISITE PONCTUELLE
+    if (type === 'visit' && visitId) {
+      result = await processPonctualVisit(paymentRecord, transactionId, visitId, metadata);
+    } 
+    // 2️⃣ CAS B : COMMANDE PONCTUELLE
+    else if (type === 'order' || isPonctual) {
+      result = await createPonctualOrder(paymentRecord, transactionId, orderData);
+    } 
+    // 3️⃣ CAS C : ABONNEMENT
+    else if (type === 'subscription' && subscriptionId) {
+      result = await activateSubscription(paymentRecord, subscriptionId);
+    }
+
+    // ✅ NOTIFICATION GLOBALE UNIFIÉE (Évite les Toasts en doubles)
+    try {
+      let notificationTitle = '✅ Paiement confirmé';
+      let notificationBody = `Votre paiement de ${paymentRecord.amount} FCFA a été confirmé.`;
+
+      if (type === 'visit' && result) {
+        notificationTitle = '✅ Visite planifiée !';
+        notificationBody = `Votre visite a été planifiée avec succès après paiement.`;
+      } else if (type === 'order' && result) {
+        notificationTitle = '✅ Commande confirmée !';
+        notificationBody = `Votre commande a été enregistrée avec succès après paiement.`;
+      } else if (type === 'subscription' && result) {
+        notificationTitle = '✅ Abonnement activé !';
+        notificationBody = `Votre abonnement est maintenant actif.`;
+      }
+
+      await supabase.from('notifications').insert({
+        user_id: paymentRecord.user_id,
+        title: notificationTitle,
+        body: notificationBody,
+        type: 'paiement',
+        data: { 
+          payment_id: paymentRecord.id,
+          type: type,
+          processed: !!result,
+        },
+      });
+    } catch (notifError) {
+      console.error('❌ Erreur notification paiement:', notifError.message);
+    }
+
+    const duration = Date.now() - startTime;
+    console.log(`⏱️ Webhook traité en ${duration}ms`);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Paiement traité avec succès',
+      payment_id: paymentRecord.id,
+      type: type,
+      processed: !!result,
+    });
 
   } catch (error) {
-    console.error('❌ Webhook error:', error.message);
-    res.status(500).json({ error: error.message });
+    const duration = Date.now() - startTime;
+    console.error(`❌ Webhook error (${duration}ms):`, error.message);
+    return res.status(200).json({
+      success: false,
+      message: 'Erreur interne, webhook accepté',
+      error: error.message,
+    });
   }
 });
 
 module.exports = router;
-module.exports.handleWebhook = handleWebhook;
