@@ -1112,6 +1112,7 @@ router.post('/admin/assign-aidant', roleMiddleware(['admin', 'coordinator']), as
 // =============================================
 // ✅ CONFIRMER PAIEMENT - BROUILLON → PLANIFIEE
 // =============================================
+ 
 router.post('/:id/confirm-payment', async (req, res) => {
   try {
     const { id } = req.params;
@@ -1140,33 +1141,40 @@ router.post('/:id/confirm-payment', async (req, res) => {
     const targetType = visit.patient_id ? 'patient' : 'personal_account';
     const targetId = visit.patient_id || visit.user_id;
 
-    let aidantId = visit.aidant_id || null;
+    // ✅ CORRECTION : Récupérer l'aidant depuis aidant_id OU metadata.selected_aidant
+    let aidantId = visit.aidant_id || visit.metadata?.selected_aidant || null;
 
+    // ✅ Si un aidant est trouvé dans metadata.selected_aidant, le convertir
     if (aidantId) {
       const convertedId = await getAidantIdFromUserIdOrId(aidantId);
       if (convertedId) {
         aidantId = convertedId;
+        console.log(`🔄 Aidant sélectionné dans wizard récupéré: ${aidantId}`);
       } else {
+        // Si l'aidant n'existe plus, on le remet à null
         aidantId = null;
+        console.warn(`⚠️ Aidant sélectionné dans wizard introuvable, réassignation automatique`);
       }
     }
 
+    // ✅ Si toujours pas d'aidant, essayer d'en trouver un automatiquement
     if (!aidantId) {
       let foundId = await getActiveAidantForTarget(targetType, targetId, familyId);
       if (foundId) {
         const convertedId = await getAidantIdFromUserIdOrId(foundId);
         if (convertedId) {
           aidantId = convertedId;
-          console.log(`✅ Aidant trouvé après paiement: ${aidantId}`);
+          console.log(`✅ Aidant automatique trouvé après paiement: ${aidantId}`);
         }
       }
     }
 
+    // ✅ Mettre à jour la visite avec l'aidant trouvé
     const { data: updatedVisit, error: updateError } = await supabase
       .from('visites')
       .update({
         status: 'planifiee',
-        aidant_id: aidantId,
+        aidant_id: aidantId, // ← Maintenant l'aidant du wizard est bien assigné !
         metadata: {
           ...(visit.metadata || {}),
           payment_confirmed_at: new Date().toISOString(),
@@ -1174,6 +1182,8 @@ router.post('/:id/confirm-payment', async (req, res) => {
           scheduled_from_draft: true,
           payment_completed: true,
           aidant_assigned_after_payment: !!aidantId,
+           selected_aidant: null, // On nettoie car maintenant officiellement assigné
+          wizard_choice: null,
         }
       })
       .eq('id', id)
@@ -1206,6 +1216,7 @@ router.post('/:id/confirm-payment', async (req, res) => {
 
     const targetDisplay = updatedVisit.target_name || (updatedVisit.patient ? `${updatedVisit.patient.first_name} ${updatedVisit.patient.last_name}` : 'Personnel');
 
+    // ✅ Notification à l'aidant s'il a été assigné
     if (aidantId) {
       await createNotification({
         userId: aidantId,
@@ -1219,7 +1230,7 @@ router.post('/:id/confirm-payment', async (req, res) => {
     await createNotification({
       userId: userId,
       title: '✅ Visite planifiée !',
-      body: `Votre visite pour ${targetDisplay} a été planifiée avec succès.`,
+      body: `Votre visite pour ${targetDisplay} a été planifiée avec succès${aidantId ? ' et un aidant a été assigné' : ''}.`,
       type: 'visite',
       data: { visit_id: id, status: 'planifiee' },
     });
@@ -1227,6 +1238,7 @@ router.post('/:id/confirm-payment', async (req, res) => {
     res.json({ 
       success: true, 
       visit: updatedVisit,
+      aidant_assigned: !!aidantId,
       message: `Visite planifiée avec succès après paiement${aidantId ? ' et aidant assigné' : ''}`,
     });
   } catch (error) {
@@ -1234,7 +1246,6 @@ router.post('/:id/confirm-payment', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
 // =============================================
 // ✅ OBTENIR LE PRIX D'UNE VISITE PONCTUELLE
 // =============================================
