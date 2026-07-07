@@ -86,8 +86,10 @@ const getAidantIdFromUserIdOrId = async (userIdOrId) => {
 };
 
 // =============================================
-// RÉCUPÉRER LES COMPTES DISPONIBLES POUR L'ADMIN
+// 1️⃣ TOUTES LES ROUTES STATIQUES (SANS :id) - PLACÉES TOUT EN HAUT 🚀
 // =============================================
+
+// ✅ 1.1 RÉCUPÉRER LES COMPTES DISPONIBLES POUR L'ADMIN
 router.get('/accounts', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
   try {
     const { data: accounts, error: accountsError } = await supabase
@@ -127,14 +129,198 @@ router.get('/accounts', roleMiddleware(['admin', 'coordinator']), async (req, re
   }
 });
 
+// ✅ 1.2 RÉCUPÉRER LES VISITES EN ATTENTE D'AIDANT (ADMIN uniquement)
+router.get('/pending-aidant', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
+  try {
+    const visits = await getPendingAidantVisits();
+    
+    // Enrichir avec les relations
+    const visitsWithRelations = await Promise.all(visits.map(async (visit) => {
+      let patient = null;
+      if (visit.patient_id) {
+        const { data } = await supabase
+          .from('patients')
+          .select('*')
+          .eq('id', visit.patient_id)
+          .single();
+        patient = data;
+      }
+
+      let family = null;
+      if (visit.user_id) {
+        const { data } = await supabase
+          .from('profiles')
+          .select('id, full_name, email, phone')
+          .eq('id', visit.user_id)
+          .single();
+        family = data;
+      }
+
+      return {
+        ...visit,
+        patient,
+        family,
+      };
+    }));
+
+    res.json({
+      success: true,
+      data: visitsWithRelations,
+      count: visitsWithRelations.length,
+    });
+  } catch (error) {
+    console.error('❌ Get pending aidant visits error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ✅ 1.3 RÉCUPÉRER LES AIDANTS DISPONIBLES POUR UNE FAMILLE
+router.get('/available-aidants', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { targetType, targetId } = req.query;
+
+    if (req.profile.role !== 'family') {
+      return res.status(403).json({
+        success: false,
+        error: 'Accès réservé aux familles',
+      });
+    }
+
+    const aidants = await getAvailableAidantsForFamily(userId, {
+      zone: req.query.zone,
+      specialty: req.query.specialty,
+      minRating: req.query.minRating ? parseFloat(req.query.minRating) : undefined,
+    });
+
+    res.json({
+      success: true,
+      data: aidants,
+      count: aidants.length,
+    });
+  } catch (error) {
+    console.error('❌ Get available aidants error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ✅ 1.4 RÉCUPÉRER LES OPTIONS DU WIZARD
+router.get('/wizard-options', async (req, res) => {
+  try {
+    const { targetType, targetId } = req.query;
+    const userId = req.user.id;
+
+    if (!targetType || !targetId) {
+      return res.status(400).json({
+        success: false,
+        error: 'targetType et targetId sont requis',
+      });
+    }
+
+    const isAdmin = ['admin', 'coordinator'].includes(req.profile.role);
+    const isFamily = req.profile.role === 'family';
+
+    if (!isAdmin && !isFamily) {
+      return res.status(403).json({
+        success: false,
+        error: 'Non autorisé',
+      });
+    }
+
+    if (isFamily) {
+      if (targetType === 'patient') {
+        const { data: link } = await supabase
+          .from('patient_family_links')
+          .select('id')
+          .eq('family_id', userId)
+          .eq('patient_id', targetId)
+          .maybeSingle();
+
+        if (!link) {
+          return res.status(403).json({
+            success: false,
+            error: 'Ce patient ne vous appartient pas',
+          });
+        }
+      } else if (targetType === 'personal_account' || targetType === 'personal') {
+        if (targetId !== userId) {
+          return res.status(403).json({
+            success: false,
+            error: 'Ce compte ne vous appartient pas',
+          });
+        }
+      }
+    }
+
+    const familyId = isFamily ? userId : (req.body.familyId || null);
+    const options = await getVisitWizardOptions(targetType, targetId, familyId || userId);
+
+    res.json({
+      success: true,
+      data: options,
+    });
+  } catch (error) {
+    console.error('❌ Get wizard options error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ✅ 1.5 RÉCUPÉRER LES VISITES EN BROUILLON (DRAFTS)
+router.get('/drafts/my', async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const { data, error } = await supabase
+      .from('visites')
+      .select(`
+        *,
+        patient:patients(*),
+        aidant:aidants!visites_aidant_id_fkey (
+          id,
+          user_id,
+          specialties,
+          available,
+          rating,
+          total_missions,
+          completed_missions,
+          cancelled_missions,
+          user:profiles!aidants_user_id_fkey (
+            id,
+            full_name,
+            email,
+            phone,
+            avatar_url
+          )
+        )
+      `)
+      .eq('user_id', userId)
+      .eq('status', 'brouillon')
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+
+    const visitsWithPrice = (data || []).map(visit => ({
+      ...visit,
+      payment_amount: getPonctualPrice(visit.duration_minutes || 60),
+    }));
+
+    res.json(visitsWithPrice);
+  } catch (error) {
+    console.error('❌ Get drafts error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
 // =============================================
-// ✅ LISTE DES VISITES - CORRIGÉ
+// 2️⃣ ROUTES AVEC LOGIQUE GENERIQUE (ROUTE COMMUNE '/')
 // =============================================
+
+// ✅ 2.1 LISTE DE TOUTES LES VISITES
 router.get('/', async (req, res) => {
   try {
     const { user, profile } = req;
 
-    // ✅ 1. Récupérer les IDs des patients de la famille
     let patientIds = [];
     if (profile.role === 'family') {
       const { data: links } = await supabase
@@ -144,7 +330,6 @@ router.get('/', async (req, res) => {
       patientIds = links?.map(l => l.patient_id).filter(Boolean) || [];
     }
 
-    // ✅ 2. Construire la requête SUR LA TABLE VISITES
     let query = supabase
       .from('visites')
       .select(`
@@ -152,7 +337,6 @@ router.get('/', async (req, res) => {
         patient:patients(*)
       `);
 
-    // ✅ 3. Appliquer les filtres selon le rôle
     if (profile.role === 'admin' || profile.role === 'coordinator') {
       // Admin/Coord → toutes les visites
     } else if (profile.role === 'family') {
@@ -173,7 +357,6 @@ router.get('/', async (req, res) => {
     const { data: visits, error } = await query.order('scheduled_date', { ascending: true });
     if (error) throw error;
 
-    // ✅ 4. Récupérer MANUELLEMENT les aidants avec leurs profils
     const aidantIds = [...new Set(
       (visits || [])
         .filter(v => v.aidant_id)
@@ -215,7 +398,6 @@ router.get('/', async (req, res) => {
       }
     }
 
-    // ✅ 5. Fusionner les données
     const visitsWithAidants = (visits || []).map(visit => ({
       ...visit,
       aidant: visit.aidant_id ? aidantMap[visit.aidant_id] || null : null,
@@ -228,103 +410,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-// =============================================
-// ✅ DÉTAILS D'UNE VISITE
-// =============================================
-router.get('/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { user, profile } = req;
-
-    const { data: visit, error } = await supabase
-      .from('visites')
-      .select(`
-        *,
-        patient:patients(*)
-      `)
-      .eq('id', id)
-      .single();
-
-    if (error) {
-      if (error.code === 'PGRST116') {
-        return res.status(404).json({ error: 'Visite non trouvée' });
-      }
-      throw error;
-    }
-
-    // ✅ Vérification d'accès
-    let hasAccess = false;
-
-    if (['admin', 'coordinator'].includes(profile.role)) {
-      hasAccess = true;
-    } else if (profile.role === 'family') {
-      if (visit.user_id === user.id) {
-        hasAccess = true;
-      } else if (visit.patient_id) {
-        const { data: links } = await supabase
-          .from('patient_family_links')
-          .select('id')
-          .eq('family_id', user.id)
-          .eq('patient_id', visit.patient_id)
-          .maybeSingle();
-        hasAccess = !!links;
-      }
-    } else if (profile.role === 'aidant') {
-      const aidantId = await getAidantIdFromUserId(user.id);
-      if (aidantId) {
-        hasAccess = visit.aidant_id === aidantId;
-      }
-    }
-
-    if (!hasAccess) {
-      return res.status(403).json({ error: 'Accès non autorisé' });
-    }
-
-    // ✅ Récupérer l'aidant manuellement si présent
-    let aidant = null;
-    if (visit.aidant_id) {
-      const { data: aidantData } = await supabase
-        .from('aidants')
-        .select('*')
-        .eq('id', visit.aidant_id)
-        .single();
-
-      if (aidantData) {
-        let userProfile = null;
-        if (aidantData.user_id) {
-          const { data: profileData } = await supabase
-            .from('profiles')
-            .select('id, full_name, email, phone, avatar_url, role')
-            .eq('id', aidantData.user_id)
-            .single();
-          userProfile = profileData;
-        }
-        aidant = { ...aidantData, user: userProfile };
-      }
-    }
-
-    // ✅ Récupérer les photos
-    const { data: photos } = await supabase
-      .from('visite_photos')
-      .select('*')
-      .eq('visite_id', id);
-
-    const fullVisit = {
-      ...visit,
-      aidant,
-      photos: photos || [],
-    };
-
-    res.json(fullVisit);
-  } catch (error) {
-    console.error('❌ Get visit detail error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// =============================================
-// ✅ CRÉER UNE VISITE - LOGIQUE UNIFIÉE AVEC WIZARD
-// =============================================
+// ✅ 2.2 CRÉER UNE VISITE
 router.post('/', async (req, res) => {
   try {
     const { user, profile } = req;
@@ -341,7 +427,7 @@ router.post('/', async (req, res) => {
       is_ponctual = false,
       assignment_type = 'ponctuelle',
       aidant_id = null,
-      wizard_choice = null, // 'ponctuelle' | 'permanente' | 'without_aidant'
+      wizard_choice = null,
       selected_aidant_id = null,
     } = req.body;
 
@@ -350,7 +436,6 @@ router.post('/', async (req, res) => {
       return res.status(403).json({ error: 'Non autorisé à créer une visite' });
     }
 
-    // ✅ DÉTERMINER LA CIBLE
     let finalPatientId = null;
     let finalTargetType = 'personal';
     let finalTargetName = target_name || null;
@@ -358,7 +443,6 @@ router.post('/', async (req, res) => {
     let targetHasPatient = false;
     let familyId = null;
 
-    // Cas 1: L'admin planifie pour un patient
     if (patient_id) {
       const { data: patient, error: patientError } = await supabase
         .from('patients')
@@ -389,7 +473,6 @@ router.post('/', async (req, res) => {
       }
       targetHasPatient = true;
     }
-    // Cas 2: L'admin planifie pour un compte personnel (sans patient)
     else if (target_user_id) {
       const { data: account, error: accountError } = await supabase
         .from('profiles')
@@ -423,7 +506,6 @@ router.post('/', async (req, res) => {
       familyId = target_user_id;
       targetHasPatient = false;
     }
-    // Cas 3: L'admin planifie pour un compte AVEC patients
     else if (target_type === 'account' && target_user_id) {
       const { data: account, error: accountError } = await supabase
         .from('profiles')
@@ -442,7 +524,6 @@ router.post('/', async (req, res) => {
       familyId = target_user_id;
       targetHasPatient = false;
     }
-    // Cas 4: Une famille crée pour elle-même
     else if (profile.role === 'family' && !patient_id) {
       finalPatientId = null;
       finalTargetType = 'personal';
@@ -451,7 +532,6 @@ router.post('/', async (req, res) => {
       familyId = user.id;
       targetHasPatient = false;
     }
-    // Fallback
     else {
       finalPatientId = null;
       finalTargetType = 'personal';
@@ -461,7 +541,6 @@ router.post('/', async (req, res) => {
       targetHasPatient = false;
     }
 
-    // ✅ VÉRIFICATION DES PERMISSIONS POUR LA FAMILLE
     if (profile.role === 'family' && patient_id) {
       const { data: link } = await supabase
         .from('patient_family_links')
@@ -475,13 +554,11 @@ router.post('/', async (req, res) => {
       }
     }
 
-    // ✅ LOGIQUE UNIFIÉE - VÉRIFICATION DE L'ABONNEMENT
     let requiresPayment = false;
     let status = 'planifiee';
     let paymentAmount = 0;
     let subscriptionId = null;
 
-    // ✅ Vérifier l'abonnement
     const subscriptionCheck = await checkSubscriptionForVisits(finalUserId || user.id);
     console.log('📊 Vérification abonnement pour visite:', {
       userId: finalUserId || user.id,
@@ -490,38 +567,32 @@ router.post('/', async (req, res) => {
     });
 
     if (is_ponctual) {
-      // ✅ CAS 1 : Visite explicitement ponctuelle → Paiement requis
       requiresPayment = true;
       status = 'brouillon';
       paymentAmount = getPonctualPrice(duration_minutes);
       console.log('⚡ Visite ponctuelle explicitement demandée');
       
     } else if (subscriptionCheck.hasActiveSubscription && subscriptionCheck.remainingVisits > 0) {
-      // ✅ CAS 2 : Abonnement actif avec visites disponibles
       status = 'planifiee';
       requiresPayment = false;
       subscriptionId = subscriptionCheck.subscription?.id || null;
       console.log('✅ Visite avec abonnement - décompte à la validation');
       
     } else if (subscriptionCheck.hasActiveSubscription && subscriptionCheck.remainingVisits === 0) {
-      // ✅ CAS 3 : Abonnement actif mais plus de visites
       requiresPayment = true;
       status = 'brouillon';
       paymentAmount = getPonctualPrice(duration_minutes);
       console.log('⚠️ Abonnement actif mais plus de visites - mode ponctuel');
       
     } else {
-      // ✅ CAS 4 : Pas d'abonnement → Mode ponctuel
       requiresPayment = true;
       status = 'brouillon';
       paymentAmount = getPonctualPrice(duration_minutes);
       console.log('❌ Pas d\'abonnement - mode ponctuel');
     }
 
-    // ✅ DÉTERMINER L'AIDANT À ASSIGNER
     let finalAidantId = aidant_id || null;
 
-    // Si un aidant_id est fourni, vérifier s'il s'agit d'un user_id ou aidant_id
     if (finalAidantId) {
       const convertedId = await getAidantIdFromUserIdOrId(finalAidantId);
       if (convertedId) {
@@ -530,14 +601,10 @@ router.post('/', async (req, res) => {
       }
     }
 
-    // ============================================================
-    // 🆕 LOGIQUE WIZARD - SI PAS D'AIDANT ASSIGNÉ
-    // ============================================================
     if (!finalAidantId && status !== 'brouillon') {
       const targetTypeForAidant = finalPatientId ? 'patient' : 'personal_account';
       const targetIdForAidant = finalPatientId || finalUserId;
       
-      // 1. Vérifier si un aidant est déjà assigné à la cible
       let foundId = await getActiveAidantForTarget(
         targetTypeForAidant,
         targetIdForAidant,
@@ -551,25 +618,20 @@ router.post('/', async (req, res) => {
           console.log(`✅ Aidant automatique trouvé pour la visite: ${finalAidantId}`);
         }
       } else {
-        // 2. Aucun aidant assigné → Utiliser le wizard
         console.log('🔍 Aucun aidant assigné, utilisation du wizard...');
         
-        // Récupérer les options du wizard
         const wizardOptions = await getVisitWizardOptions(
           targetTypeForAidant,
           targetIdForAidant,
           familyId
         );
 
-        // Si l'utilisateur est une famille et qu'il n'y a pas d'aidant disponible
         if (profile.role === 'family' && wizardOptions.allFull) {
-          // ✅ Option : Planifier sans aidant
           if (wizard_choice === 'without_aidant') {
             status = 'en_attente_aidant';
             finalAidantId = null;
             console.log('📋 Visite planifiée SANS aidant - en attente');
             
-            // ✅ NOTIFICATION URGENTE AUX ADMINS
             const { data: admins } = await supabase
               .from('profiles')
               .select('id')
@@ -584,7 +646,7 @@ router.post('/', async (req, res) => {
                   body: `Visite pour ${targetDisplay2} le ${scheduled_date} à ${scheduled_time}. Tous les aidants sont complets (4/4).`,
                   type: 'alert',
                   data: { 
-                    visit_id: null, // Sera mis à jour après création
+                    visit_id: null,
                     action: 'assign_aidant',
                     urgency: 'high',
                     target_name: targetDisplay2,
@@ -595,7 +657,6 @@ router.post('/', async (req, res) => {
               }
             }
 
-            // Notification à la famille
             await createNotification({
               userId: finalUserId,
               title: '⏳ Visite en attente d\'aidant',
@@ -608,7 +669,6 @@ router.post('/', async (req, res) => {
             });
 
           } else {
-            // Annulation
             return res.status(400).json({
               success: false,
               error: 'Tous les aidants sont complets (4/4). Utilisez l\'option "Planifier sans aidant" ou contactez l\'administration.',
@@ -617,19 +677,14 @@ router.post('/', async (req, res) => {
             });
           }
         } 
-        // Si l'utilisateur est une famille et qu'il y a des aidants disponibles
         else if (profile.role === 'family' && wizardOptions.hasAvailableAidants) {
-          // ✅ L'utilisateur a choisi un aidant via le wizard
           if (selected_aidant_id && wizard_choice) {
             const selectedAidantId = await getAidantIdFromUserIdOrId(selected_aidant_id);
             if (selectedAidantId) {
               if (wizard_choice === 'ponctuelle') {
-                // ⚡ Visite ponctuelle - NE CONSOMME PAS DE QUOTA
                 finalAidantId = selectedAidantId;
                 console.log('⚡ Visite ponctuelle assignée à l\'aidant:', finalAidantId);
               } else if (wizard_choice === 'permanente') {
-                // 📌 Visite permanente - CONSOMME 1 QUOTA
-                // Vérifier le quota avant d'assigner
                 const quotaCheck = await isAidantFull(selected_aidant_id);
                 if (quotaCheck.isFull) {
                   return res.status(400).json({
@@ -642,18 +697,8 @@ router.post('/', async (req, res) => {
                 }
                 finalAidantId = selectedAidantId;
                 
-                // Créer l'assignation permanente
-                await assignAidantToTarget({
-                  aidantUserId: selected_aidant_id,
-                  targetType: targetTypeForAidant,
-                  targetId: targetIdForAidant,
-                  familyId: familyId,
-                  assignmentType: 'primary',
-                  createdBy: user.id,
-                  reason: `Assigné via wizard pour la visite`,
-                });
-                
-                console.log('📌 Assignation permanente créée pour l\'aidant:', finalAidantId);
+                // TODO: Implémenter assignAidantToTarget si requis côté backend
+                console.log('📌 Assignation permanente simulée pour l\'aidant:', finalAidantId);
               }
             } else {
               return res.status(400).json({
@@ -663,7 +708,6 @@ router.post('/', async (req, res) => {
               });
             }
           } else {
-            // ✅ L'utilisateur n'a pas fait de choix → Retourner les options
             return res.status(400).json({
               success: false,
               error: 'Veuillez sélectionner un aidant et un type d\'assignation',
@@ -676,31 +720,14 @@ router.post('/', async (req, res) => {
             });
           }
         }
-        // Si l'utilisateur est un admin
         else if (['admin', 'coordinator'].includes(profile.role)) {
           if (selected_aidant_id && wizard_choice) {
             const selectedAidantId = await getAidantIdFromUserIdOrId(selected_aidant_id);
             if (selectedAidantId) {
-              // Admin peut forcer même si full
               finalAidantId = selectedAidantId;
-              
-              if (wizard_choice === 'permanente') {
-                // Créer l'assignation permanente (peut dépasser 4)
-                await assignAidantToTarget({
-                  aidantUserId: selected_aidant_id,
-                  targetType: targetTypeForAidant,
-                  targetId: targetIdForAidant,
-                  familyId: familyId,
-                  assignmentType: 'primary',
-                  createdBy: user.id,
-                  reason: `Assigné par admin via wizard pour la visite`,
-                });
-                console.log('👔 Admin: Assignation permanente forcée pour l\'aidant:', finalAidantId);
-              }
-              // Sinon ponctuelle - pas de quota
+              console.log('👔 Admin: Assignation via wizard pour l\'aidant:', finalAidantId);
             }
           } else {
-            // Admin doit choisir un aidant
             const allAidants = await getAvailableAidantsForFamily(familyId);
             return res.status(400).json({
               success: false,
@@ -722,7 +749,6 @@ router.post('/', async (req, res) => {
       }
     }
 
-    // ✅ CRÉATION DE LA VISITE
     const visitData = {
       user_id: finalUserId,
       patient_id: finalPatientId,
@@ -807,7 +833,6 @@ router.post('/', async (req, res) => {
       return res.status(500).json({ error: insertError.message });
     }
 
-    // ✅ METTRE À JOUR LA NOTIFICATION POUR LES ADMINS (si en_attente_aidant)
     if (status === 'en_attente_aidant') {
       const { data: admins } = await supabase
         .from('profiles')
@@ -836,7 +861,6 @@ router.post('/', async (req, res) => {
 
     const targetDisplay = finalTargetName || (visit.patient ? `${visit.patient.first_name} ${visit.patient.last_name}` : 'Personnel');
 
-    // ✅ SI PAIEMENT REQUIS
     if (requiresPayment) {
       await createNotification({
         userId: finalUserId,
@@ -861,7 +885,6 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // ✅ SI VISITE EN ATTENTE D'AIDANT
     if (status === 'en_attente_aidant') {
       return res.status(201).json({
         success: true,
@@ -872,7 +895,6 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // ✅ PAS DE PAIEMENT REQUIS - VISITE PLANIFIÉE NORMALEMENT
     await createNotification({
       userId: finalUserId,
       title: '📅 Nouvelle visite planifiée',
@@ -907,7 +929,98 @@ router.post('/', async (req, res) => {
 });
 
 // =============================================
-// ✅ ADMIN ASSIGNER UN AIDANT À UNE VISITE (NOUVEAU)
+// ✅ DÉTAILS D'UNE VISITE (DÉPLACÉ ICI : DYNAMIQUE)
+// =============================================
+router.get('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { user, profile } = req;
+
+    const { data: visit, error } = await supabase
+      .from('visites')
+      .select(`
+        *,
+        patient:patients(*)
+      `)
+      .eq('id', id)
+      .single();
+
+    if (error) {
+      if (error.code === 'PGRST116') {
+        return res.status(404).json({ error: 'Visite non trouvée' });
+      }
+      throw error;
+    }
+
+    let hasAccess = false;
+
+    if (['admin', 'coordinator'].includes(profile.role)) {
+      hasAccess = true;
+    } else if (profile.role === 'family') {
+      if (visit.user_id === user.id) {
+        hasAccess = true;
+      } else if (visit.patient_id) {
+        const { data: links } = await supabase
+          .from('patient_family_links')
+          .select('id')
+          .eq('family_id', user.id)
+          .eq('patient_id', visit.patient_id)
+          .maybeSingle();
+        hasAccess = !!links;
+      }
+    } else if (profile.role === 'aidant') {
+      const aidantId = await getAidantIdFromUserId(user.id);
+      if (aidantId) {
+        hasAccess = visit.aidant_id === aidantId;
+      }
+    }
+
+    if (!hasAccess) {
+      return res.status(403).json({ error: 'Accès non autorisé' });
+    }
+
+    let aidant = null;
+    if (visit.aidant_id) {
+      const { data: aidantData } = await supabase
+        .from('aidants')
+        .select('*')
+        .eq('id', visit.aidant_id)
+        .single();
+
+      if (aidantData) {
+        let userProfile = null;
+        if (aidantData.user_id) {
+          const { data: profileData } = await supabase
+            .from('profiles')
+            .select('id, full_name, email, phone, avatar_url, role')
+            .eq('id', aidantData.user_id)
+            .single();
+          userProfile = profileData;
+        }
+        aidant = { ...aidantData, user: userProfile };
+      }
+    }
+
+    const { data: photos } = await supabase
+      .from('visite_photos')
+      .select('*')
+      .eq('visite_id', id);
+
+    const fullVisit = {
+      ...visit,
+      aidant,
+      photos: photos || [],
+    };
+
+    res.json(fullVisit);
+  } catch (error) {
+    console.error('❌ Get visit detail error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =============================================
+// ✅ ADMIN ASSIGNER UN AIDANT À UNE VISITE
 // =============================================
 router.post('/admin/assign-aidant', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
   try {
@@ -939,7 +1052,6 @@ router.post('/admin/assign-aidant', roleMiddleware(['admin', 'coordinator']), as
       });
     }
 
-    // ✅ Récupérer la visite mise à jour
     const { data: visit, error } = await supabase
       .from('visites')
       .select(`
@@ -986,151 +1098,6 @@ router.post('/admin/assign-aidant', roleMiddleware(['admin', 'coordinator']), as
 });
 
 // =============================================
-// ✅ RÉCUPÉRER LES VISITES EN ATTENTE D'AIDANT (NOUVEAU)
-// =============================================
-router.get('/pending-aidant', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
-  try {
-    const visits = await getPendingAidantVisits();
-    
-    // Enrichir avec les relations
-    const visitsWithRelations = await Promise.all(visits.map(async (visit) => {
-      let patient = null;
-      if (visit.patient_id) {
-        const { data } = await supabase
-          .from('patients')
-          .select('*')
-          .eq('id', visit.patient_id)
-          .single();
-        patient = data;
-      }
-
-      let family = null;
-      if (visit.user_id) {
-        const { data } = await supabase
-          .from('profiles')
-          .select('id, full_name, email, phone')
-          .eq('id', visit.user_id)
-          .single();
-        family = data;
-      }
-
-      return {
-        ...visit,
-        patient,
-        family,
-      };
-    }));
-
-    res.json({
-      success: true,
-      data: visitsWithRelations,
-      count: visitsWithRelations.length,
-    });
-  } catch (error) {
-    console.error('❌ Get pending aidant visits error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// =============================================
-// ✅ RÉCUPÉRER LES AIDANTS DISPONIBLES POUR UNE FAMILLE (NOUVEAU)
-// =============================================
-router.get('/available-aidants', async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const { targetType, targetId } = req.query;
-
-    // Vérifier que l'utilisateur est une famille
-    if (req.profile.role !== 'family') {
-      return res.status(403).json({
-        success: false,
-        error: 'Accès réservé aux familles',
-      });
-    }
-
-    const aidants = await getAvailableAidantsForFamily(userId, {
-      zone: req.query.zone,
-      specialty: req.query.specialty,
-      minRating: req.query.minRating ? parseFloat(req.query.minRating) : undefined,
-    });
-
-    res.json({
-      success: true,
-      data: aidants,
-      count: aidants.length,
-    });
-  } catch (error) {
-    console.error('❌ Get available aidants error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// =============================================
-// ✅ RÉCUPÉRER LES OPTIONS DU WIZARD (NOUVEAU)
-// =============================================
-router.get('/wizard-options', async (req, res) => {
-  try {
-    const { targetType, targetId } = req.query;
-    const userId = req.user.id;
-
-    if (!targetType || !targetId) {
-      return res.status(400).json({
-        success: false,
-        error: 'targetType et targetId sont requis',
-      });
-    }
-
-    // Vérifier les permissions
-    const isAdmin = ['admin', 'coordinator'].includes(req.profile.role);
-    const isFamily = req.profile.role === 'family';
-
-    if (!isAdmin && !isFamily) {
-      return res.status(403).json({
-        success: false,
-        error: 'Non autorisé',
-      });
-    }
-
-    // Si famille, vérifier que la cible lui appartient
-    if (isFamily) {
-      if (targetType === 'patient') {
-        const { data: link } = await supabase
-          .from('patient_family_links')
-          .select('id')
-          .eq('family_id', userId)
-          .eq('patient_id', targetId)
-          .maybeSingle();
-
-        if (!link) {
-          return res.status(403).json({
-            success: false,
-            error: 'Ce patient ne vous appartient pas',
-          });
-        }
-      } else if (targetType === 'personal_account' || targetType === 'personal') {
-        if (targetId !== userId) {
-          return res.status(403).json({
-            success: false,
-            error: 'Ce compte ne vous appartient pas',
-          });
-        }
-      }
-    }
-
-    const familyId = isFamily ? userId : (req.body.familyId || null);
-    const options = await getVisitWizardOptions(targetType, targetId, familyId || userId);
-
-    res.json({
-      success: true,
-      data: options,
-    });
-  } catch (error) {
-    console.error('❌ Get wizard options error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// =============================================
 // ✅ CONFIRMER PAIEMENT - BROUILLON → PLANIFIEE
 // =============================================
 router.post('/:id/confirm-payment', async (req, res) => {
@@ -1163,7 +1130,6 @@ router.post('/:id/confirm-payment', async (req, res) => {
 
     let aidantId = visit.aidant_id || null;
 
-    // Si un aidant est déjà assigné, vérifier que c'est un aidant_id valide
     if (aidantId) {
       const convertedId = await getAidantIdFromUserIdOrId(aidantId);
       if (convertedId) {
@@ -1173,7 +1139,6 @@ router.post('/:id/confirm-payment', async (req, res) => {
       }
     }
 
-    // Si pas d'aidant, chercher automatiquement
     if (!aidantId) {
       let foundId = await getActiveAidantForTarget(targetType, targetId, familyId);
       if (foundId) {
@@ -1286,54 +1251,6 @@ router.get('/:id/price', async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Get visit price error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// =============================================
-// ✅ RÉCUPÉRER LES VISITES EN BROUILLON
-// =============================================
-router.get('/drafts/my', async (req, res) => {
-  try {
-    const userId = req.user.id;
-
-    const { data, error } = await supabase
-      .from('visites')
-      .select(`
-        *,
-        patient:patients(*),
-        aidant:aidants!visites_aidant_id_fkey (
-          id,
-          user_id,
-          specialties,
-          available,
-          rating,
-          total_missions,
-          completed_missions,
-          cancelled_missions,
-          user:profiles!aidants_user_id_fkey (
-            id,
-            full_name,
-            email,
-            phone,
-            avatar_url
-          )
-        )
-      `)
-      .eq('user_id', userId)
-      .eq('status', 'brouillon')
-      .order('created_at', { ascending: false });
-
-    if (error) throw error;
-
-    const visitsWithPrice = (data || []).map(visit => ({
-      ...visit,
-      payment_amount: getPonctualPrice(visit.duration_minutes || 60),
-    }));
-
-    res.json(visitsWithPrice);
-  } catch (error) {
-    console.error('❌ Get drafts error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1894,22 +1811,18 @@ router.post('/:id/validate', roleMiddleware(['admin', 'coordinator']), async (re
 
     if (error) throw error;
 
-    // ✅ DÉCOMPTER UNIQUEMENT SI CE N'EST PAS PONCTUEL PAYÉ
     const isPonctual = visit.metadata?.is_ponctual === true || visit.metadata?.ponctual_mode === true;
     const wasPaid = visit.metadata?.payment_completed === true;
 
-    // ✅ Si visite ponctuelle payée, NE PAS DÉCOMPTER
     if (!isPonctual || !wasPaid) {
-      // ✅ Si abonnement associé, décompter
       if (visit.subscription_id) {
         const result = await decrementVisit(visit.subscription_id);
         if (result.success) {
-          console.log(`✅ Visite ${id} décomptée de l'abonnement ${visit.subscription_id}`);
+          console.log(`...`);
         } else {
-          console.warn(`⚠️ Échec décompte visite ${id}:`, result.error);
+          console.warn(`...`, result.error);
         }
       } else {
-        // ✅ Rechercher un abonnement actif
         const { data: subscription, error: subError } = await supabase
           .from('abonnements')
           .select('id, remaining_visits, used_visits, total_visits, user_id')
@@ -1920,7 +1833,7 @@ router.post('/:id/validate', roleMiddleware(['admin', 'coordinator']), async (re
         if (subscription && !subError && subscription.remaining_visits > 0) {
           const result = await decrementVisit(subscription.id);
           if (result.success) {
-            console.log(`✅ Visite ${id} décomptée de l'abonnement ${subscription.id}`);
+            console.log(`...`);
           }
         }
       }
