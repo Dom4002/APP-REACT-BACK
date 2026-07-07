@@ -914,9 +914,10 @@ router.post('/', async (req, res) => {
       data: { visit_id: visit.id, status: 'planifiee' },
     });
 
+    // ✅ CORRECTION : Utiliser le user_id de l'aidant pour l'enregistrement (sinon viol de FK sur "notifications")
     if (finalAidantId && visit.aidant?.user_id) {
       await createNotification({
-        userId: visit.aidant.user_id, // ✅ ID utilisateur (profiles.id) à la place de l'aidant_id
+        userId: visit.aidant.user_id, // ✅ ID de profil (profiles.id) à la place de l'aidant_id
         title: '📅 Nouvelle visite à valider',
         body: `Visite pour ${targetDisplay} le ${visit.scheduled_date} à ${visit.scheduled_time}`,
         type: 'visite',
@@ -1877,7 +1878,7 @@ router.post('/:id/validate', roleMiddleware(['admin', 'coordinator']), async (re
     const targetDisplay = data.target_name || (data.patient ? `${data.patient.first_name} ${data.patient.last_name}` : 'Personnel');
 
     if (data.patient) {
-      const { data: links } = await supabase
+      const { data: links = [] } = await supabase
         .from('patient_family_links')
         .select('family_id')
         .eq('patient_id', data.patient_id);
@@ -2228,4 +2229,3 @@ router.post('/:id/convert-to-subscription', async (req, res) => {
 });
 
 module.exports = router;
- 
