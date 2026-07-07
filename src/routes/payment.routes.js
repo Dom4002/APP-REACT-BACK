@@ -1,6 +1,5 @@
 // 📁 backend/src/routes/payment.routes.js
  
-
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../services/supabase.service');
@@ -171,7 +170,7 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
 
     console.log('✅ Visite passée de brouillon à planifiee:', visitId);
 
-    // ✅ NOTIFICATIONS
+    // ✅ NOTIFICATIONS CORRIGÉES AVEC L'ID DE PROFIL DE L'AIDANT
     if (updatedVisit.aidant_id) {
       const { data: aidant } = await supabase
         .from('aidants')
@@ -181,7 +180,7 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
 
       if (aidant) {
         await createNotification({
-          userId: aidant.user_id,
+          userId: aidant.user_id, // ✅ Profiles.id au lieu de aidant_id
           title: '📅 Nouvelle visite à valider',
           body: `Visite pour ${updatedVisit.target_name || 'le patient'} le ${updatedVisit.scheduled_date} à ${updatedVisit.scheduled_time}`,
           type: 'visite',
@@ -208,7 +207,7 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
 }
 
 // =============================================
-// ✅ CRÉER UNE COMMANDE PONCTUELLE
+// ✅ CRÉER UNE COMMANDE PONCTUELLE EN ARRIÈRE-PLAN
 // =============================================
 async function createPonctualOrder(paymentRecord, transactionId, orderData) {
   try {
@@ -279,6 +278,7 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
 
     console.log('✅ Commande ponctuelle créée:', newOrder.id);
 
+    // 1️⃣ NOTIFICATION À LA FAMILLE
     await createNotification({
       userId: paymentRecord.user_id,
       title: '✅ Commande confirmée !',
@@ -291,6 +291,39 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
         target_name: targetName,
       },
     });
+
+    // 2️⃣ ✅ CORRECTIF : NOTIFIER TOUS LES AIDANTS DISPONIBLES EN DIRECT APRES REUSSITE PAIEMENT !
+    const { data: aidants } = await supabase
+      .from('aidants')
+      .select('user_id, current_orders, max_orders')
+      .eq('available', true)
+      .eq('is_verified', true)
+      .eq('status', 'approved');
+
+    if (aidants && aidants.length > 0) {
+      // Filtrer les aidants qui ont de la place
+      const availableAidants = aidants.filter(
+        a => (a.current_orders || 0) < (a.max_orders || 2)
+      );
+
+      if (availableAidants.length > 0) {
+        for (const aidant of availableAidants) {
+          await createNotification({
+            userId: aidant.user_id, // ✅ Profiles.id au lieu de aidant_id (cohérent avec FK)
+            title: '🛒 Nouvelle commande disponible',
+            body: `Commande de ${targetName} — ${orderDataToInsert.description}`,
+            type: 'commande',
+            data: { 
+              order_id: newOrder.id, 
+              action: 'take' 
+            },
+          });
+        }
+        console.log(`🚀 [Payment API] ${availableAidants.length} aidants disponibles notifiés pour la commande ${newOrder.id}`);
+      } else {
+        console.log('ℹ️ Aucun aidant disponible pour prendre la commande');
+      }
+    }
 
     return newOrder;
   } catch (error) {
@@ -396,7 +429,6 @@ router.post('/', async (req, res) => {
       patient_id,
     });
 
-    // Créer la transaction FedaPay
     const transaction = await createTransaction({
       amount,
       description: description || 'Santé Plus Services',
@@ -409,7 +441,6 @@ router.post('/', async (req, res) => {
       subscriptionId,
       callback_url: `${process.env.CLIENT_URL}/payment/confirm`,
       cancel_url: `${process.env.CLIENT_URL}/payment/cancel`,
-      // ✅ Passer les métadonnées complètes
       orderData: order_data || null,
       is_ponctual,
       is_visit,
@@ -420,7 +451,6 @@ router.post('/', async (req, res) => {
       type: is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription'),
     });
 
-    // Enregistrer le paiement en base
     const paymentData = {
       user_id: userId,
       amount,
@@ -455,7 +485,6 @@ router.post('/', async (req, res) => {
 
     console.log('✅ Paiement enregistré en base:', payment.id);
 
-    // Notification
     await createNotification({
       userId,
       title: '💳 Paiement initié',
@@ -492,7 +521,6 @@ const handleWebhook = async (req, res) => {
       console.log('💰 Transaction payée:', transactionId);
       console.log('📦 Métadonnées complètes:', JSON.stringify(metadata, null, 2));
 
-      // 1. Récupérer le paiement en base
       const { data: payment, error } = await supabase
         .from('paiements')
         .update({
@@ -505,369 +533,75 @@ const handleWebhook = async (req, res) => {
         .single();
 
       if (error) {
-        console.error('❌ Erreur mise à jour paiement:', error);
-        return res.status(500).json({ error: error.message });
+        console.error('❌ Paiement non trouvé dans le webhook:', error.message);
+        return res.status(404).json({ error: 'Paiement introuvable' });
       }
 
-      if (!payment) {
-        console.warn('⚠️ Paiement non trouvé pour transaction:', transactionId);
-        return res.status(404).json({ error: 'Paiement non trouvé' });
+      console.log(`✅ Paiement trouvé : ${payment.id}`);
+
+      if (payment.status === 'completed') {
+        return res.json({ success: true, message: 'Paiement déjà traité' });
       }
 
-      console.log('✅ Paiement trouvé:', payment.id, 'Type:', metadata.type);
-
-      // ✅ DÉTERMINER LE TYPE DE TRAITEMENT
-      const paymentMetadata = payment.metadata || {};
-      const type = paymentMetadata.type || metadata.type || 'subscription';
-      const isPonctual = paymentMetadata.is_ponctual || metadata.is_ponctual || false;
-      const isVisit = paymentMetadata.is_visit || metadata.is_visit || false;
-      const visitId = paymentMetadata.visit_id || metadata.visit_id || null;
-      const subscriptionId = paymentMetadata.subscriptionId || metadata.subscriptionId || null;
-      const orderData = paymentMetadata.order_data || metadata.order_data || null;
-
-      console.log('📋 Type détecté:', type);
-      console.log('📋 isPonctual:', isPonctual);
-      console.log('📋 isVisit:', isVisit);
-      console.log('📋 visitId:', visitId);
-      console.log('📋 subscriptionId:', subscriptionId);
-
-      let result = null;
-
-      // ✅ CAS 1 : VISITE PONCTUELLE
-      if (isVisit && visitId) {
-        console.log('🔄 Traitement d\'une visite ponctuelle:', visitId);
-        result = await processPonctualVisit(payment, transactionId, visitId, paymentMetadata);
-        if (result) {
-          console.log('✅ Visite ponctuelle traitée avec succès');
-        } else {
-          console.warn('⚠️ La visite ponctuelle n\'a pas pu être traitée, mais le paiement est validé');
-        }
-      }
-
-      // ✅ CAS 2 : COMMANDE PONCTUELLE
-      else if (isPonctual || type === 'order') {
-        console.log('📦 Traitement commande ponctuelle...');
-        result = await createPonctualOrder(payment, transactionId, orderData);
-        if (result) {
-          console.log('✅ Commande ponctuelle traitée avec succès');
-        } else {
-          console.warn('⚠️ La commande ponctuelle n\'a pas pu être créée, mais le paiement est validé');
-        }
-      }
-
-      // ✅ CAS 3 : ABONNEMENT
-      else if (subscriptionId || type === 'subscription') {
-        const subId = subscriptionId || payment.abonnement_id || null;
-        console.log('📦 Activation de l\'abonnement:', subId);
-        if (subId) {
-          result = await activateSubscription(payment, subId);
-          if (result) {
-            console.log('✅ Abonnement activé avec succès');
-          } else {
-            console.warn('⚠️ L\'abonnement n\'a pas pu être activé, mais le paiement est validé');
-          }
-        } else {
-          console.warn('⚠️ Aucun abonnement associé à ce paiement');
-        }
-      }
-
-      // ✅ CAS 4 : FALLBACK - Vérifier les métadonnées
-      else {
-        console.warn('⚠️ Aucun type spécifique détecté, vérification des métadonnées...');
-        
-        // Vérifier si c'est une visite
-        if (visitId) {
-          result = await processPonctualVisit(payment, transactionId, visitId, paymentMetadata);
-        }
-        // Vérifier si c'est un abonnement
-        else if (subscriptionId || payment.abonnement_id) {
-          const subId = subscriptionId || payment.abonnement_id;
-          result = await activateSubscription(payment, subId);
-        }
-        // Vérifier si c'est une commande
-        else if (orderData) {
-          result = await createPonctualOrder(payment, transactionId, orderData);
-        }
-      }
-
-      // ✅ 5. Mettre à jour le paiement avec le résultat du traitement
-      await supabase
+      const { error: updateError } = await supabase
         .from('paiements')
         .update({
-          metadata: {
-            ...(payment.metadata || {}),
-            processed: !!result,
-            processed_at: new Date().toISOString(),
-            processed_type: type,
-          }
+          status: 'completed',
+          updated_at: new Date().toISOString(),
         })
         .eq('id', payment.id);
 
-      // ✅ 6. Notification de paiement confirmé (si pas déjà envoyée)
-      let notificationTitle = '✅ Paiement confirmé';
-      let notificationBody = `Votre paiement de ${payment.amount} FCFA a été confirmé.`;
+      if (updateError) throw updateError;
 
-      if (isVisit && result) {
-        notificationTitle = '✅ Visite planifiée !';
-        notificationBody = `Votre visite a été planifiée avec succès après paiement.`;
-      } else if (isPonctual && result) {
-        notificationTitle = '✅ Commande confirmée !';
-        notificationBody = `Votre commande a été enregistrée avec succès après paiement.`;
-      } else if (subscriptionId && result) {
-        notificationTitle = '✅ Abonnement activé !';
-        notificationBody = `Votre abonnement est maintenant actif.`;
-      }
+      const type = metadata.type || payment.type;
+      const isPonctual = metadata.is_ponctual === 'true' || payment.is_ponctual;
 
-      await createNotification({
-        userId: payment.user_id,
-        title: notificationTitle,
-        body: notificationBody,
-        type: 'paiement',
-        data: {
-          payment_id: payment.id,
-          type: type,
-          processed: !!result,
-        },
+      console.log('📦 Métadonnées extraites:', {
+        type,
+        isPonctual,
+        visitId: metadata.visit_id || payment.visit_id,
+        subscriptionId: metadata.abonnement_id || payment.abonnement_id,
       });
 
-      console.log('✅ Webhook traité avec succès');
-      return res.json({ success: true, type, processed: !!result });
+      if (type === 'order' || isPonctual) {
+        console.log('📦 Traitement commande ponctuelle...');
+        const orderData = metadata.order_data ? JSON.parse(metadata.order_data) : null;
+        
+        const newOrder = await createPonctualOrder(payment, transactionId, orderData);
+        if (newOrder) {
+          console.log('✅ Commande ponctuelle créée avec succès');
+        }
+      } 
+      else if (type === 'visit' || payment.is_visit) {
+        const visitId = metadata.visit_id || payment.visit_id;
+        console.log('🔄 Traitement visite ponctuelle:', visitId);
+        const updatedVisit = await processPonctualVisit(payment, transactionId, visitId, metadata);
+        if (updatedVisit) {
+          console.log('✅ Visite ponctuelle activée avec succès');
+        }
+      }
+      else if (type === 'subscription' || payment.abonnement_id) {
+        const subId = payment.abonnement_id;
+        console.log('📦 Activation de l\'abonnement:', subId);
+        const activeSub = await activateSubscription(payment, subId);
+        if (activeSub) {
+          console.log('✅ Abonnement activé avec succès');
+        }
+      }
 
-    } else if (event === 'transaction.canceled') {
-      console.log('⚠️ Transaction annulée:', data?.id);
-      return res.json({ success: true, event });
+      res.json({ success: true });
+
+    } else {
+      res.json({ success: true, message: 'Événement ignoré' });
     }
 
-    // Autres événements
-    console.log('ℹ️ Événement ignoré:', event);
-    return res.json({ success: true, event });
   } catch (error) {
-    console.error('❌ Webhook error:', error);
+    console.error('❌ Webhook error:', error.message);
     res.status(500).json({ error: error.message });
   }
 };
 
-// Route webhook (sans auth middleware)
-router.post('/webhook', express.raw({ type: 'application/json' }), (req, res) => {
-  handleWebhook(req, res);
-});
+router.post('/webhook', express.raw({ type: 'application/json' }), handleWebhook);
 
-// =============================================
-// STATUT D'UN PAIEMENT
-// =============================================
-router.get('/:reference', async (req, res) => {
-  try {
-    const { reference } = req.params;
-
-    const { data, error } = await supabase
-      .from('paiements')
-      .select('*')
-      .eq('reference', reference)
-      .single();
-
-    if (error) throw error;
-
-    // Vérifier le statut en temps réel avec FedaPay
-    const transaction = await getTransaction(reference);
-    if (transaction && transaction.status === 'paid' && data.status !== 'valide') {
-      await supabase
-        .from('paiements')
-        .update({ status: 'valide', paid_at: new Date().toISOString() })
-        .eq('id', data.id);
-      
-      data.status = 'valide';
-    }
-
-    res.json(data);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// =============================================
-// HISTORIQUE DES PAIEMENTS
-// =============================================
-router.get('/history', async (req, res) => {
-  try {
-    const userId = req.user.id;
-
-    const { data, error } = await supabase
-      .from('paiements')
-      .select('*')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false });
-
-    if (error) throw error;
-    res.json(data);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// =============================================
-// ABONNEMENTS DE L'UTILISATEUR
-// =============================================
-router.get('/subscriptions', async (req, res) => {
-  try {
-    const userId = req.user.id;
-
-    const { data, error } = await supabase
-      .from('abonnements')
-      .select(`
-        *,
-        offre:offres(*),
-        patient:patients(*)
-      `)
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false });
-
-    if (error) throw error;
-    res.json(data);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// =============================================
-// SOUSCRIRE À UNE OFFRE
-// =============================================
-router.post('/subscribe', async (req, res) => {
-  try {
-    const { offreId, patientId } = req.body;
-    const userId = req.user.id;
-
-    // Récupérer l'offre
-    const { data: offre, error: offreError } = await supabase
-      .from('offres')
-      .select('*')
-      .eq('id', offreId)
-      .single();
-
-    if (offreError) throw offreError;
-
-    // Calculer la date de fin
-    const startDate = new Date();
-    const endDate = new Date();
-    
-    switch (offre.type) {
-      case 'mensuelle':
-        endDate.setMonth(endDate.getMonth() + 1);
-        break;
-      case 'trimestrielle':
-        endDate.setMonth(endDate.getMonth() + 3);
-        break;
-      case 'annuelle':
-        endDate.setFullYear(endDate.getFullYear() + 1);
-        break;
-      default:
-        endDate.setMonth(endDate.getMonth() + 1);
-    }
-
-    // Créer l'abonnement
-    const { data: subscription, error } = await supabase
-      .from('abonnements')
-      .insert({
-        user_id: userId,
-        patient_id: patientId || null,
-        offre_id: offreId,
-        status: 'en_attente',
-        start_date: startDate.toISOString().split('T')[0],
-        end_date: endDate.toISOString().split('T')[0],
-        auto_renew: true,
-        total_visits: offre.total_visits || 0,
-        remaining_visits: offre.total_visits || 0,
-        total_orders: offre.total_orders || 0,
-        remaining_orders: offre.total_orders || 0,
-      })
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    // Créer le paiement
-    const transaction = await createTransaction({
-      amount: offre.price,
-      description: `Abonnement ${offre.name}`,
-      email: req.profile.email,
-      firstname: req.profile.full_name.split(' ')[0],
-      lastname: req.profile.full_name.split(' ').slice(1).join(' ') || 'Client',
-      phone: req.profile.phone,
-      userId,
-      subscriptionId: subscription.id,
-      type: 'subscription',
-    });
-
-    // Enregistrer le paiement
-    await supabase
-      .from('paiements')
-      .insert({
-        user_id: userId,
-        abonnement_id: subscription.id,
-        amount: offre.price,
-        method: 'mobile_money',
-        reference: transaction.id,
-        status: 'en_attente',
-        metadata: {
-          transactionId: transaction.id,
-          subscriptionId: subscription.id,
-          payment_url: transaction.url,
-          type: 'subscription',
-        },
-      });
-
-    // Notification
-    await createNotification({
-      userId,
-      title: '⏳ Abonnement en attente',
-      body: `Votre abonnement ${offre.name} est en attente de paiement`,
-      type: 'paiement',
-      data: { subscription_id: subscription.id },
-    });
-
-    res.json({
-      success: true,
-      subscription,
-      payment_url: transaction.url,
-    });
-  } catch (error) {
-    console.error('❌ Subscribe error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// =============================================
-// ANNULER UN ABONNEMENT
-// =============================================
-router.post('/subscriptions/:id/cancel', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const userId = req.user.id;
-
-    const { data, error } = await supabase
-      .from('abonnements')
-      .update({ status: 'annule' })
-      .eq('id', id)
-      .eq('user_id', userId)
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    await createNotification({
-      userId,
-      title: '❌ Abonnement annulé',
-      body: 'Votre abonnement a été annulé avec succès',
-      type: 'paiement',
-      data: { subscription_id: data.id },
-    });
-
-    res.json({ success: true, subscription: data });
-  } catch (error) {
-    console.error('❌ Cancel subscription error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Exporter le handler webhook pour une utilisation dans server.js
 module.exports = router;
 module.exports.handleWebhook = handleWebhook;
