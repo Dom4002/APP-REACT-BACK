@@ -1,5 +1,5 @@
 // 📁 backend/src/services/aidantAssignment.service.js
-
+ 
 const { supabase } = require('./supabase.service');
 
 // ============================================================
@@ -18,7 +18,6 @@ const mapTargetType = (type) => {
   if (!type) return type;
   const normalized = type.toLowerCase();
   
-  // 🔄 Normaliser 'personal' → 'personal_account'
   if (normalized === 'personal') return TARGET_TYPES.PERSONAL_ACCOUNT;
   if (normalized === 'personal_account') return TARGET_TYPES.PERSONAL_ACCOUNT;
   if (normalized === 'patient') return TARGET_TYPES.PATIENT;
@@ -27,7 +26,7 @@ const mapTargetType = (type) => {
   return type;
 };
 
-// ✅ Mapping inverse pour les réponses (si le frontend attend 'personal')
+// ✅ Mapping inverse pour les réponses
 const mapTargetTypeForResponse = (type) => {
   if (!type) return type;
   if (type === TARGET_TYPES.PERSONAL_ACCOUNT) return 'personal';
@@ -55,17 +54,12 @@ const PRIORITY = {
 };
 
 // ============================================================
-// FONCTIONS PRINCIPALES EXISTANTES
+// FONCTIONS PRINCIPALES
 // ============================================================
 
 /**
  * Récupère l'aidant actif pour une cible donnée
  * Utilise la règle de priorité : patient > personal_account > family
- * 
- * @param {string} targetType - 'patient' | 'personal_account' | 'family'
- * @param {string} targetId - UUID de la cible
- * @param {string} familyId - UUID de la famille (optionnel)
- * @returns {Promise<string|null>} - UUID de l'aidant ou null
  */
 const getActiveAidantForTarget = async (targetType, targetId, familyId = null) => {
   try {
@@ -87,8 +81,7 @@ const getActiveAidantForTarget = async (targetType, targetId, familyId = null) =
       return null;
     }
 
-    // ✅ VÉRIFIER SI data EST UN aidant_id OU un user_id
-    // 1. Vérifier si data est un aidant_id (dans la table aidants)
+    // VÉRIFIER SI data EST UN aidant_id OU un user_id
     const { data: aidantById, error: errorById } = await supabase
       .from('aidants')
       .select('id')
@@ -96,12 +89,10 @@ const getActiveAidantForTarget = async (targetType, targetId, familyId = null) =
       .maybeSingle();
 
     if (!errorById && aidantById) {
-      // ✅ data est déjà un aidant_id, le retourner directement
       console.log(`✅ getActiveAidantForTarget: data est un aidant_id: ${data}`);
       return data;
     }
 
-    // 2. Vérifier si data est un user_id
     const { data: aidantByUser, error: errorByUser } = await supabase
       .from('aidants')
       .select('id')
@@ -109,12 +100,10 @@ const getActiveAidantForTarget = async (targetType, targetId, familyId = null) =
       .maybeSingle();
 
     if (!errorByUser && aidantByUser) {
-      // ✅ data est un user_id, retourner l'aidant_id correspondant
       console.log(`🔄 Conversion user_id ${data} → aidant_id ${aidantByUser.id}`);
       return aidantByUser.id;
     }
 
-    // 3. Fallback: si data est un ID valide mais non trouvé, essayer de le chercher
     const { data: aidantByAny, error: errorAny } = await supabase
       .from('aidants')
       .select('id')
@@ -136,16 +125,9 @@ const getActiveAidantForTarget = async (targetType, targetId, familyId = null) =
 
 /**
  * Récupère tous les aidants pour une cible (principal + secondaires)
- * Inclut les aidants du compte et de la famille en fallback
- * 
- * @param {string} targetType - 'patient' | 'personal_account' | 'family'
- * @param {string} targetId - UUID de la cible
- * @param {string} familyId - UUID de la famille (optionnel)
- * @returns {Promise<Array>} - Liste des aidants avec leur priorité
  */
 const getAllAidantsForTarget = async (targetType, targetId, familyId = null) => {
   try {
-    // ✅ Normaliser le type pour la base de données
     const dbTargetType = mapTargetType(targetType);
     
     const { data, error } = await supabase.rpc('get_all_aidants_for_target', {
@@ -159,7 +141,6 @@ const getAllAidantsForTarget = async (targetType, targetId, familyId = null) => 
       return [];
     }
 
-    // ✅ Trier par priorité (1 = plus haute)
     const sortedData = (data || []).sort((a, b) => (a.priority || 99) - (b.priority || 99));
     
     return sortedData;
@@ -170,18 +151,7 @@ const getAllAidantsForTarget = async (targetType, targetId, familyId = null) => 
 };
 
 /**
- * Assigne un aidant à une cible
- * 
- * @param {Object} params
- * @param {string} params.aidantUserId - UUID de l'aidant (user_id)
- * @param {string} params.targetType - 'patient' | 'personal_account' | 'family'
- * @param {string} params.targetId - UUID de la cible
- * @param {string} params.familyId - UUID de la famille (optionnel)
- * @param {string} params.assignmentType - 'primary' | 'secondary' | 'temporary'
- * @param {string} params.createdBy - UUID de l'utilisateur qui crée l'assignation
- * @param {string} params.reason - Motif (optionnel)
- * @param {string} params.expiresAt - Date d'expiration (optionnel)
- * @returns {Promise<Object>} - Résultat de l'assignation
+ * Assigne un aidant à une cible (Avec paramètre force intégré)
  */
 const assignAidantToTarget = async ({
   aidantUserId,
@@ -192,9 +162,9 @@ const assignAidantToTarget = async ({
   createdBy = null,
   reason = null,
   expiresAt = null,
+  force = false, // ✅ CORRECTIF : Ajout du paramètre force pour ignorer les quotas
 }) => {
   try {
-    // ✅ Normaliser le type pour la base de données
     const dbTargetType = mapTargetType(targetType);
     
     // 1. Vérifier que l'aidant existe et est disponible
@@ -220,11 +190,11 @@ const assignAidantToTarget = async ({
       };
     }
 
-    // 2. Vérifier que l'aidant n'a pas atteint son quota max
+    // 2. Vérifier le quota (seulement si force est désactivé)
     const currentAssignments = aidant.current_assignments || 0;
     const maxAssignments = aidant.max_assignments || 4;
     
-    if (currentAssignments >= maxAssignments) {
+    if (!force && currentAssignments >= maxAssignments) {
       return {
         success: false,
         error: `Cet aidant a déjà ${currentAssignments} assignations (maximum ${maxAssignments})`,
@@ -282,7 +252,7 @@ const assignAidantToTarget = async ({
       };
     }
 
-    // 4. Déterminer la priorité selon le type de cible
+    // 4. Déterminer la priorité
     let priority = PRIORITY.PATIENT;
     if (dbTargetType === TARGET_TYPES.PERSONAL_ACCOUNT) {
       priority = PRIORITY.PERSONAL_ACCOUNT;
@@ -312,7 +282,6 @@ const assignAidantToTarget = async ({
       };
     }
 
-    // 6. Récupérer l'assignation créée via la VUE
     const { data: assignment, error: fetchError } = await supabase
       .from('aidant_assignments_view')
       .select('*')
@@ -323,7 +292,7 @@ const assignAidantToTarget = async ({
       console.error('❌ Erreur récupération assignation:', fetchError);
     }
 
-    // 7. Mettre à jour current_assignments de l'aidant
+    // 6. Mettre à jour current_assignments de l'aidant
     await supabase
       .from('aidants')
       .update({
@@ -333,7 +302,7 @@ const assignAidantToTarget = async ({
       })
       .eq('id', aidant.id);
 
-    // 8. Créer les notifications
+    // 7. Créer les notifications
     await createAssignmentNotifications({
       assignmentId,
       aidantUserId,
@@ -364,15 +333,9 @@ const assignAidantToTarget = async ({
 
 /**
  * Révoque une assignation
- * 
- * @param {string} assignmentId - UUID de l'assignation
- * @param {string} revokedBy - UUID de l'utilisateur qui révoque
- * @param {string} reason - Motif (optionnel)
- * @returns {Promise<Object>} - Résultat de la révocation
  */
 const revokeAssignment = async (assignmentId, revokedBy = null, reason = null) => {
   try {
-    // 1. Récupérer l'assignation
     const { data: assignment, error: fetchError } = await supabase
       .from('aidant_assignments')
       .select('*')
@@ -395,7 +358,6 @@ const revokeAssignment = async (assignmentId, revokedBy = null, reason = null) =
       };
     }
 
-    // 2. Mettre à jour le statut
     const { data: result, error: updateError } = await supabase
       .from('aidant_assignments')
       .update({
@@ -418,7 +380,6 @@ const revokeAssignment = async (assignmentId, revokedBy = null, reason = null) =
       };
     }
 
-    // 3. Mettre à jour current_assignments de l'aidant
     const { count: currentAssignments, error: countError } = await supabase
       .from('aidant_assignments')
       .select('id', { count: 'exact', head: true })
@@ -445,7 +406,6 @@ const revokeAssignment = async (assignmentId, revokedBy = null, reason = null) =
       }
     }
 
-    // 4. Notification
     await supabase.from('notifications').insert({
       user_id: assignment.aidant_user_id,
       title: '🔄 Assignation révoquée',
@@ -473,11 +433,7 @@ const revokeAssignment = async (assignmentId, revokedBy = null, reason = null) =
 };
 
 /**
- * Récupère toutes les assignations d'un aidant - ✅ UTILISE LA VUE
- * 
- * @param {string} aidantUserId - UUID de l'aidant
- * @param {string} status - Statut des assignations (optionnel)
- * @returns {Promise<Array>} - Liste des assignations
+ * Récupère toutes les assignations d'un aidant
  */
 const getAssignmentsByAidant = async (aidantUserId, status = null) => {
   try {
@@ -497,7 +453,6 @@ const getAssignmentsByAidant = async (aidantUserId, status = null) => {
       return [];
     }
 
-    // ✅ Formater les données avec les relations
     const formattedData = (data || []).map((item) => ({
       id: item.id,
       aidant_user_id: item.aidant_user_id,
@@ -543,16 +498,10 @@ const getAssignmentsByAidant = async (aidantUserId, status = null) => {
 };
 
 /**
- * Récupère toutes les assignations pour une cible - ✅ UTILISE LA VUE
- * 
- * @param {string} targetType - 'patient' | 'personal_account' | 'family'
- * @param {string} targetId - UUID de la cible
- * @param {string} status - Statut des assignations (optionnel)
- * @returns {Promise<Array>} - Liste des assignations
+ * Récupère toutes les assignations pour une cible
  */
 const getAssignmentsByTarget = async (targetType, targetId, status = null) => {
   try {
-    // ✅ Normaliser le type pour la base de données
     const dbTargetType = mapTargetType(targetType);
     
     let query = supabase
@@ -572,7 +521,6 @@ const getAssignmentsByTarget = async (targetType, targetId, status = null) => {
       return [];
     }
 
-    // ✅ Formater les données
     const formattedData = (data || []).map((item) => ({
       id: item.id,
       aidant_user_id: item.aidant_user_id,
@@ -619,21 +567,15 @@ const getAssignmentsByTarget = async (targetType, targetId, status = null) => {
 
 /**
  * Vérifie si un aidant est assigné à une cible
- * 
- * @param {string} aidantUserId - UUID de l'aidant
- * @param {string} targetType - 'patient' | 'personal_account' | 'family'
- * @param {string} targetId - UUID de la cible
- * @returns {Promise<Object|null>} - L'assignation ou null
  */
 const isAidantAssignedToTarget = async (aidantUserId, targetType, targetId) => {
   try {
-    // ✅ Normaliser le type pour la base de données
     const dbTargetType = mapTargetType(targetType);
     
     const { data, error } = await supabase
       .from('aidant_assignments')
       .select('*')
-      .eq('aidant_user_id', aidantUserId)
+      .eq('id', aidantUserId)
       .eq('target_type', dbTargetType)
       .eq('target_id', targetId)
       .eq('status', ASSIGNMENT_STATUS.ACTIVE)
@@ -641,7 +583,6 @@ const isAidantAssignedToTarget = async (aidantUserId, targetType, targetId) => {
 
     if (error) throw error;
     
-    // ✅ Transformer pour le frontend
     if (data) {
       data.target_type = mapTargetTypeForResponse(data.target_type);
     }
@@ -653,15 +594,8 @@ const isAidantAssignedToTarget = async (aidantUserId, targetType, targetId) => {
   }
 };
 
-// ============================================================
-// 🆕 NOUVELLES FONCTIONS POUR LE SYSTÈME COMPLET
-// ============================================================
-
 /**
- * Vérifie si un aidant est full (plus de quota disponible)
- * 
- * @param {string} aidantUserId - UUID de l'aidant (user_id)
- * @returns {Promise<Object>} - { isFull, current, max }
+ * Vérifie si un aidant est full
  */
 const isAidantFull = async (aidantUserId) => {
   try {
@@ -692,15 +626,9 @@ const isAidantFull = async (aidantUserId) => {
 
 /**
  * Récupère les aidants disponibles pour une famille
- * (ceux qui ont encore de la place pour des assignations)
- * 
- * @param {string} familyId - UUID de la famille
- * @param {Object} filters - Filtres optionnels
- * @returns {Promise<Array>} - Liste des aidants disponibles
  */
 const getAvailableAidantsForFamily = async (familyId, filters = {}) => {
   try {
-    // 1. Récupérer TOUS les aidants approuvés
     let query = supabase
       .from('aidants')
       .select(`
@@ -716,7 +644,6 @@ const getAvailableAidantsForFamily = async (familyId, filters = {}) => {
       .eq('status', 'approved')
       .eq('is_verified', true);
 
-    // 2. Appliquer les filtres
     if (filters.zone) {
       query = query.contains('zones', [filters.zone]);
     }
@@ -736,14 +663,12 @@ const getAvailableAidantsForFamily = async (familyId, filters = {}) => {
       return [];
     }
 
-    // 3. Filtrer ceux qui ont de la place
     const availableAidants = (aidants || []).filter((aidant) => {
       const current = aidant.current_assignments || 0;
       const max = aidant.max_assignments || 4;
       return current < max;
     });
 
-    // 4. Enrichir avec les informations de quota
     return availableAidants.map((aidant) => ({
       ...aidant,
       current_assignments: aidant.current_assignments || 0,
@@ -759,9 +684,6 @@ const getAvailableAidantsForFamily = async (familyId, filters = {}) => {
 
 /**
  * Récupère les aidants avec leur quota actuel
- * 
- * @param {Object} filters - Filtres optionnels
- * @returns {Promise<Array>} - Liste des aidants avec quota
  */
 const getAidantsWithQuota = async (filters = {}) => {
   try {
@@ -780,11 +702,6 @@ const getAidantsWithQuota = async (filters = {}) => {
       .eq('status', 'approved')
       .eq('is_verified', true);
 
-    if (filters.available === true) {
-      // Filtrer côté serveur pour les aidants disponibles
-      // On va filtrer côté client après
-    }
-
     const { data: aidants, error } = await query;
 
     if (error) {
@@ -792,7 +709,6 @@ const getAidantsWithQuota = async (filters = {}) => {
       return [];
     }
 
-    // Enrichir avec les informations de quota
     return (aidants || []).map((aidant) => ({
       ...aidant,
       current_assignments: aidant.current_assignments || 0,
@@ -808,16 +724,6 @@ const getAidantsWithQuota = async (filters = {}) => {
 
 /**
  * Assigne un aidant à une visite (admin - force)
- * Peut dépasser le quota max (5/4, 6/4, etc.)
- * 
- * @param {Object} params
- * @param {string} params.visitId - UUID de la visite
- * @param {string} params.aidantUserId - UUID de l'aidant (user_id)
- * @param {string} params.assignmentType - 'permanente' | 'ponctuelle'
- * @param {string} params.adminId - UUID de l'admin qui assigne
- * @param {string} params.reason - Motif (optionnel)
- * @param {boolean} params.force - True pour ignorer le quota
- * @returns {Promise<Object>} - Résultat de l'assignation
  */
 const adminAssignAidantToVisit = async ({
   visitId,
@@ -828,7 +734,6 @@ const adminAssignAidantToVisit = async ({
   force = false,
 }) => {
   try {
-    // 1. Récupérer la visite
     const { data: visit, error: visitError } = await supabase
       .from('visites')
       .select('*')
@@ -843,7 +748,6 @@ const adminAssignAidantToVisit = async ({
       };
     }
 
-    // 2. Vérifier que l'aidant existe et est approuvé
     const { data: aidant, error: aidantError } = await supabase
       .from('aidants')
       .select('*')
@@ -866,7 +770,6 @@ const adminAssignAidantToVisit = async ({
       };
     }
 
-    // 3. Vérifier le quota (sauf si force)
     const currentAssignments = aidant.current_assignments || 0;
     const maxAssignments = aidant.max_assignments || 4;
 
@@ -880,11 +783,9 @@ const adminAssignAidantToVisit = async ({
       };
     }
 
-    // 4. Déterminer le type d'assignation
     const isPermanent = assignmentType === 'permanente';
     const assignmentTypeValue = isPermanent ? ASSIGNMENT_TYPES.PRIMARY : ASSIGNMENT_TYPES.TEMPORARY;
 
-    // 5. Mettre à jour la visite
     const updateData = {
       aidant_id: aidant.id,
       status: 'planifiee',
@@ -895,7 +796,6 @@ const adminAssignAidantToVisit = async ({
       updated_at: new Date().toISOString(),
     };
 
-    // Si la visite était en attente d'aidant, on change le statut
     if (visit.status === 'en_attente_aidant') {
       updateData.waiting_for_aidant_since = null;
     }
@@ -916,12 +816,11 @@ const adminAssignAidantToVisit = async ({
       };
     }
 
-    // 6. Si permanent, créer l'assignation dans aidant_assignments
     if (isPermanent) {
-      // Déterminer la cible
       const targetType = visit.patient_id ? TARGET_TYPES.PATIENT : TARGET_TYPES.PERSONAL_ACCOUNT;
       const targetId = visit.patient_id || visit.user_id;
 
+      // ✅ TRANSMISSION DU PARAMÈTRE FORCE : Permet de contourner le quota dans le service d'assignation
       const assignmentResult = await assignAidantToTarget({
         aidantUserId: aidantUserId,
         targetType: targetType,
@@ -931,18 +830,14 @@ const adminAssignAidantToVisit = async ({
         createdBy: adminId,
         reason: reason || `Assignation forcée par admin pour la visite ${visitId}`,
         expiresAt: null,
+        force: force, // ✅ Transmission de 'force'
       });
 
       if (!assignmentResult.success) {
         console.warn('⚠️ Échec création assignation permanente:', assignmentResult.error);
-        // On continue quand même, la visite est assignée
       }
-    } else {
-      // 7. Si ponctuelle, NE PAS incrémenter current_assignments
-      // On ne fait rien de plus
     }
 
-    // 8. Notifications
     await createAidantAssignmentNotifications({
       visitId,
       aidantUserId,
@@ -985,7 +880,6 @@ const createAidantAssignmentNotifications = async ({
   force,
 }) => {
   try {
-    // 1. Notification à l'aidant
     const aidantMessage = isPermanent
       ? `Vous avez été assigné en tant qu'aidant permanent pour ${targetName}${force ? ' (forcé)' : ''}`
       : `Vous avez été assigné pour la visite de ${targetName}${force ? ' (forcé)' : ''}`;
@@ -1004,7 +898,6 @@ const createAidantAssignmentNotifications = async ({
       },
     });
 
-    // 2. Notification à la famille
     const { data: visit } = await supabase
       .from('visites')
       .select('user_id, patient_id')
@@ -1025,7 +918,6 @@ const createAidantAssignmentNotifications = async ({
       });
     }
 
-    // 3. Notification aux admins si force
     if (force) {
       const { data: admins } = await supabase
         .from('profiles')
@@ -1050,7 +942,6 @@ const createAidantAssignmentNotifications = async ({
       }
     }
 
-    // 4. Notification si dépassement de quota
     if (force && isPermanent) {
       const { data: aidant } = await supabase
         .from('aidants')
@@ -1088,8 +979,6 @@ const createAidantAssignmentNotifications = async ({
 
 /**
  * Récupère toutes les visites en attente d'aidant
- * 
- * @returns {Promise<Array>} - Liste des visites en attente d'aidant
  */
 const getPendingAidantVisits = async () => {
   try {
@@ -1122,15 +1011,9 @@ const getPendingAidantVisits = async () => {
 
 /**
  * Récupère les options du wizard pour une visite
- * 
- * @param {string} targetType - 'patient' | 'personal_account'
- * @param {string} targetId - UUID de la cible
- * @param {string} familyId - UUID de la famille
- * @returns {Promise<Object>} - Options du wizard
  */
 const getVisitWizardOptions = async (targetType, targetId, familyId) => {
   try {
-    // 1. Vérifier si un aidant est déjà assigné
     const existingAidant = await getActiveAidantForTarget(targetType, targetId, familyId);
 
     if (existingAidant) {
@@ -1148,7 +1031,6 @@ const getVisitWizardOptions = async (targetType, targetId, familyId) => {
       };
     }
 
-    // 2. Récupérer tous les aidants disponibles
     const availableAidants = await getAvailableAidantsForFamily(familyId);
 
     if (availableAidants.length > 0) {
@@ -1175,7 +1057,6 @@ const getVisitWizardOptions = async (targetType, targetId, familyId) => {
       };
     }
 
-    // 3. Tous les aidants sont full
     return {
       hasAidant: false,
       hasAvailableAidants: false,
@@ -1205,10 +1086,6 @@ const getVisitWizardOptions = async (targetType, targetId, familyId) => {
   }
 };
 
-// ============================================================
-// FONCTIONS PRIVÉES (INTERNES)
-// ============================================================
-
 /**
  * Crée les notifications pour une assignation
  */
@@ -1225,7 +1102,6 @@ const createAssignmentNotifications = async ({
   try {
     const priorityLabel = priority === 1 ? 'prioritaire' : priority === 2 ? 'standard' : 'fallback';
     
-    // 1. Notification à l'aidant
     await supabase.from('notifications').insert({
       user_id: aidantUserId,
       title: '📋 Nouvelle assignation',
@@ -1240,11 +1116,9 @@ const createAssignmentNotifications = async ({
       },
     });
 
-    // 2. Notification au propriétaire de la cible
     let ownerId = null;
 
     if (targetType === TARGET_TYPES.PATIENT) {
-      // Récupérer la famille du patient
       const { data: links, error: linksError } = await supabase
         .from('patient_family_links')
         .select('family_id')
@@ -1278,7 +1152,6 @@ const createAssignmentNotifications = async ({
       });
     }
 
-    // 3. Notification aux admins
     const { data: admins } = await supabase
       .from('profiles')
       .select('id')
@@ -1305,10 +1178,6 @@ const createAssignmentNotifications = async ({
     console.error('❌ createAssignmentNotifications error:', error);
   }
 };
-
-// ============================================================
-// EXPORTS
-// ============================================================
 
 module.exports = {
   // Constantes
