@@ -542,7 +542,7 @@ router.post('/', async (req, res) => {
     }
 
     if (profile.role === 'family' && patient_id) {
-      const { data: link } = await supabase
+      const { data: link = null } = await supabase
         .from('patient_family_links')
         .select('patient_id')
         .eq('family_id', user.id)
@@ -754,7 +754,7 @@ router.post('/', async (req, res) => {
       user_id: finalUserId,
       patient_id: finalPatientId,
       
-       target_type: finalTargetType, // déjà 'patient' ou 'personal'
+      target_type: finalTargetType,
       target_name: finalTargetName,
       
       aidant_id: finalAidantId,
@@ -767,15 +767,14 @@ router.post('/', async (req, res) => {
       notes: notes || null,
       is_urgent: is_urgent || false,
       
-       visit_type: is_ponctual || requiresPayment ? 'ponctuelle' : 'permanente',
+      visit_type: is_ponctual || requiresPayment ? 'ponctuelle' : 'permanente',
       
-       assignment_type: assignment_type || 'ponctuelle',
+      assignment_type: assignment_type || 'ponctuelle',
       
       requested_by: user.id,
       draft_expires_at: requiresPayment ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() : null,
       subscription_id: subscriptionId,
       
-      // ✅ is_permanent : booléen pour les visites permanentes
       is_permanent: wizard_choice === 'permanente',
       
       assigned_by_admin: ['admin', 'coordinator'].includes(profile.role),
@@ -798,7 +797,7 @@ router.post('/', async (req, res) => {
         wizard_choice: wizard_choice || null,
         waiting_for_aidant: status === 'en_attente_aidant',
         assigned_by_admin: ['admin', 'coordinator'].includes(profile.role),
-         is_personal_account: finalTargetType === 'personal' && !finalPatientId,
+        is_personal_account: finalTargetType === 'personal' && !finalPatientId,
         target_patient_id: finalPatientId,
       }
     };
@@ -915,7 +914,6 @@ router.post('/', async (req, res) => {
       data: { visit_id: visit.id, status: 'planifiee' },
     });
 
-    // ✅ CORRECTION : Utiliser le user_id de l'aidant pour l'enregistrement (sinon viol de FK sur "notifications")
     if (finalAidantId && visit.aidant?.user_id) {
       await createNotification({
         userId: visit.aidant.user_id, // ✅ ID utilisateur (profiles.id) à la place de l'aidant_id
@@ -1214,10 +1212,10 @@ router.post('/:id/confirm-payment', async (req, res) => {
 
     const targetDisplay = updatedVisit.target_name || (updatedVisit.patient ? `${updatedVisit.patient.first_name} ${updatedVisit.patient.last_name}` : 'Personnel');
 
-    // ✅ CORRECTION : Utiliser updatedVisit.aidant.user_id (profiles.id) à la place de aidantId
+    // ✅ CORRECTION : Utiliser le user_id de l'aidant
     if (aidantId && updatedVisit.aidant?.user_id) {
       await createNotification({
-        userId: updatedVisit.aidant.user_id, // ✅ ID utilisateur (profiles.id) à la place de l'aidant_id
+        userId: updatedVisit.aidant.user_id, // ✅ ID de profil (profiles.id) à la place de l'aidant_id
         title: '📅 Nouvelle visite à valider',
         body: `Visite pour ${targetDisplay} le ${updatedVisit.scheduled_date} à ${updatedVisit.scheduled_time}`,
         type: 'visite',
@@ -1282,7 +1280,7 @@ router.get('/:id/price', async (req, res) => {
 router.post('/:id/approve', async (req, res) => {
   try {
     const { id } = req.params;
-    const { user } = req;
+    const { user, profile } = req; // ✅ Récupérer profile contenant le full_name de l'aidant connecté
 
     const aidantId = await getAidantIdFromUserId(user.id);
     if (!aidantId) {
@@ -1320,6 +1318,9 @@ router.post('/:id/approve', async (req, res) => {
 
     const targetDisplay = visit.target_name || (visit.patient ? `${visit.patient.first_name} ${visit.patient.last_name}` : 'Personnel');
 
+    // ✅ CORRECTION : Notifier le bénéficiaire avec le nom réel de l'aidant
+    const aidantName = profile?.full_name || 'L\'aidant';
+
     if (visit.patient) {
       const { data: links } = await supabase
         .from('patient_family_links')
@@ -1331,7 +1332,7 @@ router.post('/:id/approve', async (req, res) => {
           await createNotification({
             userId: link.family_id,
             title: '✅ Visite acceptée',
-            body: `L'aidant a accepté la visite pour ${targetDisplay} le ${visit.scheduled_date}.`,
+            body: `L'aidant ${aidantName} a accepté la visite pour ${targetDisplay} le ${visit.scheduled_date}.`,
             type: 'visite',
             data: { visit_id: id, status: 'acceptee' },
           });
@@ -1341,7 +1342,7 @@ router.post('/:id/approve', async (req, res) => {
       await createNotification({
         userId: visit.user_id,
         title: '✅ Visite acceptée',
-        body: `L'aidant a accepté votre visite personnelle le ${visit.scheduled_date}.`,
+        body: `L'aidant ${aidantName} a accepté votre visite personnelle le ${visit.scheduled_date}.`,
         type: 'visite',
         data: { visit_id: id, status: 'acceptee' },
       });
@@ -1360,7 +1361,7 @@ router.post('/:id/approve', async (req, res) => {
 router.post('/:id/refuse', async (req, res) => {
   try {
     const { id } = req.params;
-    const { user } = req;
+    const { user, profile } = req; // ✅ Récupérer profile contenant le full_name
     const { reason } = req.body;
 
     const aidantId = await getAidantIdFromUserId(user.id);
@@ -1395,7 +1396,9 @@ router.post('/:id/refuse', async (req, res) => {
     if (error) throw error;
 
     const targetDisplay = visit.target_name || (visit.patient ? `${visit.patient.first_name} ${visit.patient.last_name}` : 'Personnel');
+    const aidantName = profile?.full_name || 'L\'aidant';
 
+    // ✅ CORRECTION : Notifier le bénéficiaire avec le nom réel de l'aidant
     if (visit.patient) {
       const { data: links } = await supabase
         .from('patient_family_links')
@@ -1407,7 +1410,7 @@ router.post('/:id/refuse', async (req, res) => {
           await createNotification({
             userId: link.family_id,
             title: '❌ Visite refusée',
-            body: `L'aidant a refusé la visite pour ${targetDisplay} le ${visit.scheduled_date}. Motif: ${reason || 'Non spécifié'}`,
+            body: `L'aidant ${aidantName} a refusé la visite pour ${targetDisplay} le ${visit.scheduled_date}. Motif: ${reason || 'Non spécifié'}`,
             type: 'visite',
             data: { visit_id: id, status: 'refusee' },
           });
@@ -1417,7 +1420,7 @@ router.post('/:id/refuse', async (req, res) => {
       await createNotification({
         userId: visit.user_id,
         title: '❌ Visite refusée',
-        body: `L'aidant a refusé votre visite personnelle le ${visit.scheduled_date}. Motif: ${reason || 'Non spécifié'}`,
+        body: `L'aidant ${aidantName} a refusé votre visite personnelle le ${visit.scheduled_date}. Motif: ${reason || 'Non spécifié'}`,
         type: 'visite',
         data: { visit_id: id, status: 'refusee' },
       });
@@ -1433,7 +1436,7 @@ router.post('/:id/refuse', async (req, res) => {
         await createNotification({
           userId: admin.id,
           title: '⚠️ Visite refusée - Réassignation nécessaire',
-          body: `L'aidant a refusé la visite pour ${targetDisplay} le ${visit.scheduled_date}.`,
+          body: `L'aidant ${aidantName} a refusé la visite pour ${targetDisplay} le ${visit.scheduled_date}.`,
           type: 'alert',
           data: { visit_id: id, action: 'reassign' },
         });
@@ -1493,7 +1496,7 @@ router.post('/:id/reassign', roleMiddleware(['admin', 'coordinator']), async (re
 
     const targetDisplay = visit.target_name || (visit.patient ? `${visit.patient.first_name} ${visit.patient.last_name}` : 'Personnel');
 
-    // ✅ CORRECTION : Récupérer le user_id de l'aidant dans la table "aidants" avant de l'enregistrer (sinon viol de FK sur "notifications")
+    // ✅ CORRECTION : Récupérer le user_id de l'aidant dans la table "aidants" avant d'enregistrer (sinon viol de FK sur "notifications")
     const { data: aidantProfile } = await supabase
       .from('aidants')
       .select('user_id')
@@ -2225,3 +2228,4 @@ router.post('/:id/convert-to-subscription', async (req, res) => {
 });
 
 module.exports = router;
+ 
