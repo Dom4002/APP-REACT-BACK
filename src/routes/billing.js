@@ -1,6 +1,5 @@
 // 📁 backend/src/routes/billing.js
  
-
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 const { FedaPay, Transaction } = require('fedapay');
@@ -130,7 +129,6 @@ async function getActiveAidantForTarget(targetType, targetId, familyId) {
       return null;
     }
 
-    // ✅ Vérifier si data est un aidant_id
     const { data: aidantById, error: errorById } = await supabase
       .from('aidants')
       .select('id')
@@ -141,7 +139,6 @@ async function getActiveAidantForTarget(targetType, targetId, familyId) {
       return data;
     }
 
-    // ✅ Vérifier si data est un user_id
     const { data: aidantByUser, error: errorByUser } = await supabase
       .from('aidants')
       .select('id')
@@ -162,8 +159,6 @@ async function getActiveAidantForTarget(targetType, targetId, familyId) {
 // ============================================================
 // ✅ CRÉER UN ABONNEMENT EN ATTENTE
 // ============================================================
- 
-
 async function createPendingSubscription(userId, offerId, offer, patientId = null) {
   try {
     const startDate = new Date();
@@ -182,14 +177,10 @@ async function createPendingSubscription(userId, offerId, offer, patientId = nul
         break;
     }
 
-     // total_visits est déjà défini dans l'offre
     const totalVisits = offer.total_visits || 0;
     const totalOrders = offer.total_orders || 0;
 
     console.log('📝 Création abonnement pour user_id:', userId);
-    console.log('📝 total_visits:', totalVisits);
-    console.log('📝 total_orders:', totalOrders);
-    console.log('📝 patient_id (optionnel):', patientId);
 
     const subscriptionData = {
       user_id: userId,
@@ -211,8 +202,6 @@ async function createPendingSubscription(userId, offerId, offer, patientId = nul
     if (patientId) {
       subscriptionData.patient_id = patientId;
       console.log('✅ patient_id ajouté:', patientId);
-    } else {
-      console.log('ℹ️ patient_id null - abonnement personnel');
     }
 
     const { data: subscription, error } = await supabase
@@ -236,7 +225,7 @@ async function createPendingSubscription(userId, offerId, offer, patientId = nul
 }
 
 // ============================================================
-// ✅ CRÉER UNE COMMANDE PONCTUELLE
+// ✅ CRÉER UNE COMMANDE PONCTUELLE EN ARRIÈRE-PLAN
 // ============================================================
 async function createPonctualOrder(paymentRecord, transactionId, orderData) {
   try {
@@ -308,6 +297,7 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
 
     console.log('✅ Commande ponctuelle créée:', newOrder.id);
 
+    // 1️⃣ NOTIFICATION À LA FAMILLE
     await supabase.from('notifications').insert({
       user_id: paymentRecord.user_id,
       title: '✅ Commande confirmée !',
@@ -320,6 +310,39 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
         target_name: targetName,
       },
     });
+
+    // 2️⃣ ✅ CORRECTIF : NOTIFIER TOUS LES AIDANTS DISPONIBLES ET SOUS LEUR QUOTA !
+    const { data: aidants } = await supabase
+      .from('aidants')
+      .select('user_id, current_orders, max_orders')
+      .eq('available', true)
+      .eq('is_verified', true)
+      .eq('status', 'approved');
+
+    if (aidants && aidants.length > 0) {
+      // Filtrer les aidants qui ont de la place
+      const availableAidants = aidants.filter(
+        a => (a.current_orders || 0) < (a.max_orders || 2)
+      );
+
+      if (availableAidants.length > 0) {
+        for (const aidant of availableAidants) {
+          await supabase.from('notifications').insert({
+            user_id: aidant.user_id, // ✅ Vrai ID de profil
+            title: '🛒 Nouvelle commande disponible',
+            body: `Commande de ${targetName} — ${orderDataToInsert.description}`,
+            type: 'commande',
+            data: { 
+              order_id: newOrder.id, 
+              action: 'take' 
+            },
+          });
+        }
+        console.log(`📡 [Webhook] ${availableAidants.length} aidants disponibles notifiés pour la commande ${newOrder.id}`);
+      } else {
+        console.log('ℹ️ Aucun aidant disponible (quotas maximum atteints)');
+      }
+    }
 
     return newOrder;
 
@@ -352,148 +375,68 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
       return null;
     }
 
-    // ✅ RÉCUPÉRER L'AIDANT ACTIF APRÈS PAIEMENT
     const familyId = visit.user_id;
     const targetType = visit.patient_id ? 'patient' : 'personal_account';
     const targetId = visit.patient_id || visit.user_id;
 
-    let aidantId = visit.aidant_id || null;
+    let aidantId = visit.aidant_id || visit.metadata?.selected_aidant || null;
     if (!aidantId) {
       aidantId = await getActiveAidantForTarget(targetType, targetId, familyId);
       console.log(`✅ Aidant trouvé après paiement: ${aidantId}`);
     }
 
-    // ✅ CONSTRUIRE L'OBJET DE MISE À JOUR
     const updateData = {
       status: 'planifiee',
       aidant_id: aidantId || null,
       metadata: {
         ...(visit.metadata || {}),
         payment_confirmed_at: new Date().toISOString(),
-        transaction_id: transactionId,
+        transaction_id: transaction_id,
         scheduled_from_draft: true,
         payment_completed: true,
-        webhook_processed: true,
-        webhook_processed_at: new Date().toISOString(),
         aidant_assigned_after_payment: !!aidantId,
+        selected_aidant: null,
+        wizard_choice: null,
       }
     };
 
-    // ✅ Pour les visites personnelles, s'assurer que patient_id est null
-    if (visit.target_type === 'personal' || visit.target_type === 'personal_account') {
-      updateData.patient_id = null;
+    if (visit.target_type === 'personal') {
+      delete (updateData as any).patient_id;
     }
 
-    console.log('📤 Mise à jour visite avec:', JSON.stringify(updateData, null, 2));
-
-    const { data: updatedVisit, error: updateError } = await supabase
+    const { data, error } = await supabase
       .from('visites')
       .update(updateData)
-      .eq('id', visitId)
-      .select()
+      .eq('id', id)
+      .select(`
+        *,
+        patient:patients(*),
+        aidant:aidants!visites_aidant_id_fkey (
+          id,
+          user_id,
+          user:profiles!aidants_user_id_fkey (id, full_name)
+        )
+      `)
       .single();
 
-    if (updateError) {
-      console.error('❌ Erreur mise à jour visite:', updateError.message);
-      
-      // ✅ TENTATIVE DE RÉCUPÉRATION
-      if (updateError.message.includes('chk_planned_not_draft')) {
-        console.log('🔄 Tentative de récupération avec patient_id = user_id...');
-        
-        if (!aidantId) {
-          aidantId = await getActiveAidantForTarget(targetType, targetId, familyId);
-        }
-        
-        const fallbackData = {
-          status: 'planifiee',
-          patient_id: visit.user_id,
-          aidant_id: aidantId || null,
-          target_type: 'personal',
-          target_name: visit.target_name || 'Personnel',
-          metadata: {
-            ...(visit.metadata || {}),
-            payment_confirmed_at: new Date().toISOString(),
-            transaction_id: transactionId,
-            scheduled_from_draft: true,
-            payment_completed: true,
-            webhook_processed: true,
-            webhook_processed_at: new Date().toISOString(),
-            aidant_assigned_after_payment: !!aidantId,
-            fallback_patient_id_used: true,
-          }
-        };
-        
-        const { data: retryVisit, error: retryError } = await supabase
-          .from('visites')
-          .update(fallbackData)
-          .eq('id', visitId)
-          .select()
-          .single();
-        
-        if (!retryError && retryVisit) {
-          console.log('✅ Visite récupérée avec patient_id fallback:', retryVisit.id);
-          
-          // ✅ NOTIFICATIONS POUR LE FALLBACK
-          if (retryVisit.aidant_id) {
-            const { data: aidant } = await supabase
-              .from('aidants')
-              .select('user_id')
-              .eq('id', retryVisit.aidant_id)
-              .single();
+    if (error) throw error;
 
-            if (aidant) {
-              await supabase.from('notifications').insert({
-                user_id: aidant.user_id,
-                title: '📅 Nouvelle visite à valider',
-                body: `Visite pour ${retryVisit.target_name || 'le patient'} le ${retryVisit.scheduled_date} à ${retryVisit.scheduled_time}`,
-                type: 'visite',
-                data: { visit_id: visitId, action: 'approve' },
-              });
-            }
-          }
+    const targetDisplay = data.target_name || (data.patient ? `${data.patient.first_name} ${data.patient.last_name}` : 'Personnel');
 
-          await supabase.from('notifications').insert({
-            user_id: retryVisit.user_id,
-            title: '✅ Visite planifiée !',
-            body: `Votre visite pour ${retryVisit.target_name || 'Personnel'} a été planifiée avec succès après paiement.`,
-            type: 'visite',
-            data: { visit_id: visitId, status: 'planifiee' },
-          });
-
-          return retryVisit;
-        }
-        
-        console.error('❌ Échec de la récupération:', retryError?.message);
-      }
-      
-      return null;
+    // 1️⃣ NOTIFICATION À L'AIDANT ASSIGNÉ
+    if (aidantId && data.aidant?.user?.id) {
+      await supabase.from('notifications').insert({
+        user_id: data.aidant.user.id, // ✅ ID utilisateur (profiles.id) à la place de l'aidant_id
+        title: '📅 Nouvelle visite à valider',
+        body: `Visite pour ${targetDisplay} le ${data.scheduled_date} à ${data.scheduled_time}`,
+        type: 'visite',
+        data: { visit_id: visitId, action: 'approve' },
+      });
     }
 
-    console.log('✅ Visite passée de brouillon à planifiee:', visitId);
-
-    // ✅ NOTIFICATIONS CORRIGÉES - AVEC USER_ID
-    if (updatedVisit.aidant_id) {
-      const { data: aidant } = await supabase
-        .from('aidants')
-        .select('user_id')
-        .eq('id', updatedVisit.aidant_id)
-        .single();
-
-      if (aidant) {
-        await supabase.from('notifications').insert({
-          user_id: aidant.user_id,
-          title: '📅 Nouvelle visite à valider',
-          body: `Visite pour ${updatedVisit.target_name || 'le patient'} le ${updatedVisit.scheduled_date} à ${updatedVisit.scheduled_time}`,
-          type: 'visite',
-          data: { visit_id: visitId, action: 'approve' },
-        });
-      }
-    }
-
-    const targetDisplay = updatedVisit.target_name || (updatedVisit.patient ? `${updatedVisit.patient.first_name} ${updatedVisit.patient.last_name}` : 'Personnel');
-
+    // 2️⃣ NOTIFICATION À LA FAMILLE
     await supabase.from('notifications').insert({
-      user_id: updatedVisit.user_id,
+      user_id: data.user_id,
       title: '✅ Visite planifiée !',
       body: `Votre visite pour ${targetDisplay} a été planifiée avec succès après paiement.`,
       type: 'visite',
@@ -511,7 +454,7 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
       })
       .eq('id', paymentRecord.id);
 
-    return updatedVisit;
+    return data;
 
   } catch (error) {
     console.error('❌ Erreur processPonctualVisit:', error.message);
@@ -522,8 +465,6 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
 // ============================================================
 // ✅ ACTIVER UN ABONNEMENT
 // ============================================================
- 
-
 async function activateSubscription(paymentRecord, subscriptionId) {
   try {
     if (!isValidUUID(subscriptionId)) {
@@ -547,13 +488,11 @@ async function activateSubscription(paymentRecord, subscriptionId) {
       return existingSub;
     }
 
-    // ✅ CORRECTION : Ne modifier que le statut, pas les compteurs
     const { data: subscription, error: subError } = await supabase
       .from('abonnements')
-      .update({
+      .update({ 
         status: 'actif',
         updated_at: new Date().toISOString(),
-        // ✅ NE PAS TOUCHER aux compteurs ici !
       })
       .eq('id', subscriptionId)
       .select()
@@ -565,11 +504,8 @@ async function activateSubscription(paymentRecord, subscriptionId) {
     }
 
     console.log('✅ Abonnement activé:', subscriptionId);
-    console.log('📊 total_visits:', subscription.total_visits);
-    console.log('📊 used_visits:', subscription.used_visits);
-    console.log('📊 remaining_visits:', subscription.remaining_visits);
 
-    // ✅ Notification
+    // Notification
     await supabase.from('notifications').insert({
       user_id: paymentRecord.user_id,
       title: '✅ Abonnement activé !',
@@ -611,7 +547,6 @@ router.post('/generate-payment', async (req, res) => {
     const { data: authData, error: authError } = await supabase.auth.getUser(token);
 
     if (authError || !authData?.user) {
-      console.error('❌ Auth Supabase payment error:', authError?.message || 'Utilisateur non trouvé');
       return res.status(401).json({
         success: false,
         message: 'Session invalide ou expirée',
@@ -648,14 +583,6 @@ router.post('/generate-payment', async (req, res) => {
       visit_id = null,
       is_visit = false,
     } = req.body;
-
-    console.log('📥 is_ponctual reçu du frontend:', is_ponctual);
-    console.log('📥 abonnement_id reçu:', abonnement_id);
-    console.log('📥 patient_id reçu:', patient_id);
-    console.log('📥 target_type reçu:', target_type);
-    console.log('📥 target_name reçu:', target_name);
-    console.log('📥 visit_id reçu:', visit_id);
-    console.log('📥 is_visit reçu:', is_visit);
 
     const finalAmount = Number(montant || amount || 0);
 
@@ -694,7 +621,6 @@ router.post('/generate-payment', async (req, res) => {
     let subscriptionRecord = null;
     let actualAbonnementId = null;
 
-    // ✅ Créer l'abonnement en attente (si ce n'est pas ponctuel)
     if (!is_ponctual && abonnement_id) {
       const { data: offer, error: offerError } = await supabase
         .from('offres')
@@ -718,432 +644,163 @@ router.post('/generate-payment', async (req, res) => {
       );
 
       if (!subscriptionRecord) {
-        console.error('❌ Échec création abonnement');
         return res.status(500).json({
           success: false,
-          message: 'Erreur lors de la création de l\'abonnement. Veuillez réessayer.',
+          error: "Erreur lors du verrouillage de l'abonnement",
         });
       }
 
       actualAbonnementId = subscriptionRecord.id;
-      console.log('✅ Abonnement créé (en attente):', actualAbonnementId);
     }
 
-    FedaPay.setApiKey(FEDAPAY_SECRET_KEY);
-    FedaPay.setEnvironment(FEDAPAY_ENV === 'sandbox' ? 'sandbox' : 'live');
-
-    console.log('💳 Création paiement FedaPay:', {
-      env: FEDAPAY_ENV === 'sandbox' ? 'sandbox' : 'live',
-      amount: Math.round(finalAmount),
-      email: finalEmail,
-      description: description || 'Santé Plus',
-      is_ponctual: is_ponctual || false,
-      is_visit: is_visit || false,
-      visit_id: visit_id || null,
-      abonnement_id: actualAbonnementId || null,
-      patient_id: patient_id || null,
-    });
-
-    // ✅ METADATA AVEC TYPE EXPLICITE
-    const metadata = {
-      user_id: user.id,
-      plan_id: plan_id || null,
-      abonnement_id: actualAbonnementId || null,
-      order_id: order_id || null,
-      is_ponctual: is_ponctual || false,
-      source: 'sante_plus_services',
-      order_data: is_ponctual ? order_data : null,
-      patient_id: patient_id || null,
-      target_type: target_type || 'personal',
-      target_name: target_name || finalName,
-      is_visit: is_visit || false,
-      visit_id: visit_id || null,
-      // ✅ TYPE EXPLICITE POUR LE WEBHOOK
-      type: is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription'),
-    };
-
-    if (is_ponctual) {
-      delete metadata.abonnement_id;
-    }
-
-    console.log('📦 Métadonnées envoyées à FedaPay:', metadata);
-
-    const transaction = await Transaction.create({
-      description: description || 'Abonnement Santé Plus',
-      amount: Math.round(finalAmount),
-      currency: {
-        iso: 'XOF',
-      },
-      callback_url: callbackUrl,
-      cancel_url: cancelUrl,
-      customer: {
-        email: finalEmail,
-        firstname: firstName,
-        lastname: lastName,
-      },
-      metadata: metadata,
-    });
-
-    console.log('✅ Transaction FedaPay créée:', transaction?.id);
-
-    const paymentUrl =
-      transaction?.payment_url ||
-      transaction?.url ||
-      transaction?.checkout_url;
-
-    if (!paymentUrl) {
-      console.error('❌ Transaction FedaPay sans payment_url:', transaction);
-      return res.status(500).json({
-        success: false,
-        message: "FedaPay n'a pas retourné de lien de paiement",
-        details: transaction,
-      });
-    }
-
-    // ✅ Enregistrement du paiement
     const paymentData = {
-      user_id: user.id,
-      amount: finalAmount,
-      currency: 'XOF',
-      method: 'fedapay',
-      reference: String(transaction.id),
-      status: 'en_attente',
-      abonnement_id: actualAbonnementId || null,
-      metadata: {
-        description: description || 'Abonnement Santé Plus',
-        plan_id: plan_id || null,
-        abonnement_id: actualAbonnementId || null,
-        order_id: order_id || null,
-        is_ponctual: is_ponctual || false,
-        transaction_id: String(transaction.id),
-        payment_url: paymentUrl,
-        order_data: is_ponctual ? order_data : null,
-        patient_id: patient_id || null,
-        target_type: target_type || 'personal',
-        target_name: target_name || finalName,
-        is_visit: is_visit || false,
-        visit_id: visit_id || null,
-        // ✅ TYPE EXPLICITE POUR LE WEBHOOK
-        type: is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription'),
-      },
-    };
-
-    console.log('📝 Enregistrement paiement en base:', {
-      reference: transaction.id,
+      reference: null,
       user_id: user.id,
       amount: finalAmount,
       is_ponctual: is_ponctual,
       is_visit: is_visit,
-      visit_id: visit_id,
+      visit_id: visit_id || null,
       abonnement_id: actualAbonnementId || null,
       patient_id: patient_id || null,
       type: is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription'),
+    };
+
+    // ✅ Initialiser FedaPay
+    FedaPay.setApiKey(FEDAPAY_SECRET_KEY);
+    FedaPay.setEnvironment(FEDAPAY_ENV);
+
+    const transaction = await Transaction.create({
+      description: description || 'Paiement Santé Plus Services',
+      amount: finalAmount,
+      currency: { iso: 'XOF' },
+      callback_url: callbackUrl,
+      customer: {
+        firstname: firstName,
+        lastname: lastName,
+        email: finalEmail,
+      }
     });
 
-    const { data: payment, error: dbError } = await supabase
+    const token = await transaction.generateToken();
+
+    // Mettre à jour le paiement avec la référence FedaPay
+    paymentData.reference = transaction.id;
+
+    const { error: insertError } = await supabase
       .from('paiements')
-      .insert(paymentData)
-      .select()
-      .single();
+      .insert(paymentData);
 
-    if (dbError) {
-      console.error('❌ ERREUR SAUVEGARDE PAIEMENT:', dbError.message);
-
-      if (subscriptionRecord && actualAbonnementId) {
-        await supabase
-          .from('abonnements')
-          .delete()
-          .eq('id', actualAbonnementId);
-        console.log('🗑️ Abonnement supprimé (paiement échoué)');
-      }
-
-      return res.status(500).json({
-        success: false,
-        message: 'Erreur lors de l\'enregistrement du paiement. Veuillez réessayer.',
-      });
-    }
-
-    console.log('✅ Paiement enregistré en base:', payment?.id);
-
-    if (subscriptionRecord && actualAbonnementId) {
-      await supabase.from('notifications').insert({
-        user_id: user.id,
-        title: '⏳ Abonnement en attente',
-        body: `Votre abonnement ${description || 'Santé Plus'} est en attente de confirmation de paiement.`,
-        type: 'paiement',
-        data: {
-          subscription_id: actualAbonnementId,
-          status: 'en_attente',
-        },
-      });
-    }
-
-    const duration = Date.now() - startTime;
-    console.log(`⏱️ Paiement généré en ${duration}ms`);
-
-    return res.json({
-      success: true,
-      payment_url: paymentUrl,
-      url: paymentUrl,
-      checkout_url: paymentUrl,
-      transaction_id: transaction.id,
-      reference: transaction.reference || `FEDAPAY-${transaction.id}`,
-      subscription_id: actualAbonnementId,
-      raw: transaction,
-    });
-
-  } catch (err) {
-    const duration = Date.now() - startTime;
-    console.error(`❌ Erreur création transaction FedaPay (${duration}ms):`, err.message);
-
-    const errorMessage = err?.httpResponse?.data?.message || err?.message || 'Impossible de créer la transaction FedaPay';
-
-    return res.status(500).json({
-      success: false,
-      message: errorMessage,
-      error: errorMessage,
-    });
-  }
-});
-
-// ============================================================
-// ✅ VÉRIFIER LE STATUT D'UN PAIEMENT
-// ============================================================
-router.get('/verify-payment', async (req, res) => {
-  try {
-    const { transaction_id, reference } = req.query;
-
-    if (!transaction_id && !reference) {
-      return res.status(400).json({
-        success: false,
-        message: 'Transaction ID ou référence requis',
-      });
-    }
-
-    let query = supabase.from('paiements').select('*');
-
-    if (transaction_id) {
-      query = query.eq('reference', String(transaction_id));
-    } else if (reference) {
-      query = query.eq('reference', String(reference));
-    }
-
-    const { data, error } = await query.single();
-
-    if (error) {
-      return res.status(404).json({
-        success: false,
-        message: 'Paiement non trouvé',
-      });
-    }
-
-    try {
-      const transaction = await Transaction.retrieve(data.reference);
-      if (transaction && transaction.status === 'paid' && data.status !== 'valide') {
-        await supabase
-          .from('paiements')
-          .update({
-            status: 'valide',
-            paid_at: new Date().toISOString(),
-          })
-          .eq('id', data.id);
-
-        data.status = 'valide';
-      }
-    } catch (fedapayError) {
-      console.warn('⚠️ Erreur vérification FedaPay:', fedapayError.message);
+    if (insertError) {
+      console.error('❌ Erreur insertion paiement:', insertError);
+      return res.status(500).json({ error: insertError.message });
     }
 
     res.json({
-      success: data.status === 'valide',
-      payment: data,
+      success: true,
+      token: token.token,
+      url: token.url,
+      reference: transaction.id,
     });
-  } catch (error) {
-    console.error('❌ Verify payment error:', error.message);
-    res.status(500).json({
-      success: false,
-      message: 'Erreur lors de la vérification',
-    });
+
+  } catch (error: any) {
+    console.error('❌ Create payment error:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
 // ============================================================
-// 🔔 WEBHOOK FEDAPAY - CORRIGÉ AVEC TYPE EXPLICITE
+// ✅ WEBHOOK DE CONFIRMATION AUTOMATIQUE FEDAPAY
 // ============================================================
-router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-  const startTime = Date.now();
-  let transactionId = null;
-
+router.post('/webhook', async (req, res) => {
   try {
-    let body = req.body;
-
-    if (Buffer.isBuffer(body)) {
-      const str = body.toString('utf8');
-      body = JSON.parse(str);
-    } else if (typeof body === 'string') {
-      body = JSON.parse(body);
-    } else if (Array.isArray(body) && body.length > 0) {
-      body = body[0];
-    }
-
     console.log('📥 Webhook reçu');
+    const { event, entity } = req.body;
 
-    const event = body?.event || body?.name;
-    const data = body?.data || body?.entity;
-
-    if (!event) {
-      console.warn('⚠️ Événement manquant dans le body');
-      return res.status(200).json({
-        success: false,
-        message: 'Événement manquant, webhook accepté',
-      });
+    if (event !== 'transaction.approved') {
+      return res.json({ success: true, message: 'Événement ignoré' });
     }
 
-    transactionId = String(data?.id);
-    console.log(`📥 Événement reçu: ${event} | Transaction: ${transactionId}`);
+    const transactionId = entity.id;
+    console.log(`📥 Événement reçu: transaction.approved | Transaction: ${transactionId}`);
 
-    if (event !== 'transaction.approved' && event !== 'transaction.paid') {
-      console.log(`ℹ️ Événement ignoré: ${event}`);
-      return res.status(200).json({
-        success: true,
-        message: `Événement ${event} ignoré`,
-      });
-    }
-
+    // Rechercher le paiement avec retry
     const payment = await findPaymentWithRetry(transactionId);
 
     if (!payment) {
-      console.error(`❌ Paiement non trouvé après ${MAX_RETRY_ATTEMPTS} tentatives`);
-      return res.status(200).json({
-        success: false,
-        message: 'Paiement non trouvé, webhook accepté',
-        transaction_id: transactionId,
-      });
+      console.error(`❌ Impossible de trouver le paiement pour la transaction ${transactionId} après ${MAX_RETRY_ATTEMPTS} tentatives`);
+      return res.status(404).json({ error: 'Paiement introuvable' });
     }
 
-    const metadata = payment.metadata || {};
-    
-    // ✅ UTILISER LE TYPE EXPLICITE
-    const type = metadata.type || 'subscription'; // 'visit' | 'order' | 'subscription'
-    const isPonctual = metadata.is_ponctual === true || metadata.is_ponctual === 'true';
-    const subscriptionId = metadata.abonnement_id || null;
-    const orderData = metadata.order_data || null;
-    const visitId = metadata.visit_id || null;
+    console.log(`✅ Paiement trouvé : ${payment.id}`);
+
+    // Si le paiement est déjà traité, on arrête
+    if (payment.status === 'completed') {
+      return res.json({ success: true, message: 'Paiement déjà traité' });
+    }
+
+    // Mettre à jour le paiement
+    const { error: updateError } = await supabase
+      .from('paiements')
+      .update({
+        status: 'completed',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', payment.id);
+
+    if (updateError) throw updateError;
+
+    // Récupérer les métadonnées de la transaction FedaPay
+    FedaPay.setApiKey(FEDAPAY_SECRET_KEY);
+    FedaPay.setEnvironment(FEDAPAY_ENV);
+    const transaction = await Transaction.retrieve(transactionId);
+    const metadata = transaction.custom_metadata || {};
+
+    const type = metadata.type || payment.type;
+    const isPonctual = metadata.is_ponctual === 'true' || payment.is_ponctual;
 
     console.log('📦 Métadonnées extraites:', {
       type,
       isPonctual,
-      visitId,
-      subscriptionId,
-      hasOrderData: !!orderData,
+      visitId: metadata.visit_id || payment.visit_id,
+      subscriptionId: metadata.abonnement_id || payment.abonnement_id,
     });
 
-    const { data: updatedPayment, error: updateError } = await supabase
-      .from('paiements')
-      .update({
-        status: 'valide',
-        paid_at: new Date().toISOString(),
-        provider_reference: transactionId,
-      })
-      .eq('id', payment.id)
-      .select()
-      .single();
-
-    if (updateError) {
-      console.error('❌ Erreur mise à jour paiement:', updateError.message);
-    }
-
-    const paymentRecord = updatedPayment || payment;
-    let result = null;
-
-    // ✅ TRAITEMENT SELON LE TYPE EXPLICITE
-    if (type === 'visit' && visitId) {
-      console.log('🔄 Traitement d\'une visite ponctuelle:', visitId);
-      result = await processPonctualVisit(paymentRecord, transactionId, visitId, metadata);
-
-      if (result) {
-        console.log('✅ Visite ponctuelle traitée avec succès');
-      } else {
-        console.warn('⚠️ La visite ponctuelle n\'a pas pu être traitée, mais le paiement est validé');
-      }
-
-    } else if (type === 'order' || isPonctual) {
+    // 1️⃣ CAS A : COMMANDE PONCTUELLE (Offline creation)
+    if (type === 'order' || isPonctual) {
       console.log('📦 Traitement commande ponctuelle...');
-      result = await createPonctualOrder(paymentRecord, transactionId, orderData);
-
-      if (result) {
-        console.log('✅ Commande ponctuelle traitée avec succès');
-      } else {
-        console.warn('⚠️ La commande ponctuelle n\'a pas pu être créée, mais le paiement est validé');
+      const orderData = metadata.order_data ? JSON.parse(metadata.order_data) : null;
+      
+      const newOrder = await createPonctualOrder(payment, transactionId, orderData);
+      if (newOrder) {
+        console.log('✅ Commande ponctuelle créée avec succès');
       }
-
-    } else if (type === 'subscription' && subscriptionId) {
-      console.log('📦 Activation de l\'abonnement:', subscriptionId);
-      result = await activateSubscription(paymentRecord, subscriptionId);
-
-      if (result) {
+    } 
+    // 2️⃣ CAS B : VISITE PONCTUELLE
+    else if (type === 'visit' || payment.is_visit) {
+      const visitId = metadata.visit_id || payment.visit_id;
+      console.log('🔄 Traitement visite ponctuelle:', visitId);
+      const updatedVisit = await processPonctualVisit(payment, transactionId, visitId, metadata);
+      if (updatedVisit) {
+        console.log('✅ Visite ponctuelle activée avec succès');
+      }
+    }
+    // 3️⃣ CAS C : ABONNEMENT
+    else if (type === 'subscription' || payment.abonnement_id) {
+      const subId = payment.abonnement_id;
+      console.log('📦 Activation de l\'abonnement:', subId);
+      const activeSub = await activateSubscription(payment, subId);
+      if (activeSub) {
         console.log('✅ Abonnement activé avec succès');
-      } else {
-        console.warn('⚠️ L\'abonnement n\'a pas pu être activé, mais le paiement est validé');
       }
-    } else {
-      console.warn('⚠️ Aucun traitement spécifique trouvé pour ce paiement (type:', type, ')');
     }
 
-    // ✅ NOTIFICATION UNIFIÉE
-    try {
-      let notificationTitle = '✅ Paiement confirmé';
-      let notificationBody = `Votre paiement de ${paymentRecord.amount} FCFA a été confirmé.`;
-
-      if (type === 'visit' && result) {
-        notificationTitle = '✅ Visite planifiée !';
-        notificationBody = `Votre visite a été planifiée avec succès après paiement.`;
-      } else if (type === 'order' && result) {
-        notificationTitle = '✅ Commande confirmée !';
-        notificationBody = `Votre commande a été enregistrée avec succès après paiement.`;
-      } else if (type === 'subscription' && result) {
-        notificationTitle = '✅ Abonnement activé !';
-        notificationBody = `Votre abonnement est maintenant actif.`;
-      }
-
-      await supabase.from('notifications').insert({
-        user_id: paymentRecord.user_id,
-        title: notificationTitle,
-        body: notificationBody,
-        type: 'paiement',
-        data: { 
-          payment_id: paymentRecord.id,
-          type: type,
-          processed: !!result,
-        },
-      });
-    } catch (notifError) {
-      console.error('❌ Erreur notification paiement:', notifError.message);
-    }
-
-    const duration = Date.now() - startTime;
-    console.log(`⏱️ Webhook traité en ${duration}ms`);
-
-    return res.status(200).json({
-      success: true,
-      message: 'Paiement traité avec succès',
-      payment_id: paymentRecord.id,
-      type: type,
-      processed: !!result,
-    });
+    res.json({ success: true });
 
   } catch (error) {
-    const duration = Date.now() - startTime;
-    console.error(`❌ Webhook error (${duration}ms):`, error.message);
-    console.error('❌ Stack:', error.stack);
-
-    return res.status(200).json({
-      success: false,
-      message: 'Erreur interne, webhook accepté',
-      error: error.message,
-      transaction_id: transactionId,
-    });
+    console.error('❌ Webhook error:', error.message);
+    res.status(500).json({ error: error.message });
   }
 });
 
 module.exports = router;
+module.exports.handleWebhook = handleWebhook;
