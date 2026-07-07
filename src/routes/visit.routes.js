@@ -915,9 +915,10 @@ router.post('/', async (req, res) => {
       data: { visit_id: visit.id, status: 'planifiee' },
     });
 
-    if (finalAidantId) {
+    // ✅ CORRECTION : Utiliser le user_id de l'aidant pour l'enregistrement (sinon viol de FK sur "notifications")
+    if (finalAidantId && visit.aidant?.user_id) {
       await createNotification({
-        userId: finalAidantId,
+        userId: visit.aidant.user_id, // ✅ ID utilisateur (profiles.id) à la place de l'aidant_id
         title: '📅 Nouvelle visite à valider',
         body: `Visite pour ${targetDisplay} le ${visit.scheduled_date} à ${visit.scheduled_time}`,
         type: 'visite',
@@ -1151,13 +1152,11 @@ router.post('/:id/confirm-payment', async (req, res) => {
         aidantId = convertedId;
         console.log(`🔄 Aidant sélectionné dans wizard récupéré: ${aidantId}`);
       } else {
-        // Si l'aidant n'existe plus, on le remet à null
         aidantId = null;
         console.warn(`⚠️ Aidant sélectionné dans wizard introuvable, réassignation automatique`);
       }
     }
 
-    // ✅ Si toujours pas d'aidant, essayer d'en trouver un automatiquement
     if (!aidantId) {
       let foundId = await getActiveAidantForTarget(targetType, targetId, familyId);
       if (foundId) {
@@ -1169,12 +1168,11 @@ router.post('/:id/confirm-payment', async (req, res) => {
       }
     }
 
-    // ✅ Mettre à jour la visite avec l'aidant trouvé
     const { data: updatedVisit, error: updateError } = await supabase
       .from('visites')
       .update({
         status: 'planifiee',
-        aidant_id: aidantId, // ← Maintenant l'aidant du wizard est bien assigné !
+        aidant_id: aidantId,
         metadata: {
           ...(visit.metadata || {}),
           payment_confirmed_at: new Date().toISOString(),
@@ -1182,7 +1180,7 @@ router.post('/:id/confirm-payment', async (req, res) => {
           scheduled_from_draft: true,
           payment_completed: true,
           aidant_assigned_after_payment: !!aidantId,
-           selected_aidant: null, // On nettoie car maintenant officiellement assigné
+          selected_aidant: null,
           wizard_choice: null,
         }
       })
@@ -1216,10 +1214,10 @@ router.post('/:id/confirm-payment', async (req, res) => {
 
     const targetDisplay = updatedVisit.target_name || (updatedVisit.patient ? `${updatedVisit.patient.first_name} ${updatedVisit.patient.last_name}` : 'Personnel');
 
-    // ✅ Notification à l'aidant s'il a été assigné
-    if (aidantId) {
+    // ✅ CORRECTION : Utiliser updatedVisit.aidant.user_id (profiles.id) à la place de aidantId
+    if (aidantId && updatedVisit.aidant?.user_id) {
       await createNotification({
-        userId: aidantId,
+        userId: updatedVisit.aidant.user_id, // ✅ ID utilisateur (profiles.id) à la place de l'aidant_id
         title: '📅 Nouvelle visite à valider',
         body: `Visite pour ${targetDisplay} le ${updatedVisit.scheduled_date} à ${updatedVisit.scheduled_time}`,
         type: 'visite',
@@ -1495,13 +1493,22 @@ router.post('/:id/reassign', roleMiddleware(['admin', 'coordinator']), async (re
 
     const targetDisplay = visit.target_name || (visit.patient ? `${visit.patient.first_name} ${visit.patient.last_name}` : 'Personnel');
 
-    await createNotification({
-      userId: finalAidantId,
-      title: '📅 Nouvelle visite assignée',
-      body: `Vous avez été assigné à une visite pour ${targetDisplay} le ${visit.scheduled_date} à ${visit.scheduled_time}.`,
-      type: 'visite',
-      data: { visit_id: id, action: 'approve' },
-    });
+    // ✅ CORRECTION : Récupérer le user_id de l'aidant dans la table "aidants" avant de l'enregistrer (sinon viol de FK sur "notifications")
+    const { data: aidantProfile } = await supabase
+      .from('aidants')
+      .select('user_id')
+      .eq('id', finalAidantId)
+      .maybeSingle();
+
+    if (aidantProfile?.user_id) {
+      await createNotification({
+        userId: aidantProfile.user_id, // ✅ ID utilisateur (profiles.id) à la place de finalAidantId
+        title: '📅 Nouvelle visite assignée',
+        body: `Vous avez été assigné à une visite pour ${targetDisplay} le ${visit.scheduled_date} à ${visit.scheduled_time}.`,
+        type: 'visite',
+        data: { visit_id: id, action: 'approve' },
+      });
+    }
 
     res.json({ success: true, visit: data });
   } catch (error) {
