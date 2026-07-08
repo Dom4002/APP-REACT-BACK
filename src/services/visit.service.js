@@ -65,7 +65,7 @@ const createVisit = async ({
   coordinatorId = null,
 }) => {
   try {
-    // 1. Déterminer la cible finale de manière flexible (patient ou personnel)
+    // 1. Déterminer la cible finale
     const finalTargetType = targetType || (patientId ? VISIT_TYPES.PATIENT : VISIT_TYPES.PERSONAL);
     const finalTargetName = targetName || (patientId ? null : profile?.full_name);
     const finalUserId = targetUserId || userId;
@@ -97,46 +97,44 @@ const createVisit = async ({
       paymentAmount = getVisitPrice(durationMinutes);
     }
 
-    // 3. Déterminer l'aidant à assigner
-    let finalAidantId = aidantId || null;
+    // 3. Déterminer l'aidant à assigner (Scénario d'évitement des contraintes SQL de Brouillon)
+    let finalAidantId = null;
+    let selectedAidantIdToStore = selectedAidantId || null;
 
-    if (finalAidantId) {
-      const convertedId = await getAidantIdFromUserIdOrId(finalAidantId);
-      if (convertedId) finalAidantId = convertedId;
+    // Si l'utilisateur a choisi un aidant via le wizard
+    if (selectedAidantId) {
+      const convertedId = await getAidantIdFromUserIdOrId(selectedAidantId);
+      if (convertedId) {
+        selectedAidantIdToStore = convertedId;
+        // On ne l'assigne à aidant_id que si ce n'est pas un brouillon (à cause de chk_draft_no_aidant)
+        if (status !== VISIT_STATUS.DRAFT) {
+          finalAidantId = convertedId;
+        }
+        console.log(`✅ Aidant choisi via wizard mis en attente pour le brouillon: ${convertedId}`);
+      }
     }
 
-    if (!finalAidantId && status !== VISIT_STATUS.DRAFT) {
+    // Si aucun aidant n'est encore sélectionné
+    if (!finalAidantId && !selectedAidantIdToStore) {
       const targetTypeForAidant = patientId ? VISIT_TYPES.PATIENT : VISIT_TYPES.PERSONAL_ACCOUNT;
       const targetIdForAidant = patientId || finalUserId;
 
+      // Chercher si un aidant permanent est déjà lié
       let foundId = await getActiveAidantForTarget(targetTypeForAidant, targetIdForAidant, familyId);
 
       if (foundId) {
         const convertedId = await getAidantIdFromUserIdOrId(foundId);
-        if (convertedId) finalAidantId = convertedId;
-      } else if (selectedAidantId && wizardChoice) {
-        const convertedId = await getAidantIdFromUserIdOrId(selectedAidantId);
         if (convertedId) {
-          if (wizardChoice === 'permanente') {
-            const { data: aidant } = await supabase
-              .from('aidants')
-              .select('current_assignments, max_assignments')
-              .eq('user_id', selectedAidantId)
-              .single();
-
-            if (aidant && aidant.current_assignments >= aidant.max_assignments) {
-              return {
-                success: false,
-                error: `Cet aidant est complet (${aidant.current_assignments}/${aidant.max_assignments})`,
-                code: 'AIDANT_FULL',
-              };
-            }
+          if (status !== VISIT_STATUS.DRAFT) {
             finalAidantId = convertedId;
-          } else if (wizardChoice === 'ponctuelle') {
-            finalAidantId = convertedId;
+          } else {
+            // S'il s'agit d'un brouillon ponctuel, on le garde au chaud dans selectedAidantIdToStore
+            selectedAidantIdToStore = convertedId;
           }
+          console.log(`✅ Aidant permanent trouvé et réservé pour la confirmation: ${convertedId}`);
         }
-      } else if (!finalAidantId && profile?.role === 'family') {
+      } else if (profile?.role === 'family') {
+        // Pas d'aidant habituel lié → LE WIZARD EST REQUIS pour choisir un intervenant disponible
         const wizardOptions = await getVisitWizardOptions(
           targetTypeForAidant,
           targetIdForAidant,
@@ -156,25 +154,24 @@ const createVisit = async ({
             };
           }
         } else if (wizardOptions.hasAvailableAidants) {
-          if (!selectedAidantId || !wizardChoice) {
-            return {
-              success: false,
-              error: 'Veuillez sélectionner un aidant et un type d\'assignation',
-              code: 'WIZARD_REQUIRED',
-              wizard: wizardOptions,
-            };
-          }
+          // Bloquer la création directe et renvoyer WIZARD_REQUIRED pour forcer l'ouverture du sélecteur d'aidant
+          return {
+            success: false,
+            error: 'Veuillez sélectionner un aidant et un type d\'assignation',
+            code: 'WIZARD_REQUIRED',
+            wizard: wizardOptions,
+          };
         }
       }
     }
 
-    // 4. Créer la visite en base de données avec des types de colonnes stricts
+    // 4. Créer la visite en base de données
     const visitData = {
       user_id: finalUserId,
       patient_id: patientId || null,
       target_type: finalTargetType,
       target_name: finalTargetName,
-      aidant_id: finalAidantId,
+      aidant_id: finalAidantId, // Sera NULL si brouillon pour respecter chk_draft_no_aidant
       coordinator_id: coordinatorId || null,
       scheduled_date: scheduledDate,
       scheduled_time: scheduledTime,
@@ -184,14 +181,14 @@ const createVisit = async ({
       // ✅ ALIGNEMENT CONTRAINTES POSTGRESQL (Sans "is_paid" qui n'existe pas !)
       is_draft: requiresPayment,                         // chk_draft_is_draft (true si brouillon)
       requires_payment: requiresPayment,                 // chk_draft_requires_payment (true si brouillon)
-      is_ponctual: isPonctual || requiresPayment,         // Index filtre et stockage
+      is_ponctual: isPonctual || requiresPayment,         
       payment_status: requiresPayment ? 'pending' : null, // chk_payment_status_completed (valeurs: pending, completed)
       payment_amount: requiresPayment ? paymentAmount : null,
       
       actions: [],
       notes: notes || null,
       is_urgent: isUrgent || false,
-      visit_type: isPonctual || requiresPayment ? 'ponctuelle' : 'permanente', // Doit correspondre à la contrainte visit_type_check
+      visit_type: isPonctual || requiresPayment ? 'ponctuelle' : 'permanente',
       assignment_type: assignmentType || 'ponctuelle',
       requested_by: userId,
       draft_expires_at: requiresPayment ? new Date(Date.now() + DRAFT_EXPIRY_HOURS * 60 * 60 * 1000).toISOString() : null,
@@ -213,7 +210,7 @@ const createVisit = async ({
         ponctual_mode: requiresPayment ? true : false,
         wizard_choice: wizardChoice || null,
         waiting_for_aidant: status === VISIT_STATUS.WAITING_AIDANT,
-        selected_aidant: selectedAidantId || null,
+        selected_aidant: selectedAidantIdToStore || null, // ✅ IMPORTANT : Stocké ici pour être récupéré lors du paiement !
       },
     };
 
@@ -252,7 +249,7 @@ const createVisit = async ({
       };
     }
 
-    // 5. Notifications push d'arrière-plan
+    // 5. Notifications
     const targetDisplay = finalTargetName || 'Patient';
 
     if (requiresPayment) {
@@ -286,7 +283,6 @@ const createVisit = async ({
         },
       });
     } else if (finalAidantId) {
-      // Notification aidant (utiliser son user_id de profil)
       if (visit.aidant?.user?.id) {
         await createNotification({
           userId: visit.aidant.user.id,
