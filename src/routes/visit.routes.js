@@ -1,4 +1,5 @@
 // 📁 backend/src/routes/visit.routes.js
+// ✅ ROUTEUR VISITES COMPLET : ALIGNEMENT DES CONTRAINTES POSTGRES ET PASSAGE DE L'ÉTAT DRAFT EN PRODUCTION
 
 const express = require('express');
 const router = express.Router();
@@ -60,7 +61,6 @@ const getAidantIdFromUserId = async (userId) => {
 // RÉCUPÉRER L'AIDANT_ID DEPUIS UN USER_ID OU AIDANT_ID
 // =============================================
 const getAidantIdFromUserIdOrId = async (userIdOrId) => {
-  // 1. Vérifier si c'est déjà un aidant_id
   const { data: aidantById, error: errorById } = await supabase
     .from('aidants')
     .select('id')
@@ -71,7 +71,6 @@ const getAidantIdFromUserIdOrId = async (userIdOrId) => {
     return aidantById.id;
   }
 
-  // 2. Vérifier si c'est un user_id
   const { data: aidantByUser, error: errorByUser } = await supabase
     .from('aidants')
     .select('id')
@@ -313,7 +312,7 @@ router.get('/drafts/my', async (req, res) => {
 
 
 // =============================================
-// 2️⃣ ROUTES AVEC LOGIQUE GENERIQUE (ROUTE COMMUNE '/')
+// 2️⃣ ROUTES DE MANIPULATION D'ÉCRITURE (ROUTE GENERIQUE '/')
 // =============================================
 
 // ✅ 2.1 LISTE DE TOUTES LES VISITES
@@ -482,21 +481,6 @@ router.post('/', async (req, res) => {
 
       if (accountError || !account) {
         return res.status(404).json({ error: 'Compte non trouvé' });
-      }
-
-      const { data: links, error: linksError } = await supabase
-        .from('patient_family_links')
-        .select('patient_id')
-        .eq('family_id', target_user_id)
-        .limit(1);
-
-      const hasPatient = links && links.length > 0;
-
-      if (hasPatient) {
-        return res.status(400).json({ 
-          error: 'Ce compte a des patients. Veuillez choisir un patient spécifique ou utiliser target_type "account" pour planifier pour le compte lui-même.',
-          hasPatient: true,
-        });
       }
 
       finalPatientId = null;
@@ -696,8 +680,6 @@ router.post('/', async (req, res) => {
                   });
                 }
                 finalAidantId = selectedAidantId;
-                
-                // TODO: Implémenter assignAidantToTarget si requis côté backend
                 console.log('📌 Assignation permanente simulée pour l\'aidant:', finalAidantId);
               }
             } else {
@@ -753,34 +735,27 @@ router.post('/', async (req, res) => {
     const visitData = {
       user_id: finalUserId,
       patient_id: finalPatientId,
-      
       target_type: finalTargetType,
       target_name: finalTargetName,
-      
       aidant_id: finalAidantId,
       coordinator_id: ['admin', 'coordinator'].includes(profile.role) ? user.id : null,
       scheduled_date,
       scheduled_time,
       duration_minutes: duration_minutes || 60,
       status: status,
+      is_draft: requiresPayment, // ✅ ALIGNEMENT DES CONTRAINTES POSTGRESQL "chk_draft_is_draft"
       actions: [],
       notes: notes || null,
       is_urgent: is_urgent || false,
-      
-      visit_type: is_ponctual || requiresPayment ? 'ponctuelle' : 'permanente',
-      
+      visit_type: finalPatientId ? 'patient' : 'personal',
       assignment_type: assignment_type || 'ponctuelle',
-      
       requested_by: user.id,
       draft_expires_at: requiresPayment ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() : null,
       subscription_id: subscriptionId,
-      
       is_permanent: wizard_choice === 'permanente',
-      
       assigned_by_admin: ['admin', 'coordinator'].includes(profile.role),
       admin_assigned_at: ['admin', 'coordinator'].includes(profile.role) ? new Date().toISOString() : null,
       waiting_for_aidant_since: status === 'en_attente_aidant' ? new Date().toISOString() : null,
-      
       metadata: {
         created_by: user.id,
         created_at: new Date().toISOString(),
@@ -874,7 +849,7 @@ router.post('/', async (req, res) => {
 
     if (requiresPayment) {
       await createNotification({
-        userId: finalUserId,
+        userId: user.id,
         title: '💳 Paiement requis pour planifier la visite',
         body: `Un paiement de ${paymentAmount} FCFA est requis pour planifier la visite de ${targetDisplay}.`,
         type: 'visite',
@@ -907,14 +882,13 @@ router.post('/', async (req, res) => {
     }
 
     await createNotification({
-      userId: finalUserId,
+      userId: user.id,
       title: '📅 Nouvelle visite planifiée',
       body: `Une visite pour ${targetDisplay} a été planifiée le ${visit.scheduled_date} à ${visit.scheduled_time}.`,
       type: 'visite',
       data: { visit_id: visit.id, status: 'planifiee' },
     });
 
-    // ✅ CORRECTION : Utiliser le user_id de l'aidant pour l'enregistrement (sinon viol de FK sur "notifications")
     if (finalAidantId && visit.aidant?.user_id) {
       await createNotification({
         userId: visit.aidant.user_id, // ✅ ID de profil (profiles.id) à la place de l'aidant_id
@@ -950,10 +924,7 @@ router.get('/:id', async (req, res) => {
 
     const { data: visit, error } = await supabase
       .from('visites')
-      .select(`
-        *,
-        patient:patients(*)
-      `)
+      .select('*')
       .eq('id', id)
       .single();
 
@@ -1112,7 +1083,6 @@ router.post('/admin/assign-aidant', roleMiddleware(['admin', 'coordinator']), as
 // =============================================
 // ✅ CONFIRMER PAIEMENT - BROUILLON → PLANIFIEE
 // =============================================
- 
 router.post('/:id/confirm-payment', async (req, res) => {
   try {
     const { id } = req.params;
@@ -1151,11 +1121,13 @@ router.post('/:id/confirm-payment', async (req, res) => {
         aidantId = convertedId;
         console.log(`🔄 Aidant sélectionné dans wizard récupéré: ${aidantId}`);
       } else {
+        // Si l'aidant n'existe plus, on le remet à null
         aidantId = null;
         console.warn(`⚠️ Aidant sélectionné dans wizard introuvable, réassignation automatique`);
       }
     }
 
+    // ✅ Si toujours pas d'aidant, essayer d'en trouver un automatiquement
     if (!aidantId) {
       let foundId = await getActiveAidantForTarget(targetType, targetId, familyId);
       if (foundId) {
@@ -1167,11 +1139,13 @@ router.post('/:id/confirm-payment', async (req, res) => {
       }
     }
 
+    // ✅ Mettre à jour la visite avec l'aidant trouvé
     const { data: updatedVisit, error: updateError } = await supabase
       .from('visites')
       .update({
         status: 'planifiee',
-        aidant_id: aidantId,
+        is_draft: false, // ✅ CORRECTION DE CONTRAINTE SQL : chk_draft_is_draft (doit être false quand pas brouillon)
+        aidant_id: aidantId, // ← Maintenant l'aidant du wizard est bien assigné !
         metadata: {
           ...(visit.metadata || {}),
           payment_confirmed_at: new Date().toISOString(),
@@ -1179,7 +1153,7 @@ router.post('/:id/confirm-payment', async (req, res) => {
           scheduled_from_draft: true,
           payment_completed: true,
           aidant_assigned_after_payment: !!aidantId,
-          selected_aidant: null,
+          selected_aidant: null, // On nettoie car maintenant officiellement assigné
           wizard_choice: null,
         }
       })
@@ -1213,7 +1187,7 @@ router.post('/:id/confirm-payment', async (req, res) => {
 
     const targetDisplay = updatedVisit.target_name || (updatedVisit.patient ? `${updatedVisit.patient.first_name} ${updatedVisit.patient.last_name}` : 'Personnel');
 
-    // ✅ CORRECTION : Utiliser le user_id de l'aidant
+    // ✅ Notification à l'aidant s'il a été assigné
     if (aidantId && updatedVisit.aidant?.user_id) {
       await createNotification({
         userId: updatedVisit.aidant.user_id, // ✅ ID de profil (profiles.id) à la place de l'aidant_id
@@ -1243,6 +1217,7 @@ router.post('/:id/confirm-payment', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
 // =============================================
 // ✅ OBTENIR LE PRIX D'UNE VISITE PONCTUELLE
 // =============================================
@@ -1747,7 +1722,7 @@ router.post('/:id/complete', async (req, res) => {
           await createNotification({
             userId: link.family_id,
             title: '📋 Visite terminée - En attente de validation',
-            body: `La visite de ${targetDisplay} is terminée. L'aidant a soumis son rapport.`,
+            body: `La visite de ${targetDisplay} est terminée. L'aidant a soumis son rapport.`,
             type: 'visite',
             data: { visit_id: data.id, status: 'terminee' },
           });
