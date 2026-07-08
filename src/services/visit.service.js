@@ -65,7 +65,7 @@ const createVisit = async ({
   coordinatorId = null,
 }) => {
   try {
-    // 1. Déterminer la cible finale de manière flexible
+    // 1. Déterminer la cible finale de manière flexible (patient ou personnel)
     const finalTargetType = targetType || (patientId ? VISIT_TYPES.PATIENT : VISIT_TYPES.PERSONAL);
     const finalTargetName = targetName || (patientId ? null : profile?.full_name);
     const finalUserId = targetUserId || userId;
@@ -168,7 +168,7 @@ const createVisit = async ({
       }
     }
 
-    // 4. Créer la visite en base de données
+    // 4. Créer la visite en base de données avec des types de colonnes stricts
     const visitData = {
       user_id: finalUserId,
       patient_id: patientId || null,
@@ -180,14 +180,18 @@ const createVisit = async ({
       scheduled_time: scheduledTime,
       duration_minutes: durationMinutes || 60,
       status: status,
-      is_draft: requiresPayment, // ✅ ALIGNEMENT CONTRAINTE SQL : chk_draft_is_draft (true si brouillon, false sinon)
-      requires_payment: requiresPayment, // ✅ CORRECTIF ALIGNEMENT CRITIQUE : chk_draft_requires_payment (doit être true si brouillon)
-      is_ponctual: isPonctual || requiresPayment, // ✅ ALIGNEMENT CONTRAINTE SQL : is_ponctual (true si ponctuel)
-      is_paid: !requiresPayment, // ✅ ALIGNEMENT CONTRAINTE SQL : is_paid (false si brouillon, true si abonnement)
+      
+      // ✅ ALIGNEMENT CONTRAINTES POSTGRESQL (Sans "is_paid" qui n'existe pas !)
+      is_draft: requiresPayment,                         // chk_draft_is_draft (true si brouillon)
+      requires_payment: requiresPayment,                 // chk_draft_requires_payment (true si brouillon)
+      is_ponctual: isPonctual || requiresPayment,         // Index filtre et stockage
+      payment_status: requiresPayment ? 'pending' : null, // chk_payment_status_completed (valeurs: pending, completed)
+      payment_amount: requiresPayment ? paymentAmount : null,
+      
       actions: [],
       notes: notes || null,
       is_urgent: isUrgent || false,
-      visit_type: patientId ? VISIT_TYPES.PATIENT : VISIT_TYPES.PERSONAL,
+      visit_type: isPonctual || requiresPayment ? 'ponctuelle' : 'permanente', // Doit correspondre à la contrainte visit_type_check
       assignment_type: assignmentType || 'ponctuelle',
       requested_by: userId,
       draft_expires_at: requiresPayment ? new Date(Date.now() + DRAFT_EXPIRY_HOURS * 60 * 60 * 1000).toISOString() : null,
@@ -208,6 +212,7 @@ const createVisit = async ({
         subscription_used: subscriptionId ? true : false,
         ponctual_mode: requiresPayment ? true : false,
         wizard_choice: wizardChoice || null,
+        waiting_for_aidant: status === VISIT_STATUS.WAITING_AIDANT,
         selected_aidant: selectedAidantId || null,
       },
     };
@@ -415,8 +420,8 @@ const assignAidantToVisit = async ({
 
       await assignAidantToTarget({
         aidantUserId: aidantUserId,
-        targetType: targetType,
-        targetId: targetId,
+        targetType,
+        targetId,
         familyId: visit.user_id,
         assignmentType: 'primary',
         createdBy: adminId,
