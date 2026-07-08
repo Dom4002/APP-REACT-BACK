@@ -1,5 +1,5 @@
 // 📁 backend/src/routes/visit.routes.js
-// ✅ ROUTEUR VISITES COMPLET : ALIGNEMENT DES CONTRAINTES POSTGRES ET PASSAGE DE L'ÉTAT DRAFT EN PRODUCTION
+// ✅ ROUTEUR VISITES COMPLET : ALIGNEMENT DES CONTRAINTES POSTGRES ET FLUX DE PLANIFICATION ROBUSTE
 
 const express = require('express');
 const router = express.Router();
@@ -61,6 +61,7 @@ const getAidantIdFromUserId = async (userId) => {
 // RÉCUPÉRER L'AIDANT_ID DEPUIS UN USER_ID OU AIDANT_ID
 // =============================================
 const getAidantIdFromUserIdOrId = async (userIdOrId) => {
+  // 1. Vérifier si c'est déjà un aidant_id
   const { data: aidantById, error: errorById } = await supabase
     .from('aidants')
     .select('id')
@@ -71,6 +72,7 @@ const getAidantIdFromUserIdOrId = async (userIdOrId) => {
     return aidantById.id;
   }
 
+  // 2. Vérifier si c'est un user_id
   const { data: aidantByUser, error: errorByUser } = await supabase
     .from('aidants')
     .select('id')
@@ -409,7 +411,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-// ✅ 2.2 CRÉER UNE VISITE
+// ✅ 2.2 CRÉER UNE VISITE (S'appuie sur visit.service.js)
 router.post('/', async (req, res) => {
   try {
     const { user, profile } = req;
@@ -435,488 +437,63 @@ router.post('/', async (req, res) => {
       return res.status(403).json({ error: 'Non autorisé à créer une visite' });
     }
 
-    let finalPatientId = null;
-    let finalTargetType = 'personal';
-    let finalTargetName = target_name || null;
-    let finalUserId = null;
-    let targetHasPatient = false;
-    let familyId = null;
+    const { createVisit } = require('../services/visit.service');
 
-    if (patient_id) {
-      const { data: patient, error: patientError } = await supabase
-        .from('patients')
-        .select('id, first_name, last_name, category, created_by')
-        .eq('id', patient_id)
-        .single();
-
-      if (patientError || !patient) {
-        return res.status(404).json({ error: 'Patient non trouvé' });
-      }
-
-      const { data: familyLinks } = await supabase
-        .from('patient_family_links')
-        .select('family_id')
-        .eq('patient_id', patient_id)
-        .limit(1);
-
-      finalPatientId = patient_id;
-      finalTargetType = 'patient';
-      finalTargetName = `${patient.first_name} ${patient.last_name}`;
-      
-      if (familyLinks && familyLinks.length > 0) {
-        finalUserId = familyLinks[0].family_id;
-        familyId = familyLinks[0].family_id;
-      } else {
-        finalUserId = patient.created_by || patient_id;
-        familyId = patient.created_by || patient_id;
-      }
-      targetHasPatient = true;
-    }
-    else if (target_user_id) {
-      const { data: account, error: accountError } = await supabase
-        .from('profiles')
-        .select('id, full_name, email, role, patient_category')
-        .eq('id', target_user_id)
-        .single();
-
-      if (accountError || !account) {
-        return res.status(404).json({ error: 'Compte non trouvé' });
-      }
-
-      finalPatientId = null;
-      finalTargetType = 'personal';
-      finalTargetName = account.full_name || 'Compte personnel';
-      finalUserId = target_user_id;
-      familyId = target_user_id;
-      targetHasPatient = false;
-    }
-    else if (target_type === 'account' && target_user_id) {
-      const { data: account, error: accountError } = await supabase
-        .from('profiles')
-        .select('id, full_name, email, role, patient_category')
-        .eq('id', target_user_id)
-        .single();
-
-      if (accountError || !account) {
-        return res.status(404).json({ error: 'Compte non trouvé' });
-      }
-
-      finalPatientId = null;
-      finalTargetType = 'personal';
-      finalTargetName = `${account.full_name} (compte)`;
-      finalUserId = target_user_id;
-      familyId = target_user_id;
-      targetHasPatient = false;
-    }
-    else if (profile.role === 'family' && !patient_id) {
-      finalPatientId = null;
-      finalTargetType = 'personal';
-      finalTargetName = profile.full_name || 'Personnel';
-      finalUserId = user.id;
-      familyId = user.id;
-      targetHasPatient = false;
-    }
-    else {
-      finalPatientId = null;
-      finalTargetType = 'personal';
-      finalTargetName = profile.full_name || 'Utilisateur';
-      finalUserId = user.id;
-      familyId = user.id;
-      targetHasPatient = false;
-    }
-
-    if (profile.role === 'family' && patient_id) {
-      const { data: link = null } = await supabase
-        .from('patient_family_links')
-        .select('patient_id')
-        .eq('family_id', user.id)
-        .eq('patient_id', patient_id)
-        .maybeSingle();
-
-      if (!link) {
-        return res.status(403).json({ error: 'Vous n\'êtes pas lié à ce patient' });
-      }
-    }
-
-    let requiresPayment = false;
-    let status = 'planifiee';
-    let paymentAmount = 0;
-    let subscriptionId = null;
-
-    const subscriptionCheck = await checkSubscriptionForVisits(finalUserId || user.id);
-    console.log('📊 Vérification abonnement pour visite:', {
-      userId: finalUserId || user.id,
-      hasActiveSubscription: subscriptionCheck.hasActiveSubscription,
-      remainingVisits: subscriptionCheck.remainingVisits,
-    });
-
-    if (is_ponctual) {
-      requiresPayment = true;
-      status = 'brouillon';
-      paymentAmount = getPonctualPrice(duration_minutes);
-      console.log('⚡ Visite ponctuelle explicitement demandée');
-      
-    } else if (subscriptionCheck.hasActiveSubscription && subscriptionCheck.remainingVisits > 0) {
-      status = 'planifiee';
-      requiresPayment = false;
-      subscriptionId = subscriptionCheck.subscription?.id || null;
-      console.log('✅ Visite avec abonnement - décompte à la validation');
-      
-    } else if (subscriptionCheck.hasActiveSubscription && subscriptionCheck.remainingVisits === 0) {
-      requiresPayment = true;
-      status = 'brouillon';
-      paymentAmount = getPonctualPrice(duration_minutes);
-      console.log('⚠️ Abonnement actif mais plus de visites - mode ponctuel');
-      
-    } else {
-      requiresPayment = true;
-      status = 'brouillon';
-      paymentAmount = getPonctualPrice(duration_minutes);
-      console.log('❌ Pas d\'abonnement - mode ponctuel');
-    }
-
-    let finalAidantId = aidant_id || null;
-
-    if (finalAidantId) {
-      const convertedId = await getAidantIdFromUserIdOrId(finalAidantId);
-      if (convertedId) {
-        finalAidantId = convertedId;
-        console.log(`🔄 Aidant fourni converti: ${aidant_id} → ${finalAidantId}`);
-      }
-    }
-
-    if (!finalAidantId && status !== 'brouillon') {
-      const targetTypeForAidant = finalPatientId ? 'patient' : 'personal_account';
-      const targetIdForAidant = finalPatientId || finalUserId;
-      
-      let foundId = await getActiveAidantForTarget(
-        targetTypeForAidant,
-        targetIdForAidant,
-        familyId
-      );
-
-      if (foundId) {
-        const convertedId = await getAidantIdFromUserIdOrId(foundId);
-        if (convertedId) {
-          finalAidantId = convertedId;
-          console.log(`✅ Aidant automatique trouvé pour la visite: ${finalAidantId}`);
-        }
-      } else {
-        console.log('🔍 Aucun aidant assigné, utilisation du wizard...');
-        
-        const wizardOptions = await getVisitWizardOptions(
-          targetTypeForAidant,
-          targetIdForAidant,
-          familyId
-        );
-
-        if (profile.role === 'family' && wizardOptions.allFull) {
-          if (wizard_choice === 'without_aidant') {
-            status = 'en_attente_aidant';
-            finalAidantId = null;
-            console.log('📋 Visite planifiée SANS aidant - en attente');
-            
-            const { data: admins } = await supabase
-              .from('profiles')
-              .select('id')
-              .in('role', ['admin', 'coordinator']);
-
-            if (admins && admins.length > 0) {
-              const targetDisplay2 = finalTargetName || 'Patient';
-              for (const admin of admins) {
-                await createNotification({
-                  userId: admin.id,
-                  title: '🚨 Visite planifiée sans aidant disponible !',
-                  body: `Visite pour ${targetDisplay2} le ${scheduled_date} à ${scheduled_time}. Tous les aidants sont complets (4/4).`,
-                  type: 'alert',
-                  data: { 
-                    visit_id: null,
-                    action: 'assign_aidant',
-                    urgency: 'high',
-                    target_name: targetDisplay2,
-                    scheduled_date,
-                    scheduled_time,
-                  },
-                });
-              }
-            }
-
-            await createNotification({
-              userId: finalUserId,
-              title: '⏳ Visite en attente d\'aidant',
-              body: `Votre visite pour ${finalTargetName || 'le patient'} est en attente d'assignation d'un aidant. L'administration a été notifiée.`,
-              type: 'visite',
-              data: { 
-                status: 'en_attente_aidant',
-                target_name: finalTargetName,
-              },
-            });
-
-          } else {
-            return res.status(400).json({
-              success: false,
-              error: 'Tous les aidants sont complets (4/4). Utilisez l\'option "Planifier sans aidant" ou contactez l\'administration.',
-              code: 'ALL_AIDANTS_FULL',
-              allFull: true,
-            });
-          }
-        } 
-        else if (profile.role === 'family' && wizardOptions.hasAvailableAidants) {
-          if (selected_aidant_id && wizard_choice) {
-            const selectedAidantId = await getAidantIdFromUserIdOrId(selected_aidant_id);
-            if (selectedAidantId) {
-              if (wizard_choice === 'ponctuelle') {
-                finalAidantId = selectedAidantId;
-                console.log('⚡ Visite ponctuelle assignée à l\'aidant:', finalAidantId);
-              } else if (wizard_choice === 'permanente') {
-                const quotaCheck = await isAidantFull(selected_aidant_id);
-                if (quotaCheck.isFull) {
-                  return res.status(400).json({
-                    success: false,
-                    error: `Cet aidant a déjà ${quotaCheck.current}/${quotaCheck.max} assignations. Choisissez un autre aidant ou passez en mode ponctuel.`,
-                    code: 'AIDANT_FULL',
-                    current: quotaCheck.current,
-                    max: quotaCheck.max,
-                  });
-                }
-                finalAidantId = selectedAidantId;
-                console.log('📌 Assignation permanente simulée pour l\'aidant:', finalAidantId);
-              }
-            } else {
-              return res.status(400).json({
-                success: false,
-                error: 'Aidant sélectionné invalide',
-                code: 'INVALID_AIDANT',
-              });
-            }
-          } else {
-            return res.status(400).json({
-              success: false,
-              error: 'Veuillez sélectionner un aidant et un type d\'assignation',
-              code: 'WIZARD_REQUIRED',
-              wizard: {
-                options: wizardOptions.options,
-                aidants: wizardOptions.aidants,
-                allFull: false,
-              },
-            });
-          }
-        }
-        else if (['admin', 'coordinator'].includes(profile.role)) {
-          if (selected_aidant_id && wizard_choice) {
-            const selectedAidantId = await getAidantIdFromUserIdOrId(selected_aidant_id);
-            if (selectedAidantId) {
-              finalAidantId = selectedAidantId;
-              console.log('👔 Admin: Assignation via wizard pour l\'aidant:', finalAidantId);
-            }
-          } else {
-            const allAidants = await getAvailableAidantsForFamily(familyId);
-            return res.status(400).json({
-              success: false,
-              error: 'Veuillez sélectionner un aidant',
-              code: 'WIZARD_REQUIRED',
-              wizard: {
-                options: [
-                  { type: 'ponctuelle', label: '⚡ Pour cette visite uniquement', quota: 0 },
-                  { type: 'permanente', label: '📌 Permanent', quota: 1 },
-                  { type: 'force', label: '👔 Force (dépasse quota)', quota: 'illimité' },
-                ],
-                aidants: allAidants,
-                allFull: false,
-                isAdmin: true,
-              },
-            });
-          }
-        }
-      }
-    }
- 
-    
-    const visitData = {
-      user_id: finalUserId,
-      patient_id: finalPatientId,
-      target_type: finalTargetType,
-      target_name: finalTargetName,
-      aidant_id: finalAidantId,
-      coordinator_id: ['admin', 'coordinator'].includes(profile.role) ? user.id : null,
-      scheduled_date,
-      scheduled_time,
-      duration_minutes: duration_minutes || 60,
-      status: status,
-      is_draft: requiresPayment, // ✅ ALIGNEMENT DES CONTRAINTES POSTGRESQL "chk_draft_is_draft"
-      actions: [],
-      notes: notes || null,
-      is_urgent: is_urgent || false,
-      visit_type: finalPatientId ? 'patient' : 'personal',
-      assignment_type: assignment_type || 'ponctuelle',
-      requested_by: user.id,
-      draft_expires_at: requiresPayment ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() : null,
-      subscription_id: subscriptionId,
-      is_permanent: wizard_choice === 'permanente',
-      assigned_by_admin: ['admin', 'coordinator'].includes(profile.role),
-      admin_assigned_at: ['admin', 'coordinator'].includes(profile.role) ? new Date().toISOString() : null,
-      waiting_for_aidant_since: status === 'en_attente_aidant' ? new Date().toISOString() : null,
-      metadata: {
-        created_by: user.id,
-        created_at: new Date().toISOString(),
-        is_ponctual: is_ponctual || requiresPayment,
-        requires_payment: requiresPayment,
-        is_draft: requiresPayment,
-        payment_amount: requiresPayment ? paymentAmount : null,
-        scheduled_from_draft: false,
-        target_user_id: finalUserId,
-        target_has_patient: targetHasPatient,
-        auto_assigned_aidant: !!finalAidantId && !aidant_id && !selected_aidant_id,
-        subscription_used: subscriptionId ? true : false,
-        ponctual_mode: requiresPayment ? true : false,
-        wizard_choice: wizard_choice || null,
-        waiting_for_aidant: status === 'en_attente_aidant',
-        assigned_by_admin: ['admin', 'coordinator'].includes(profile.role),
-        is_personal_account: finalTargetType === 'personal' && !finalPatientId,
-        target_patient_id: finalPatientId,
-      }
-    };
-
-    console.log('📤 Création visite avec données:', {
-      finalUserId,
-      finalPatientId,
-      finalTargetType,
-      finalAidantId,
-      status,
-      requiresPayment,
-      subscriptionId,
-      wizard_choice,
-    });
-
-    const { data: visit, error: insertError } = await supabase
-      .from('visites')
-      .insert(visitData)
-      .select(`
-        *,
-        patient:patients(*),
-        aidant:aidants!visites_aidant_id_fkey (
-          id,
-          user_id,
-          specialties,
-          available,
-          rating,
-          total_missions,
-          completed_missions,
-          cancelled_missions,
-          user:profiles!aidants_user_id_fkey (
-            id,
-            full_name,
-            email,
-            phone,
-            avatar_url
-          )
-        )
-      `)
-      .single();
-
-    if (insertError) {
-      console.error('❌ Erreur insertion visite:', insertError);
-      return res.status(500).json({ error: insertError.message });
-    }
-
-    if (status === 'en_attente_aidant') {
-      const { data: admins } = await supabase
-        .from('profiles')
-        .select('id')
-        .in('role', ['admin', 'coordinator']);
-
-      if (admins && admins.length > 0) {
-        for (const admin of admins) {
-          await createNotification({
-            userId: admin.id,
-            title: '🚨 Visite planifiée sans aidant disponible !',
-            body: `Visite pour ${finalTargetName || 'Patient'} le ${scheduled_date} à ${scheduled_time}. Tous les aidants sont complets.`,
-            type: 'alert',
-            data: { 
-              visit_id: visit.id,
-              action: 'assign_aidant',
-              urgency: 'high',
-              target_name: finalTargetName || 'Patient',
-              scheduled_date,
-              scheduled_time,
-            },
-          });
-        }
-      }
-    }
-
-    const targetDisplay = finalTargetName || (visit.patient ? `${visit.patient.first_name} ${visit.patient.last_name}` : 'Personnel');
-
-    if (requiresPayment) {
-      await createNotification({
-        userId: user.id,
-        title: '💳 Paiement requis pour planifier la visite',
-        body: `Un paiement de ${paymentAmount} FCFA est requis pour planifier la visite de ${targetDisplay}.`,
-        type: 'visite',
-        data: { 
-          visit_id: visit.id, 
-          status: 'brouillon', 
-          action: 'pay',
-          amount: paymentAmount,
-          requires_payment: true,
-        },
-      });
-
-      return res.status(201).json({
-        success: true,
-        visit,
-        requires_payment: true,
-        payment_amount: paymentAmount,
-        message: 'Visite créée en brouillon. Paiement requis pour la planifier.',
-      });
-    }
-
-    if (status === 'en_attente_aidant') {
-      return res.status(201).json({
-        success: true,
-        visit,
-        requires_payment: false,
-        waiting_for_aidant: true,
-        message: 'Visite créée en attente d\'aidant. L\'administration a été notifiée.',
-      });
-    }
-
-    await createNotification({
+    const result = await createVisit({
       userId: user.id,
-      title: '📅 Nouvelle visite planifiée',
-      body: `Une visite pour ${targetDisplay} a été planifiée le ${visit.scheduled_date} à ${visit.scheduled_time}.`,
-      type: 'visite',
-      data: { visit_id: visit.id, status: 'planifiee' },
+      patientId: patient_id || null,
+      targetType: target_type || (patient_id ? 'patient' : 'personal'),
+      targetName: target_name || null,
+      targetUserId: target_user_id || user.id,
+      scheduledDate: scheduled_date,
+      scheduledTime: scheduled_time,
+      durationMinutes: duration_minutes || 60,
+      notes: notes || null,
+      isUrgent: is_urgent || false,
+      isPonctual: is_ponctual || false,
+      assignmentType: assignment_type || 'ponctuelle',
+      aidantId: aidant_id || null,
+      wizardChoice: wizard_choice || null,
+      selectedAidantId: selected_aidant_id || null,
+      profile: profile,
+      coordinatorId: ['admin', 'coordinator'].includes(profile.role) ? user.id : null,
     });
 
-    if (finalAidantId && visit.aidant?.user_id) {
-      await createNotification({
-        userId: visit.aidant.user_id, // ✅ ID de profil (profiles.id) à la place de l'aidant_id
-        title: '📅 Nouvelle visite à valider',
-        body: `Visite pour ${targetDisplay} le ${visit.scheduled_date} à ${visit.scheduled_time}`,
-        type: 'visite',
-        data: { visit_id: visit.id, action: 'approve' },
+    if (!result.success) {
+      if (result.code === 'WIZARD_REQUIRED' || result.code === 'ALL_AIDANTS_FULL') {
+        return res.status(400).json({
+          success: false,
+          error: result.error,
+          code: result.code,
+          wizard: result.wizard,
+        });
+      }
+      return res.status(400).json({
+        success: false,
+        error: result.error,
+        code: result.code,
       });
     }
 
     res.status(201).json({
       success: true,
-      visit,
-      requires_payment: false,
-      auto_assigned_aidant: !!finalAidantId && !aidant_id && !selected_aidant_id,
-      subscription_used: !!subscriptionId,
-      waiting_for_aidant: status === 'en_attente_aidant',
-      wizard_choice: wizard_choice || null,
+      visit: result.visit,
+      requires_payment: result.requires_payment,
+      payment_amount: result.payment_amount,
+      subscription_used: result.subscription_used,
+      waiting_for_aidant: result.waiting_for_aidant,
     });
   } catch (error) {
-    console.error('❌ Create visit error:', error);
+    console.error('❌ Erreur création visite (route):', error);
     res.status(500).json({ error: error.message });
   }
 });
 
 // =============================================
-// ✅ DÉTAILS D'UNE VISITE (DÉPLACÉ ICI : DYNAMIQUE)
+// 3️⃣ ROUTES DYNAMIQUES (AVEC :id)
 // =============================================
+
+// ✅ 3.1 DÉTAILS D’UNE VISITE PAR ID
 router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -924,7 +501,10 @@ router.get('/:id', async (req, res) => {
 
     const { data: visit, error } = await supabase
       .from('visites')
-      .select('*')
+      .select(`
+        *,
+        patient:patients(*)
+      `)
       .eq('id', id)
       .single();
 
@@ -1002,9 +582,7 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// =============================================
-// ✅ ADMIN ASSIGNER UN AIDANT À UNE VISITE
-// =============================================
+// ✅ 3.2 ADMIN ASSIGNER UN AIDANT À UNE VISITE
 router.post('/admin/assign-aidant', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
   try {
     const { visitId, aidantId, assignmentType = 'permanente', reason = null, force = false } = req.body;
@@ -1080,9 +658,7 @@ router.post('/admin/assign-aidant', roleMiddleware(['admin', 'coordinator']), as
   }
 });
 
-// =============================================
-// ✅ CONFIRMER PAIEMENT - BROUILLON → PLANIFIEE
-// =============================================
+// ✅ 3.3 CONFIRMER PAIEMENT - BROUILLON → PLANIFIEE AVEC FLUX DES CONTRAINTES
 router.post('/:id/confirm-payment', async (req, res) => {
   try {
     const { id } = req.params;
@@ -1111,23 +687,19 @@ router.post('/:id/confirm-payment', async (req, res) => {
     const targetType = visit.patient_id ? 'patient' : 'personal_account';
     const targetId = visit.patient_id || visit.user_id;
 
-    // ✅ CORRECTION : Récupérer l'aidant depuis aidant_id OU metadata.selected_aidant
     let aidantId = visit.aidant_id || visit.metadata?.selected_aidant || null;
 
-    // ✅ Si un aidant est trouvé dans metadata.selected_aidant, le convertir
     if (aidantId) {
       const convertedId = await getAidantIdFromUserIdOrId(aidantId);
       if (convertedId) {
         aidantId = convertedId;
         console.log(`🔄 Aidant sélectionné dans wizard récupéré: ${aidantId}`);
       } else {
-        // Si l'aidant n'existe plus, on le remet à null
         aidantId = null;
         console.warn(`⚠️ Aidant sélectionné dans wizard introuvable, réassignation automatique`);
       }
     }
 
-    // ✅ Si toujours pas d'aidant, essayer d'en trouver un automatiquement
     if (!aidantId) {
       let foundId = await getActiveAidantForTarget(targetType, targetId, familyId);
       if (foundId) {
@@ -1139,13 +711,15 @@ router.post('/:id/confirm-payment', async (req, res) => {
       }
     }
 
-    // ✅ Mettre à jour la visite avec l'aidant trouvé
+    // ✅ CORRECTION DE TOUTES LES CONTRAINTES POSTGRESQL "chk_draft_is_draft" & "chk_draft_requires_payment"
     const { data: updatedVisit, error: updateError } = await supabase
       .from('visites')
       .update({
         status: 'planifiee',
-        is_draft: false, // ✅ CORRECTION DE CONTRAINTE SQL : chk_draft_is_draft (doit être false quand pas brouillon)
-        aidant_id: aidantId, // ← Maintenant l'aidant du wizard est bien assigné !
+        is_draft: false,            // 🔓 Lève la contrainte chk_draft_is_draft
+        requires_payment: false,    // 🔓 Lève la contrainte chk_draft_requires_payment
+        is_paid: true,              // Enregistre l'état payé
+        aidant_id: aidantId,
         metadata: {
           ...(visit.metadata || {}),
           payment_confirmed_at: new Date().toISOString(),
@@ -1153,7 +727,7 @@ router.post('/:id/confirm-payment', async (req, res) => {
           scheduled_from_draft: true,
           payment_completed: true,
           aidant_assigned_after_payment: !!aidantId,
-          selected_aidant: null, // On nettoie car maintenant officiellement assigné
+          selected_aidant: null,
           wizard_choice: null,
         }
       })
@@ -1187,10 +761,9 @@ router.post('/:id/confirm-payment', async (req, res) => {
 
     const targetDisplay = updatedVisit.target_name || (updatedVisit.patient ? `${updatedVisit.patient.first_name} ${updatedVisit.patient.last_name}` : 'Personnel');
 
-    // ✅ Notification à l'aidant s'il a été assigné
     if (aidantId && updatedVisit.aidant?.user_id) {
       await createNotification({
-        userId: updatedVisit.aidant.user_id, // ✅ ID de profil (profiles.id) à la place de l'aidant_id
+        userId: updatedVisit.aidant.user_id, // ✅ ID utilisateur (profiles.id) à la place de l'aidant_id
         title: '📅 Nouvelle visite à valider',
         body: `Visite pour ${targetDisplay} le ${updatedVisit.scheduled_date} à ${updatedVisit.scheduled_time}`,
         type: 'visite',
@@ -1218,9 +791,7 @@ router.post('/:id/confirm-payment', async (req, res) => {
   }
 });
 
-// =============================================
-// ✅ OBTENIR LE PRIX D'UNE VISITE PONCTUELLE
-// =============================================
+// ✅ 3.4 OBTENIR LE PRIX D'UNE VISITE PONCTUELLE
 router.get('/:id/price', async (req, res) => {
   try {
     const { id } = req.params;
@@ -1250,13 +821,11 @@ router.get('/:id/price', async (req, res) => {
   }
 });
 
-// =============================================
-// ✅ APPROUVER UNE VISITE
-// =============================================
+// ✅ 3.5 APPROUVER UNE VISITE
 router.post('/:id/approve', async (req, res) => {
   try {
     const { id } = req.params;
-    const { user, profile } = req; // ✅ Récupérer profile contenant le full_name de l'aidant connecté
+    const { user, profile } = req;
 
     const aidantId = await getAidantIdFromUserId(user.id);
     if (!aidantId) {
@@ -1293,8 +862,6 @@ router.post('/:id/approve', async (req, res) => {
     if (error) throw error;
 
     const targetDisplay = visit.target_name || (visit.patient ? `${visit.patient.first_name} ${visit.patient.last_name}` : 'Personnel');
-
-    // ✅ CORRECTION : Notifier le bénéficiaire avec le nom réel de l'aidant
     const aidantName = profile?.full_name || 'L\'aidant';
 
     if (visit.patient) {
@@ -1331,13 +898,11 @@ router.post('/:id/approve', async (req, res) => {
   }
 });
 
-// =============================================
-// ✅ REFUSER UNE VISITE
-// =============================================
+// ✅ 3.6 REFUSER UNE VISITE
 router.post('/:id/refuse', async (req, res) => {
   try {
     const { id } = req.params;
-    const { user, profile } = req; // ✅ Récupérer profile contenant le full_name
+    const { user, profile } = req;
     const { reason } = req.body;
 
     const aidantId = await getAidantIdFromUserId(user.id);
@@ -1374,7 +939,6 @@ router.post('/:id/refuse', async (req, res) => {
     const targetDisplay = visit.target_name || (visit.patient ? `${visit.patient.first_name} ${visit.patient.last_name}` : 'Personnel');
     const aidantName = profile?.full_name || 'L\'aidant';
 
-    // ✅ CORRECTION : Notifier le bénéficiaire avec le nom réel de l'aidant
     if (visit.patient) {
       const { data: links } = await supabase
         .from('patient_family_links')
@@ -1426,9 +990,7 @@ router.post('/:id/refuse', async (req, res) => {
   }
 });
 
-// =============================================
-// RÉASSIGNER UNE VISITE (admin)
-// =============================================
+// ✅ 3.7 RÉASSIGNER UNE VISITE
 router.post('/:id/reassign', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
   try {
     const { id } = req.params;
@@ -1472,7 +1034,7 @@ router.post('/:id/reassign', roleMiddleware(['admin', 'coordinator']), async (re
 
     const targetDisplay = visit.target_name || (visit.patient ? `${visit.patient.first_name} ${visit.patient.last_name}` : 'Personnel');
 
-    // ✅ CORRECTION : Récupérer le user_id de l'aidant dans la table "aidants" avant d'enregistrer (sinon viol de FK sur "notifications")
+    // ✅ Récupérer le user_id de l'aidant
     const { data: aidantProfile } = await supabase
       .from('aidants')
       .select('user_id')
@@ -1481,7 +1043,7 @@ router.post('/:id/reassign', roleMiddleware(['admin', 'coordinator']), async (re
 
     if (aidantProfile?.user_id) {
       await createNotification({
-        userId: aidantProfile.user_id, // ✅ ID utilisateur (profiles.id) à la place de finalAidantId
+        userId: aidantProfile.user_id, // ✅ ID utilisateur de profil (profiles.id) à la place de l'aidant_id
         title: '📅 Nouvelle visite assignée',
         body: `Vous avez été assigné à une visite pour ${targetDisplay} le ${visit.scheduled_date} à ${visit.scheduled_time}.`,
         type: 'visite',
@@ -1496,9 +1058,7 @@ router.post('/:id/reassign', roleMiddleware(['admin', 'coordinator']), async (re
   }
 });
 
-// =============================================
-// ✅ DÉMARRER UNE VISITE
-// =============================================
+// ✅ 3.8 DÉMARRER UNE VISITE
 router.post('/:id/start', async (req, res) => {
   try {
     const { id } = req.params;
@@ -1601,9 +1161,7 @@ router.post('/:id/start', async (req, res) => {
   }
 });
 
-// =============================================
-// ✅ TERMINER UNE VISITE
-// =============================================
+// ✅ 3.9 TERMINER UNE VISITE
 router.post('/:id/complete', async (req, res) => {
   try {
     const { id } = req.params;
@@ -1762,9 +1320,7 @@ router.post('/:id/complete', async (req, res) => {
   }
 });
 
-// =============================================
-// ✅ VALIDER UNE VISITE (avec décompte ou sans si payée)
-// =============================================
+// ✅ 3.10 VALIDER UNE VISITE
 router.post('/:id/validate', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
   try {
     const { id } = req.params;
@@ -1820,10 +1376,10 @@ router.post('/:id/validate', roleMiddleware(['admin', 'coordinator']), async (re
 
     if (error) throw error;
 
-    const isPonctual = visit.metadata?.is_ponctual === true || visit.metadata?.ponctual_mode === true;
+    const isOnctual = visit.metadata?.is_ponctual === true || visit.metadata?.ponctual_mode === true;
     const wasPaid = visit.metadata?.payment_completed === true;
 
-    if (!isPonctual || !wasPaid) {
+    if (!isOnctual || !wasPaid) {
       if (visit.subscription_id) {
         const result = await decrementVisit(visit.subscription_id);
         if (result.success) {
@@ -1896,9 +1452,7 @@ router.post('/:id/validate', roleMiddleware(['admin', 'coordinator']), async (re
   }
 });
 
-// =============================================
-// ANNULER UNE VISITE
-// =============================================
+// ✅ 3.11 ANNULER UNE VISITE
 router.post('/:id/cancel', async (req, res) => {
   try {
     const { id } = req.params;
@@ -1962,9 +1516,7 @@ router.post('/:id/cancel', async (req, res) => {
   }
 });
 
-// =============================================
-// PHOTOS & AUDIOS
-// =============================================
+// ✅ 3.12 PHOTOS & PIÈCES JOINTES
 router.post('/:id/photos', async (req, res) => {
   try {
     const { id } = req.params;
@@ -2063,9 +1615,7 @@ router.get('/:id/audios', async (req, res) => {
   }
 });
 
-// =============================================
-// ✅ CONVERTIR UN BROUILLON EN VISITE PLANIFIÉE (DÉCOMPTE ABONNEMENT)
-// =============================================
+// ✅ 3.13 CONVERTIR UN BROUILLON VERS ABONNEMENT
 router.post('/:id/convert-to-subscription', async (req, res) => {
   try {
     const { id } = req.params;
@@ -2117,6 +1667,7 @@ router.post('/:id/convert-to-subscription', async (req, res) => {
       .from('visites')
       .update({
         status: 'planifiee',
+        is_draft: false, // ✅ CORRECTION CONTRAINTE POSTGRES
         metadata: {
           ...(visit.metadata || {}),
           converted_from_draft: true,
@@ -2204,3 +1755,5 @@ router.post('/:id/convert-to-subscription', async (req, res) => {
 });
 
 module.exports = router;
+_----
+ 
