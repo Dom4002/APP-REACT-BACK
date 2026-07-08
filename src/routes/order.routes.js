@@ -1,5 +1,5 @@
 // 📁 backend/src/routes/order.routes.js
-// ✅ GESTION DES COMMANDES - FLUX DE PAIEMENT, QUOTAS ET NOTIFICATIONS EN DIRECT
+// ✅ GESTION DES COMMANDES - ACCÈS ET VISIBILITÉ EN TEMPS RÉEL COMPLETS POUR LES AIDANTS DISPONIBLES
 
 const express = require('express');
 const router = express.Router();
@@ -248,6 +248,7 @@ router.get('/', async (req, res) => {
         aidant:aidants!commandes_aidant_id_fkey(*, user:profiles(*))
       `);
 
+    // Filtre par rôle
     if (profile.role === 'family') {
       query = query.eq('user_id', user.id);
     } else if (profile.role === 'aidant') {
@@ -258,16 +259,20 @@ router.get('/', async (req, res) => {
         .single();
 
       if (aidant) {
-        query = query.eq('aidant_id', aidant.id);
+        // ✅ CORRECTIF DE VISIBILITÉ SÉCURISÉ : L'aidant voit ses propres commandes assignées 
+        // ET les nouvelles commandes disponibles non assignées (aidant_id nul)
+        query = query.or(`aidant_id.eq.${aidant.id},and(aidant_id.is.null,status.in.(creee,en_attente,disponible))`);
       } else {
         return res.json([]);
       }
     }
 
+    // Filtre par statut
     if (status) {
       query = query.eq('status', status);
     }
 
+    // Filtre "disponible" pour les aidants
     if (available === 'true' && profile.role === 'aidant') {
       query = query.in('status', ['creee', 'en_attente', 'disponible']);
     }
@@ -673,9 +678,11 @@ router.post('/:id/confirm-payment', async (req, res) => {
 
     if (error) throw error;
 
+    // ✅ NOTIFICATION AUTOMATIQUE EN DIRECT AUX AIDANTS APRES PAIEMENT
     const targetDisplay = order.target_name || 'un client';
 
     if (aidantId) {
+      // ✅ CORRECTION : Récupérer le user_id de l'aidant
       const { data: aidantProfile } = await supabase.from('aidants').select('user_id').eq('id', aidantId).maybeSingle();
       if (aidantProfile?.user_id) {
         await createNotification({
@@ -732,29 +739,61 @@ router.post('/:id/take', async (req, res) => {
     const { id } = req.params;
     const { user } = req;
 
-    const { data: order, error: fetchError } = await supabase.from('commandes').select('*').eq('id', id).single();
-    if (fetchError) return res.status(404).json({ error: 'Commande non trouvée' });
+    const { data: order, error: fetchError } = await supabase
+      .from('commandes')
+      .select('*')
+      .eq('id', id)
+      .single();
 
+    if (fetchError) {
+      return res.status(404).json({ error: 'Commande non trouvée' });
+    }
+
+    // ✅ Statuts acceptables pour la prise
     const availableStatuses = ['creee', 'en_attente', 'disponible'];
     if (!availableStatuses.includes(order.status)) {
-      return res.status(400).json({ error: 'Cette commande n\'est pas disponible.' });
+      return res.status(400).json({ 
+        error: 'Cette commande n\'est pas disponible. Statut actuel: ' + order.status 
+      });
     }
 
-    const { data: aidant, error: aidantError } = await supabase.from('aidants').select('id, available, is_verified').eq('user_id', user.id).single();
-    if (aidantError || !aidant || !aidant.available || !aidant.is_verified) {
-      return res.status(403).json({ error: 'Vous n\'êtes pas autorisé ou disponible' });
+    // ✅ Vérifier que l'aidant est disponible
+    const { data: aidant, error: aidantError } = await supabase
+      .from('aidants')
+      .select('id, available, is_verified, current_assignments, max_assignments')
+      .eq('user_id', user.id)
+      .single();
+
+    if (aidantError || !aidant) {
+      return res.status(404).json({ error: 'Aidant non trouvé' });
     }
 
+    if (!aidant.available || !aidant.is_verified) {
+      return res.status(403).json({ error: 'Vous n\'êtes pas disponible ou vérifié' });
+    }
+
+    // ✅ Vérifier le quota de commandes EN COURS (max 2)
     const quotaCheck = await checkAidantOrderQuota(user.id);
     if (!quotaCheck.canTake) {
-      return res.status(403).json({ error: `Quota maximum atteint (${quotaCheck.current}/${quotaCheck.max})` });
+      return res.status(403).json({ 
+        error: `Vous avez déjà ${quotaCheck.current} commande(s) en cours (maximum ${quotaCheck.max})`,
+        current: quotaCheck.current,
+        max: quotaCheck.max,
+        code: 'QUOTA_EXCEEDED',
+      });
     }
 
+    // ✅ Si la commande a déjà un aidant assigné
     if (order.aidant_id && order.aidant_id !== aidant.id) {
-      return res.status(403).json({ error: 'Commande déjà assignée' });
+      return res.status(403).json({ error: 'Cette commande est déjà assignée à un autre aidant' });
     }
 
-    await incrementAidantOrders(user.id);
+    // ✅ Incrémenter current_orders
+    const incremented = await incrementAidantOrders(user.id);
+    if (!incremented) {
+      console.error('❌ Échec incrémentation current_orders');
+      return res.status(500).json({ error: 'Erreur lors de la prise de commande' });
+    }
 
     const { data, error } = await supabase
       .from('commandes')
@@ -771,10 +810,12 @@ router.post('/:id/take', async (req, res) => {
       .single();
 
     if (error) {
+      // Rollback: décrémenter si erreur
       await decrementAidantOrders(user.id);
       throw error;
     }
 
+    // ✅ Notification à la famille
     const targetDisplay = order.target_name || (order.patient ? `${order.patient.first_name} ${order.patient.last_name}` : 'Personnel');
 
     if (order.family_id) {
@@ -787,20 +828,34 @@ router.post('/:id/take', async (req, res) => {
       });
     }
 
-    res.json({ success: true, order: data });
+    res.json({ 
+      success: true, 
+      order: data,
+      quota: {
+        current: quotaCheck.current + 1,
+        max: quotaCheck.max,
+        available: quotaCheck.available - 1,
+      },
+    });
   } catch (error) {
     console.error('❌ Take order error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// ✅ 3.4 METTRE À JOUR LE STATUT D'UNE COMMANDE
+// =============================================
+// ✅ METTRE À JOUR LE STATUT D'UNE COMMANDE
+// =============================================
 router.post('/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
 
-    if (!status) return res.status(400).json({ error: 'Le champ "status" est obligatoire' });
+    console.log(`📥 Mise à jour statut commande ${id} -> ${status}`);
+
+    if (!status) {
+      return res.status(400).json({ error: 'Le champ "status" est obligatoire' });
+    }
 
     const validStatuses = ['creee', 'en_attente', 'en_cours', 'livree', 'validee', 'annulee', 'disponible'];
     if (!validStatuses.includes(status)) return res.status(400).json({ error: 'Statut invalide' });
