@@ -1,6 +1,5 @@
 // 📁 backend/src/routes/visit.routes.js
-// ✅ ROUTEUR VISITES COMPLET : ALIGNEMENT DES CONTRAINTES POSTGRES ET FLUX DE PLANIFICATION ROBUSTE
-
+ 
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../services/supabase.service');
@@ -61,7 +60,6 @@ const getAidantIdFromUserId = async (userId) => {
 // RÉCUPÉRER L'AIDANT_ID DEPUIS UN USER_ID OU AIDANT_ID
 // =============================================
 const getAidantIdFromUserIdOrId = async (userIdOrId) => {
-  // 1. Vérifier si c'est déjà un aidant_id
   const { data: aidantById, error: errorById } = await supabase
     .from('aidants')
     .select('id')
@@ -72,7 +70,6 @@ const getAidantIdFromUserIdOrId = async (userIdOrId) => {
     return aidantById.id;
   }
 
-  // 2. Vérifier si c'est un user_id
   const { data: aidantByUser, error: errorByUser } = await supabase
     .from('aidants')
     .select('id')
@@ -411,7 +408,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-// ✅ 2.2 CRÉER UNE VISITE (S'appuie sur visit.service.js)
+// ✅ 2.2 CRÉER UNE VISITE (S'appuie sur le service unifié visit.service.js)
 router.post('/', async (req, res) => {
   try {
     const { user, profile } = req;
@@ -501,10 +498,7 @@ router.get('/:id', async (req, res) => {
 
     const { data: visit, error } = await supabase
       .from('visites')
-      .select(`
-        *,
-        patient:patients(*)
-      `)
+      .select('*')
       .eq('id', id)
       .single();
 
@@ -658,7 +652,7 @@ router.post('/admin/assign-aidant', roleMiddleware(['admin', 'coordinator']), as
   }
 });
 
-// ✅ 3.3 CONFIRMER PAIEMENT - BROUILLON → PLANIFIEE AVEC FLUX DES CONTRAINTES
+// ✅ 3.3 CONFIRMER PAIEMENT - BROUILLON → PLANIFIEE AVEC TRANSITION DES SÉCURITÉS SQL
 router.post('/:id/confirm-payment', async (req, res) => {
   try {
     const { id } = req.params;
@@ -711,14 +705,16 @@ router.post('/:id/confirm-payment', async (req, res) => {
       }
     }
 
-    // ✅ CORRECTION DE TOUTES LES CONTRAINTES POSTGRESQL "chk_draft_is_draft" & "chk_draft_requires_payment"
+    // ✅ MISE À JOUR ALIGNÉE SUR LE SCHÉMA REEL (SANS LA COLONNE IS_PAID)
     const { data: updatedVisit, error: updateError } = await supabase
       .from('visites')
       .update({
         status: 'planifiee',
-        is_draft: false,            // 🔓 Lève la contrainte chk_draft_is_draft
-        requires_payment: false,    // 🔓 Lève la contrainte chk_draft_requires_payment
-        is_paid: true,              // Enregistre l'état payé
+        is_draft: false,                   // 🔓 Chk_draft_is_draft (doit être false quand pas brouillon)
+        requires_payment: false,           // 🔓 Chk_draft_requires_payment (doit être false quand pas brouillon)
+        payment_status: 'completed',       // 🔓 Chk_payment_status_completed (doit être completed)
+        payment_confirmed_at: new Date().toISOString(),
+        payment_transaction_id: transaction_id,
         aidant_id: aidantId,
         metadata: {
           ...(visit.metadata || {}),
@@ -761,9 +757,10 @@ router.post('/:id/confirm-payment', async (req, res) => {
 
     const targetDisplay = updatedVisit.target_name || (updatedVisit.patient ? `${updatedVisit.patient.first_name} ${updatedVisit.patient.last_name}` : 'Personnel');
 
+    // Notification aidant (user_id de profil)
     if (aidantId && updatedVisit.aidant?.user_id) {
       await createNotification({
-        userId: updatedVisit.aidant.user_id, // ✅ ID utilisateur (profiles.id) à la place de l'aidant_id
+        userId: updatedVisit.aidant.user_id, // ✅ Profiles.id à la place de aidant_id
         title: '📅 Nouvelle visite à valider',
         body: `Visite pour ${targetDisplay} le ${updatedVisit.scheduled_date} à ${updatedVisit.scheduled_time}`,
         type: 'visite',
@@ -1034,7 +1031,6 @@ router.post('/:id/reassign', roleMiddleware(['admin', 'coordinator']), async (re
 
     const targetDisplay = visit.target_name || (visit.patient ? `${visit.patient.first_name} ${visit.patient.last_name}` : 'Personnel');
 
-    // ✅ Récupérer le user_id de l'aidant
     const { data: aidantProfile } = await supabase
       .from('aidants')
       .select('user_id')
