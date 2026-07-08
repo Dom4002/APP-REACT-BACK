@@ -3,17 +3,14 @@
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 const { FedaPay, Transaction } = require('fedapay');
+const axios = require('axios');  
 
 const router = express.Router();
 
-// ============================================================
-// CONSTANTES ET CONFIGURATION
-// ============================================================
 const MAX_RETRY_ATTEMPTS = 8;
 const RETRY_DELAY_MS = 1500;
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// ✅ PRIX DES VISITES PONCTUELLES - SOURCE UNIQUE
 const VISIT_PONCTUAL_PRICES = {
   '30': 5000,
   '45': 6000,
@@ -30,17 +27,11 @@ function getPonctualPrice(durationMinutes = 60) {
   return Math.round((durationMinutes / 60) * DEFAULT_VISIT_PRICE);
 }
 
-// ============================================================
-// SUPABASE BACKEND CLIENT
-// ============================================================
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// ============================================================
-// FEDAPAY CONFIG
-// ============================================================
 const FEDAPAY_SECRET_KEY = process.env.FEDAPAY_SECRET_KEY?.trim();
 const FEDAPAY_ENV = (process.env.FEDAPAY_ENV || 'live').trim().toLowerCase();
 
@@ -109,9 +100,6 @@ function isValidUUID(uuid) {
   return UUID_REGEX.test(uuid);
 }
 
-// ============================================================
-// ✅ RÉCUPÉRER L'AIDANT ACTIF
-// ============================================================
 async function getActiveAidantForTarget(targetType, targetId, familyId) {
   try {
     const { data, error } = await supabase.rpc('get_active_auxiliary_for_target', {
@@ -154,9 +142,6 @@ async function getActiveAidantForTarget(targetType, targetId, familyId) {
   }
 }
 
-// ============================================================
-// ✅ CRÉER UN ABONNEMENT EN ATTENTE
-// ============================================================
 async function createPendingSubscription(userId, offerId, offer, patientId = null) {
   try {
     const startDate = new Date();
@@ -222,9 +207,6 @@ async function createPendingSubscription(userId, offerId, offer, patientId = nul
   }
 }
 
-// ============================================================
-// ✅ CRÉER UNE COMMANDE PONCTUELLE EN ARRIÈRE-PLAN ET ALERTER
-// ============================================================
 async function createPonctualOrder(paymentRecord, transactionId, orderData) {
   try {
     const { data: existingOrders, error: checkError } = await supabase
@@ -272,6 +254,8 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
         type: orderDataToInsert.type,
         description: orderDataToInsert.description,
         address: orderDataToInsert.address,
+        latitude: orderDataToInsert.latitude || null, // ✅ ENREGISTREMENT GPS DU WEBHOOK
+        longitude: orderDataToInsert.longitude || null, // ✅ ENREGISTREMENT GPS DU WEBHOOK
         status: 'creee',
         estimated_amount: paymentRecord.amount || 0,
         final_amount: paymentRecord.amount || 0,
@@ -295,7 +279,6 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
 
     console.log('✅ Commande ponctuelle créée:', newOrder.id);
 
-    // 1️⃣ NOTIFICATION À LA FAMILLE
     await supabase.from('notifications').insert({
       user_id: paymentRecord.user_id,
       title: '✅ Commande confirmée !',
@@ -309,7 +292,6 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
       },
     });
 
-    // 2️⃣ NOTIFIER TOUS LES AIDANTS DISPONIBLES ET SOUS LEUR QUOTA
     const { data: aidants } = await supabase
       .from('aidants')
       .select('user_id, current_orders, max_orders')
@@ -349,9 +331,6 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
   }
 }
 
-// ============================================================
-// ✅ TRAITER UNE VISITE PONCTUELLE EN ARRIÈRE-PLAN (WEBHOOK)
-// ============================================================
 async function processPonctualVisit(paymentRecord, transactionId, visitId, metadata) {
   try {
     console.log('🔄 Traitement d\'une visite ponctuelle en arrière-plan:', visitId);
@@ -382,12 +361,11 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
       console.log(`✅ Aidant trouvé après paiement: ${aidantId}`);
     }
 
-    // ✅ CONSTRUIRE L'OBJET DE MISE À JOUR EN ALIGNANT TOUTES LES CONTRAINTES POSTGRES DE BROUILLON
     const updateData = {
       status: 'planifiee',
-      is_draft: false,                     // 🔓 Lève la contrainte chk_draft_is_draft
-      requires_payment: false,             // 🔓 Lève la contrainte chk_draft_requires_payment
-      payment_status: 'completed',         // 🔓 Aligne chk_payment_status_completed (doit être non brouillon)
+      is_draft: false,                     
+      requires_payment: false,             
+      payment_status: 'completed',         
       payment_confirmed_at: new Date().toISOString(),
       payment_transaction_id: transactionId,
       aidant_id: aidantId || null,
@@ -427,7 +405,6 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
     if (updateError) {
       console.error('❌ Erreur mise à jour visite:', updateError.message);
       
-      // ✅ TENTATIVE DE RÉCUPÉRATION SI CONFLIT SQL (FALLBACK DE SÉCURITÉ AVEC VALEURS DE BRIDAGES)
       if (
         updateError.message.includes('chk_planned_not_draft') || 
         updateError.message.includes('chk_draft_is_draft') || 
@@ -501,10 +478,7 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
 
           return retryVisit;
         }
-        
-        console.error('❌ Échec de la récupération fallback:', retryError?.message);
       }
-      
       return null;
     }
 
@@ -512,7 +486,6 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
 
     const targetDisplay = updatedVisit.target_name || (updatedVisit.patient ? `${updatedVisit.patient.first_name} ${updatedVisit.patient.last_name}` : 'Personnel');
 
-    // 1️⃣ NOTIFICATION À L'AIDANT ASSIGNÉ (AVEC VRAI USER_ID)
     if (updatedVisit.aidant_id && updatedVisit.aidant?.user?.id) {
       await supabase.from('notifications').insert({
         user_id: updatedVisit.aidant.user.id, 
@@ -523,7 +496,6 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
       });
     }
 
-    // 2️⃣ NOTIFICATION À LA FAMILLE
     await supabase.from('notifications').insert({
       user_id: updatedVisit.user_id,
       title: '✅ Visite planifiée !',
@@ -551,9 +523,6 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
   }
 }
 
-// ============================================================
-// ✅ ACTIVER UN ABONNEMENT
-// ============================================================
 async function activateSubscription(paymentRecord, subscriptionId) {
   try {
     if (!isValidUUID(subscriptionId)) {
@@ -568,7 +537,7 @@ async function activateSubscription(paymentRecord, subscriptionId) {
       .single();
 
     if (subCheckError) {
-      console.error('❌ Abonnement non trouvé:', subCheckError.message);
+      console.error('❌ Erreur:', subCheckError.message);
       return null;
     }
 
@@ -588,13 +557,12 @@ async function activateSubscription(paymentRecord, subscriptionId) {
       .single();
 
     if (subError) {
-      console.error('❌ Erreur activation abonnement:', subError.message);
+      console.error('❌ Erreur activation:', subError.message);
       return null;
     }
 
     console.log('✅ Abonnement activé:', subscriptionId);
 
-    // Notification à la famille
     await supabase.from('notifications').insert({
       user_id: paymentRecord.user_id,
       title: '✅ Abonnement activé !',
@@ -1083,6 +1051,37 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       message: 'Erreur interne, webhook accepté',
       error: error.message,
     });
+  }
+});
+
+// ============================================================
+// ENDPOINT POUR RÉSOUDRE LES LIENS GOOGLE MAPS COURTS (maps.app.goo.gl)
+// ============================================================
+router.post('/resolve-maps', async (req, res) => {
+  try {
+    const { url } = req.body;
+    if (!url) {
+      return res.status(400).json({ success: false, error: 'URL requise' });
+    }
+
+    console.log('🔄 [Google Maps] Résolution du lien court:', url);
+
+    // Effectuer une requête d'en-tête (HEAD) pour suivre la redirection de l'URL Google Maps raccourcie
+    const response = await axios.get(url, {
+      maxRedirects: 5,
+      validateStatus: (status) => status >= 200 && status < 400,
+    });
+
+    const finalUrl = response.request.res.responseUrl || url;
+    console.log('🎯 [Google Maps] URL longue décodée:', finalUrl);
+
+    res.json({
+      success: true,
+      finalUrl,
+    });
+  } catch (error) {
+    console.error('❌ Erreur résolution URL Google Maps:', error.message);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
