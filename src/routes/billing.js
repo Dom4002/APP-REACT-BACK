@@ -114,20 +114,18 @@ function isValidUUID(uuid) {
 // ============================================================
 async function getActiveAidantForTarget(targetType, targetId, familyId) {
   try {
-    const { data, error } = await supabase.rpc('get_active_aidant_for_target', {
+    const { data, error } = await supabase.rpc('get_active_auxiliary_for_target', {
       p_target_type: targetType,
       p_target_id: targetId,
       p_family_id: familyId,
     });
 
     if (error) {
-      console.error('❌ get_active_aidant_for_target error:', error);
+      console.error('❌ get_active_auxiliary_for_target error:', error);
       return null;
     }
 
-    if (!data) {
-      return null;
-    }
+    if (!data) return null;
 
     const { data: aidantById, error: errorById } = await supabase
       .from('aidants')
@@ -327,7 +325,7 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
       if (availableAidants.length > 0) {
         for (const aidant of availableAidants) {
           await supabase.from('notifications').insert({
-            user_id: aidant.user_id, // ✅ Profiles.id (profiles.id à la place d'aidant_id)
+            user_id: aidant.user_id, 
             title: '🛒 Nouvelle commande disponible',
             body: `Commande de ${targetName} — ${orderDataToInsert.description}`,
             type: 'commande',
@@ -352,11 +350,11 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
 }
 
 // ============================================================
-// ✅ TRAITER UNE VISITE PONCTUELLE EN ARRIÈRE-PLAN ET ALERTER
+// ✅ TRAITER UNE VISITE PONCTUELLE EN ARRIÈRE-PLAN (WEBHOOK)
 // ============================================================
 async function processPonctualVisit(paymentRecord, transactionId, visitId, metadata) {
   try {
-    console.log('🔄 Traitement d\'une visite ponctuelle:', visitId);
+    console.log('🔄 Traitement d\'une visite ponctuelle en arrière-plan:', visitId);
 
     const { data: visit, error: visitError } = await supabase
       .from('visites')
@@ -384,12 +382,12 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
       console.log(`✅ Aidant trouvé après paiement: ${aidantId}`);
     }
 
-    // ✅ TRANSITION STRICTE DE TOUTES LES CONTRAINTES POSTGRESQL "chk_draft_is_draft" & "chk_draft_requires_payment"
+    // ✅ CONSTRUIRE L'OBJET DE MISE À JOUR EN ALIGNANT TOUTES LES CONTRAINTES POSTGRES DE BROUILLON
     const updateData = {
       status: 'planifiee',
-      is_draft: false,                     // 🔓 Chk_draft_is_draft (doit être false quand pas brouillon)
-      requires_payment: false,             // 🔓 Chk_draft_requires_payment (doit être false quand pas brouillon)
-      payment_status: 'completed',         // 🔓 Chk_payment_status_completed (doit être completed)
+      is_draft: false,                     // 🔓 Lève la contrainte chk_draft_is_draft
+      requires_payment: false,             // 🔓 Lève la contrainte chk_draft_requires_payment
+      payment_status: 'completed',         // 🔓 Aligne chk_payment_status_completed (doit être non brouillon)
       payment_confirmed_at: new Date().toISOString(),
       payment_transaction_id: transactionId,
       aidant_id: aidantId || null,
@@ -429,7 +427,7 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
     if (updateError) {
       console.error('❌ Erreur mise à jour visite:', updateError.message);
       
-      // ✅ TENTATIVE DE RÉCUPÉRATION SECURE SI ERREUR PATIENT_ID FALLBACK
+      // ✅ TENTATIVE DE RÉCUPÉRATION SI CONFLIT SQL (FALLBACK DE SÉCURITÉ AVEC VALEURS DE BRIDAGES)
       if (
         updateError.message.includes('chk_planned_not_draft') || 
         updateError.message.includes('chk_draft_is_draft') || 
@@ -514,10 +512,10 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
 
     const targetDisplay = updatedVisit.target_name || (updatedVisit.patient ? `${updatedVisit.patient.first_name} ${updatedVisit.patient.last_name}` : 'Personnel');
 
-    // 1️⃣ NOTIFICATION À L'AIDANT ASSIGNÉ (AVEC SON VRAI USER_ID)
+    // 1️⃣ NOTIFICATION À L'AIDANT ASSIGNÉ (AVEC VRAI USER_ID)
     if (updatedVisit.aidant_id && updatedVisit.aidant?.user?.id) {
       await supabase.from('notifications').insert({
-        user_id: updatedVisit.aidant.user.id, // ✅ Profiles.id (profiles.id à la place de l'aidant_id)
+        user_id: updatedVisit.aidant.user.id, 
         title: '📅 Nouvelle visite à valider',
         body: `Visite pour ${targetDisplay} le ${updatedVisit.scheduled_date} à ${updatedVisit.scheduled_time}`,
         type: 'visite',
@@ -619,7 +617,7 @@ async function activateSubscription(paymentRecord, subscriptionId) {
 }
 
 // ============================================================
-// 💳 GÉNÉRER UN PAIEMENT FEDAPAY (SÉCURISÉ CONTRE LES DOUBLONS)
+// 💳 GÉNÉRER UN PAIEMENT FEDAPAY
 // ============================================================
 router.post('/generate-payment', async (req, res) => {
   const startTime = Date.now();
@@ -715,7 +713,7 @@ router.post('/generate-payment', async (req, res) => {
     if (!is_ponctual && abonnement_id) {
       const { data: offer, error: offerError } = await supabase
         .from('offres')
-        .select('id, name, type, price, visits_per_week, duration_days, total_visits, total_orders')
+        .select('id, name, type, price, total_visits, total_orders')
         .eq('id', abonnement_id)
         .single();
 
