@@ -1,5 +1,5 @@
 // 📁 backend/src/services/visit.service.js
-// ✅ SERVICE DE VISITES COMPLET :  
+// ✅ SERVICE DE VISITES COMPLET  
 
 const { supabase } = require('./supabase.service');
 const { createNotification } = require('./notification.service');
@@ -181,7 +181,8 @@ const createVisit = async ({
       scheduled_time: scheduledTime,
       duration_minutes: durationMinutes || 60,
       status: status,
-      is_draft: requiresPayment, // ✅ CORRECTIF CRITIQUE : Aligné avec chk_draft_is_draft (true si brouillon, false sinon)
+      is_draft: requiresPayment, // ✅ ALIGNEMENT DES CONTRAINTES POSTGRESQL "chk_draft_is_draft"
+      requires_payment: requiresPayment, // ✅ ALIGNEMENT DES CONTRAINTES POSTGRESQL "chk_draft_requires_payment"
       actions: [],
       notes: notes || null,
       is_urgent: isUrgent || false,
@@ -206,7 +207,6 @@ const createVisit = async ({
         subscription_used: subscriptionId ? true : false,
         ponctual_mode: requiresPayment ? true : false,
         wizard_choice: wizardChoice || null,
-        waiting_for_aidant: status === VISIT_STATUS.WAITING_AIDANT,
         selected_aidant: selectedAidantId || null,
       },
     };
@@ -272,7 +272,7 @@ const createVisit = async ({
       await createNotification({
         userId: finalUserId,
         title: '⏳ Visite en attente d\'aidant',
-        body: `Votre visite pour ${targetDisplay} est en attente d'assignation. L'administration a été notifiée.`,
+        body: `Votre visite pour ${targetDisplay} is en attente d'assignation. L'administration a été notifiée.`,
         type: 'visite',
         data: {
           visit_id: visit.id,
@@ -413,9 +413,9 @@ const assignAidantToVisit = async ({
       const targetId = visit.patient_id || visit.user_id;
 
       await assignAidantToTarget({
-        aidantUserId,
-        targetType,
-        targetId,
+        aidantUserId: aidantUserId,
+        targetType: targetType,
+        targetId: targetId,
         familyId: visit.user_id,
         assignmentType: 'primary',
         createdBy: adminId,
