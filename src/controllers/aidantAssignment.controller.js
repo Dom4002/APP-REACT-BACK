@@ -1,4 +1,5 @@
 // 📁 backend/src/controllers/aidantAssignment.controller.js
+// ✅ CONTRÔLEUR D'ASSIGNATIONS COMPLET  
 
 const { supabase } = require('../services/supabase.service');
 
@@ -33,7 +34,6 @@ const getActiveAidant = asyncWrapper(async (req, res) => {
       });
     }
 
-    // ✅ Accepter 'personal' et 'personal_account'
     const validTypes = ['patient', 'personal', 'personal_account', 'family'];
     if (!validTypes.includes(targetType)) {
       return res.status(400).json({
@@ -57,7 +57,8 @@ const getActiveAidant = asyncWrapper(async (req, res) => {
       if ((targetType === 'personal' || targetType === 'personal_account') && targetId === userId) {
         hasPermission = true;
       } else if (targetType === 'patient') {
-        const { data: link } = await supabase
+        // ✅ CORRECTIF : Ajout de la déstructuration de linkError
+        const { data: link, error: linkError } = await supabase
           .from('patient_family_links')
           .select('id')
           .eq('family_id', userId)
@@ -73,7 +74,8 @@ const getActiveAidant = asyncWrapper(async (req, res) => {
     }
     // ✅ Un aidant ne peut voir que ses propres patients
     else if (userRole === 'aidant') {
-      const { data: assignment } = await supabase
+      // ✅ CORRECTIF : Ajout de la déstructuration de assignError
+      const { data: assignment, error: assignError } = await supabase
         .from('aidant_assignments')
         .select('id')
         .eq('aidant_user_id', userId)
