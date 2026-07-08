@@ -1,4 +1,5 @@
 // 📁 backend/src/services/visit.service.js
+// ✅ SERVICE DE VISITES COMPLET :  
 
 const { supabase } = require('./supabase.service');
 const { createNotification } = require('./notification.service');
@@ -45,28 +46,6 @@ const DRAFT_EXPIRY_HOURS = 24;
 // CRÉATION DE VISITE
 // ============================================================
 
-/**
- * Crée une visite avec gestion complète (abonnement, wizard, aidant)
- * @param {Object} params
- * @param {string} params.userId - UUID de l'utilisateur
- * @param {string} params.patientId - UUID du patient (optionnel)
- * @param {string} params.targetType - 'patient' | 'personal' | 'personal_account'
- * @param {string} params.targetName - Nom de la cible
- * @param {string} params.targetUserId - UUID de l'utilisateur cible
- * @param {string} params.scheduledDate - Date planifiée
- * @param {string} params.scheduledTime - Heure planifiée
- * @param {number} params.durationMinutes - Durée en minutes
- * @param {string} params.notes - Notes
- * @param {boolean} params.isUrgent - Urgent ou non
- * @param {boolean} params.isPonctual - Mode ponctuel
- * @param {string} params.assignmentType - 'ponctuelle' | 'permanente'
- * @param {string} params.aidantId - ID de l'aidant (optionnel)
- * @param {string} params.wizardChoice - 'ponctuelle' | 'permanente' | 'without_aidant'
- * @param {string} params.selectedAidantId - ID de l'aidant sélectionné
- * @param {Object} params.profile - Profil de l'utilisateur
- * @param {Object} params.coordinatorId - ID du coordinateur (optionnel)
- * @returns {Promise<Object>}
- */
 const createVisit = async ({
   userId,
   patientId,
@@ -87,13 +66,13 @@ const createVisit = async ({
   coordinatorId = null,
 }) => {
   try {
-    // 1. Déterminer la cible finale
+    // 1. Déterminer la cible finale de manière flexible
     const finalTargetType = targetType || (patientId ? VISIT_TYPES.PATIENT : VISIT_TYPES.PERSONAL);
     const finalTargetName = targetName || (patientId ? null : profile?.full_name);
     const finalUserId = targetUserId || userId;
     const familyId = finalUserId;
 
-    // 2. Vérifier l'abonnement
+    // 2. Vérifier si un abonnement actif existe
     const subscriptionCheck = await checkSubscriptionForVisits(finalUserId);
     
     let status = VISIT_STATUS.PLANNED;
@@ -103,10 +82,10 @@ const createVisit = async ({
 
     if (isPonctual) {
       requiresPayment = true;
-      status = VISIT_STATUS.DRAFT;
+      status = VISIT_STATUS.DRAFT; // 'brouillon'
       paymentAmount = getVisitPrice(durationMinutes);
     } else if (subscriptionCheck.hasActiveSubscription && subscriptionCheck.remainingVisits > 0) {
-      status = VISIT_STATUS.PLANNED;
+      status = VISIT_STATUS.PLANNED; // 'planifiee'
       requiresPayment = false;
       subscriptionId = subscriptionCheck.subscription?.id || null;
     } else if (subscriptionCheck.hasActiveSubscription && subscriptionCheck.remainingVisits === 0) {
@@ -137,11 +116,9 @@ const createVisit = async ({
         const convertedId = await getAidantIdFromUserIdOrId(foundId);
         if (convertedId) finalAidantId = convertedId;
       } else if (selectedAidantId && wizardChoice) {
-        // Wizard: utilisateur a choisi un aidant
         const convertedId = await getAidantIdFromUserIdOrId(selectedAidantId);
         if (convertedId) {
           if (wizardChoice === 'permanente') {
-            // Vérifier le quota
             const { data: aidant } = await supabase
               .from('aidants')
               .select('current_assignments, max_assignments')
@@ -161,7 +138,6 @@ const createVisit = async ({
           }
         }
       } else if (!finalAidantId && profile?.role === 'family') {
-        // Famille sans aidant assigné → Vérifier si des aidants sont disponibles
         const wizardOptions = await getVisitWizardOptions(
           targetTypeForAidant,
           targetIdForAidant,
@@ -169,7 +145,6 @@ const createVisit = async ({
         );
 
         if (wizardOptions.allFull) {
-          // Tous les aidants sont full → Planifier sans aidant
           if (wizardChoice === 'without_aidant') {
             status = VISIT_STATUS.WAITING_AIDANT;
             finalAidantId = null;
@@ -182,7 +157,6 @@ const createVisit = async ({
             };
           }
         } else if (wizardOptions.hasAvailableAidants) {
-          // Des aidants sont disponibles → Retourner les options
           if (!selectedAidantId || !wizardChoice) {
             return {
               success: false,
@@ -195,7 +169,7 @@ const createVisit = async ({
       }
     }
 
-    // 4. Créer la visite
+    // 4. Créer la visite en base de données
     const visitData = {
       user_id: finalUserId,
       patient_id: patientId || null,
@@ -207,6 +181,7 @@ const createVisit = async ({
       scheduled_time: scheduledTime,
       duration_minutes: durationMinutes || 60,
       status: status,
+      is_draft: requiresPayment, // ✅ CORRECTIF CRITIQUE : Aligné avec chk_draft_is_draft (true si brouillon, false sinon)
       actions: [],
       notes: notes || null,
       is_urgent: isUrgent || false,
@@ -271,7 +246,7 @@ const createVisit = async ({
       };
     }
 
-    // 5. Notifications
+    // 5. Notifications push d'arrière-plan
     const targetDisplay = finalTargetName || 'Patient';
 
     if (requiresPayment) {
@@ -288,7 +263,6 @@ const createVisit = async ({
         },
       });
     } else if (status === VISIT_STATUS.WAITING_AIDANT) {
-      // Notification aux admins
       await notifyAdminsForPendingAidant(visit.id, {
         targetName: targetDisplay,
         scheduledDate,
@@ -306,13 +280,16 @@ const createVisit = async ({
         },
       });
     } else if (finalAidantId) {
-      await createNotification({
-        userId: finalAidantId,
-        title: '📅 Nouvelle visite à valider',
-        body: `Visite pour ${targetDisplay} le ${scheduledDate} à ${scheduledTime}`,
-        type: 'visite',
-        data: { visit_id: visit.id, action: 'approve' },
-      });
+      // Notification aidant (utiliser son user_id de profil)
+      if (visit.aidant?.user?.id) {
+        await createNotification({
+          userId: visit.aidant.user.id,
+          title: '📅 Nouvelle visite à valider',
+          body: `Visite pour ${targetDisplay} le ${scheduledDate} à ${scheduledTime}`,
+          type: 'visite',
+          data: { visit_id: visit.id, action: 'approve' },
+        });
+      }
 
       await createNotification({
         userId: finalUserId,
@@ -344,16 +321,6 @@ const createVisit = async ({
 // ============================================================
 // ASSIGNATION D'AIDANT À UNE VISITE
 // ============================================================
-
-/**
- * Assigne un aidant à une visite existante
- * @param {string} visitId - UUID de la visite
- * @param {string} aidantUserId - UUID de l'aidant (user_id)
- * @param {string} assignmentType - 'permanente' | 'ponctuelle'
- * @param {string} adminId - UUID de l'admin qui assigne
- * @param {boolean} force - Ignorer le quota
- * @returns {Promise<Object>}
- */
 const assignAidantToVisit = async ({
   visitId,
   aidantUserId,
@@ -362,7 +329,6 @@ const assignAidantToVisit = async ({
   force = false,
 }) => {
   try {
-    // 1. Récupérer la visite
     const { data: visit, error: visitError } = await supabase
       .from('visites')
       .select('*')
@@ -370,14 +336,9 @@ const assignAidantToVisit = async ({
       .single();
 
     if (visitError || !visit) {
-      return {
-        success: false,
-        error: 'Visite non trouvée',
-        code: 'VISIT_NOT_FOUND',
-      };
+      return { success: false, error: 'Visite non trouvée', code: 'VISIT_NOT_FOUND' };
     }
 
-    // 2. Vérifier que l'aidant existe
     const { data: aidant, error: aidantError } = await supabase
       .from('aidants')
       .select('*')
@@ -385,22 +346,13 @@ const assignAidantToVisit = async ({
       .single();
 
     if (aidantError || !aidant) {
-      return {
-        success: false,
-        error: 'Aidant non trouvé',
-        code: 'AIDANT_NOT_FOUND',
-      };
+      return { success: false, error: 'Aidant non trouvé', code: 'AIDANT_NOT_FOUND' };
     }
 
     if (!aidant.is_verified || aidant.status !== 'approved') {
-      return {
-        success: false,
-        error: 'Cet aidant n\'est pas approuvé',
-        code: 'AIDANT_NOT_APPROVED',
-      };
+      return { success: false, error: 'Cet aidant n\'est pas approuvé', code: 'AIDANT_NOT_APPROVED' };
     }
 
-    // 3. Vérifier le quota (sauf si force)
     const currentAssignments = aidant.current_assignments || 0;
     const maxAssignments = aidant.max_assignments || 4;
 
@@ -416,7 +368,6 @@ const assignAidantToVisit = async ({
 
     const isPermanent = assignmentType === 'permanente';
 
-    // 4. Mettre à jour la visite
     const updateData = {
       aidant_id: aidant.id,
       status: VISIT_STATUS.PLANNED,
@@ -447,47 +398,31 @@ const assignAidantToVisit = async ({
           total_missions,
           completed_missions,
           cancelled_missions,
-          user:profiles!aidants_user_id_fkey (
-            id,
-            full_name,
-            email,
-            phone,
-            avatar_url
-          )
+          user:profiles!aidants_user_id_fkey (id, full_name, email, phone)
         )
       `)
       .single();
 
     if (updateError) {
       console.error('❌ assignAidantToVisit update error:', updateError);
-      return {
-        success: false,
-        error: updateError.message,
-        code: 'UPDATE_ERROR',
-      };
+      return { success: false, error: updateError.message, code: 'UPDATE_ERROR' };
     }
 
-    // 5. Si permanent, créer l'assignation
     if (isPermanent) {
       const targetType = visit.patient_id ? VISIT_TYPES.PATIENT : VISIT_TYPES.PERSONAL_ACCOUNT;
       const targetId = visit.patient_id || visit.user_id;
 
-      const assignmentResult = await assignAidantToTarget({
-        aidantUserId: aidantUserId,
-        targetType: targetType,
-        targetId: targetId,
+      await assignAidantToTarget({
+        aidantUserId,
+        targetType,
+        targetId,
         familyId: visit.user_id,
         assignmentType: 'primary',
         createdBy: adminId,
         reason: `Assigné pour la visite ${visitId}${force ? ' (forcé)' : ''}`,
       });
-
-      if (!assignmentResult.success) {
-        console.warn('⚠️ Échec création assignation permanente:', assignmentResult.error);
-      }
     }
 
-    // 6. Notifications
     const targetDisplay = visit.target_name || visit.patient?.first_name || 'Patient';
 
     await createNotification({
@@ -495,25 +430,15 @@ const assignAidantToVisit = async ({
       title: '📅 Nouvelle visite assignée',
       body: `Vous avez été assigné à la visite de ${targetDisplay} le ${visit.scheduled_date} à ${visit.scheduled_time}`,
       type: 'visite',
-      data: {
-        visit_id: visitId,
-        assignment_type: assignmentType,
-        is_permanent: isPermanent,
-        forced: force || false,
-        action: 'approve',
-      },
+      data: { visit_id: visitId, action: 'approve' },
     });
 
     await createNotification({
       userId: visit.user_id,
       title: '✅ Un aidant a été assigné à votre visite',
-      body: `${aidant.user?.full_name || 'Un aidant'} a été assigné pour la visite de ${targetDisplay}`,
+      body: `Un aidant a été assigné pour la visite de ${targetDisplay}`,
       type: 'visite',
-      data: {
-        visit_id: visitId,
-        assignment_type: assignmentType,
-        is_permanent: isPermanent,
-      },
+      data: { visit_id: visitId },
     });
 
     return {
@@ -525,22 +450,10 @@ const assignAidantToVisit = async ({
     };
   } catch (error) {
     console.error('❌ assignAidantToVisit error:', error);
-    return {
-      success: false,
-      error: error.message,
-      code: 'UNKNOWN_ERROR',
-    };
+    return { success: false, error: error.message, code: 'UNKNOWN_ERROR' };
   }
 };
 
-// ============================================================
-// VISITES EN ATTENTE D'AIDANT
-// ============================================================
-
-/**
- * Récupère toutes les visites en attente d'aidant
- * @returns {Promise<Array>}
- */
 const getPendingAidantVisits = async () => {
   try {
     const { data, error } = await supabase
@@ -548,21 +461,12 @@ const getPendingAidantVisits = async () => {
       .select(`
         *,
         patient:patients(*),
-        family:profiles!visites_user_id_fkey(
-          id,
-          full_name,
-          email,
-          phone
-        )
+        family:profiles!visites_user_id_fkey(id, full_name, email, phone)
       `)
       .eq('status', VISIT_STATUS.WAITING_AIDANT)
       .order('created_at', { ascending: true });
 
-    if (error) {
-      console.error('❌ getPendingAidantVisits error:', error);
-      return [];
-    }
-
+    if (error) throw error;
     return data || [];
   } catch (error) {
     console.error('❌ getPendingAidantVisits error:', error);
@@ -570,18 +474,6 @@ const getPendingAidantVisits = async () => {
   }
 };
 
-// ============================================================
-// VALIDATION DE VISITE SANS AIDANT
-// ============================================================
-
-/**
- * Valide une visite créée sans aidant (en attente)
- * @param {string} visitId - UUID de la visite
- * @param {string} adminId - UUID de l'admin qui valide
- * @param {string} aidantId - UUID de l'aidant assigné
- * @param {string} assignmentType - 'permanente' | 'ponctuelle'
- * @returns {Promise<Object>}
- */
 const validateVisitWithoutAidant = async ({
   visitId,
   adminId,
@@ -589,29 +481,13 @@ const validateVisitWithoutAidant = async ({
   assignmentType = 'permanente',
 }) => {
   try {
-    const { data: visit, error: visitError } = await supabase
-      .from('visites')
-      .select('*')
-      .eq('id', visitId)
-      .single();
-
-    if (visitError || !visit) {
-      return {
-        success: false,
-        error: 'Visite non trouvée',
-        code: 'VISIT_NOT_FOUND',
-      };
-    }
+    const { data: visit, error: visitError } = await supabase.from('visites').select('*').eq('id', visitId).single();
+    if (visitError || !visit) return { success: false, error: 'Visite non trouvée', code: 'VISIT_NOT_FOUND' };
 
     if (visit.status !== VISIT_STATUS.WAITING_AIDANT) {
-      return {
-        success: false,
-        error: `La visite n'est pas en attente d'aidant. Statut: ${visit.status}`,
-        code: 'INVALID_STATUS',
-      };
+      return { success: false, error: 'Statut invalide', code: 'INVALID_STATUS' };
     }
 
-    // Si un aidant est fourni, l'assigner
     if (aidantId) {
       const result = await assignAidantToVisit({
         visitId,
@@ -620,20 +496,10 @@ const validateVisitWithoutAidant = async ({
         adminId,
         force: true,
       });
-
-      if (!result.success) {
-        return result;
-      }
-
-      return {
-        success: true,
-        visit: result.visit,
-        assigned: true,
-        assignment_type: assignmentType,
-      };
+      if (!result.success) return result;
+      return { success: true, visit: result.visit, assigned: true, assignment_type: assignmentType };
     }
 
-    // Sinon, marquer comme planifiée sans aidant (en attente)
     const { data: updatedVisit, error: updateError } = await supabase
       .from('visites')
       .update({
@@ -650,50 +516,25 @@ const validateVisitWithoutAidant = async ({
       .select()
       .single();
 
-    if (updateError) {
-      return {
-        success: false,
-        error: updateError.message,
-        code: 'UPDATE_ERROR',
-      };
-    }
+    if (updateError) return { success: false, error: updateError.message, code: 'UPDATE_ERROR' };
 
-    return {
-      success: true,
-      visit: updatedVisit,
-      assigned: false,
-    };
+    return { success: true, visit: updatedVisit, assigned: false };
   } catch (error) {
     console.error('❌ validateVisitWithoutAidant error:', error);
-    return {
-      success: false,
-      error: error.message,
-      code: 'UNKNOWN_ERROR',
-    };
+    return { success: false, error: error.message, code: 'UNKNOWN_ERROR' };
   }
 };
 
-// ============================================================
-// NOTIFICATIONS
-// ============================================================
-
-/**
- * Notifie les admins d'une visite en attente d'aidant
- */
 const notifyAdminsForPendingAidant = async (visitId, { targetName, scheduledDate, scheduledTime }) => {
   try {
-    const { data: admins } = await supabase
-      .from('profiles')
-      .select('id')
-      .in('role', ['admin', 'coordinator']);
-
-    if (!admins || admins.length === 0) return;
+    const { data: admins } = await supabase.from('profiles').select('id').in('role', ['admin', 'coordinator']);
+    if (!admins) return;
 
     for (const admin of admins) {
       await createNotification({
         userId: admin.id,
         title: '🚨 Visite planifiée sans aidant disponible !',
-        body: `Visite pour ${targetName} le ${scheduledDate} à ${scheduledTime}. Tous les aidants sont complets (4/4).`,
+        body: `Visite pour ${targetName} le ${scheduledDate} à ${scheduledTime}.`,
         type: 'alert',
         data: {
           visit_id: visitId,
@@ -710,56 +551,23 @@ const notifyAdminsForPendingAidant = async (visitId, { targetName, scheduledDate
   }
 };
 
-// ============================================================
-// FONCTIONS UTILITAIRES
-// ============================================================
-
-/**
- * Convertit un user_id en aidant_id
- */
 const getAidantIdFromUserIdOrId = async (userIdOrId) => {
-  const { data: aidantById, error: errorById } = await supabase
-    .from('aidants')
-    .select('id')
-    .eq('id', userIdOrId)
-    .maybeSingle();
+  const { data: aidantById } = await supabase.from('aidants').select('id').eq('id', userIdOrId).maybeSingle();
+  if (aidantById) return aidantById.id;
 
-  if (!errorById && aidantById) return aidantById.id;
-
-  const { data: aidantByUser, error: errorByUser } = await supabase
-    .from('aidants')
-    .select('id')
-    .eq('user_id', userIdOrId)
-    .maybeSingle();
-
-  if (!errorByUser && aidantByUser) return aidantByUser.id;
+  const { data: aidantByUser } = await supabase.from('aidants').select('id').eq('user_id', userIdOrId).maybeSingle();
+  if (aidantByUser) return aidantByUser.id;
 
   return null;
 };
 
-// ============================================================
-// EXPORTS
-// ============================================================
-
 module.exports = {
-  // Constantes
   VISIT_STATUS,
   VISIT_TYPES,
   DRAFT_EXPIRY_HOURS,
-
-  // Création
   createVisit,
-
-  // Assignation
   assignAidantToVisit,
-
-  // Gestion des visites sans aidant
   getPendingAidantVisits,
   validateVisitWithoutAidant,
-
-  // Notifications
   notifyAdminsForPendingAidant,
-
-  // Utilitaires
-  getAidantIdFromUserIdOrId,
 };
