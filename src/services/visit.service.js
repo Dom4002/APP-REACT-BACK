@@ -1,6 +1,5 @@
 // 📁 backend/src/services/visit.service.js
-// ✅ SERVICE DE VISITES COMPLET  
-
+ 
 const { supabase } = require('./supabase.service');
 const { createNotification } = require('./notification.service');
 const { 
@@ -181,8 +180,10 @@ const createVisit = async ({
       scheduled_time: scheduledTime,
       duration_minutes: durationMinutes || 60,
       status: status,
-      is_draft: requiresPayment, // ✅ ALIGNEMENT DES CONTRAINTES POSTGRESQL "chk_draft_is_draft"
-      requires_payment: requiresPayment, // ✅ ALIGNEMENT DES CONTRAINTES POSTGRESQL "chk_draft_requires_payment"
+      is_draft: requiresPayment, // ✅ ALIGNEMENT CONTRAINTE SQL : chk_draft_is_draft (true si brouillon, false sinon)
+      requires_payment: requiresPayment, // ✅ CORRECTIF ALIGNEMENT CRITIQUE : chk_draft_requires_payment (doit être true si brouillon)
+      is_ponctual: isPonctual || requiresPayment, // ✅ ALIGNEMENT CONTRAINTE SQL : is_ponctual (true si ponctuel)
+      is_paid: !requiresPayment, // ✅ ALIGNEMENT CONTRAINTE SQL : is_paid (false si brouillon, true si abonnement)
       actions: [],
       notes: notes || null,
       is_urgent: isUrgent || false,
@@ -272,7 +273,7 @@ const createVisit = async ({
       await createNotification({
         userId: finalUserId,
         title: '⏳ Visite en attente d\'aidant',
-        body: `Votre visite pour ${targetDisplay} is en attente d'assignation. L'administration a été notifiée.`,
+        body: `Votre visite pour ${targetDisplay} est en attente d'assignation. L'administration a été notifiée.`,
         type: 'visite',
         data: {
           visit_id: visit.id,
