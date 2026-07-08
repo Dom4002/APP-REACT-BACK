@@ -1,5 +1,6 @@
 // 📁 backend/src/routes/order.routes.js
- 
+// ✅ GESTION DES COMMANDES - FLUX DE PAIEMENT, QUOTAS ET NOTIFICATIONS EN DIRECT
+
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../services/supabase.service');
@@ -284,7 +285,7 @@ router.get('/', async (req, res) => {
 // 2️⃣ ROUTES DE MANIPULATION D'ÉCRITURE (AVEC ROUTE COORDONNÉE '/')
 // =============================================
 
-// ✅ 2.1 CRÉER UNE COMMANDE (Avec ou sans abonnement)
+// ✅ 2.1 CRÉER UNE COMMANDE (Avec détection asynchrone flexible pour proches/personnel)
 router.post('/', async (req, res) => {
   try {
     console.log('📥 Création commande - Body reçu:', JSON.stringify(req.body, null, 2));
@@ -316,10 +317,36 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'Les champs obligatoires sont manquants' });
     }
 
-    const finalTargetType = target_type || (patient_id ? 'patient' : 'personal');
-    const finalTargetName = target_name || (patient_id ? null : profile.full_name);
-    const familyId = user.id;
+    // ✅ DÉTERMINER DE MANIÈRE FLEXIBLE LA CIBLE (Retrait du bloc "hasPatient" restrictif)
+    let finalPatientId = null;
+    let finalTargetType = 'personal';
+    let finalTargetName = target_name || null;
+    let targetHasPatient = false;
+    let familyId = user.id;
 
+    if (patient_id) {
+      const { data: patient, error: patientError } = await supabase
+        .from('patients')
+        .select('id, first_name, last_name, category, created_by')
+        .eq('id', patient_id)
+        .single();
+
+      if (patientError || !patient) {
+        return res.status(404).json({ error: 'Patient non trouvé' });
+      }
+
+      finalPatientId = patient_id;
+      finalTargetType = 'patient';
+      finalTargetName = `${patient.first_name} ${patient.last_name}`;
+      targetHasPatient = true;
+    } else {
+      finalPatientId = null;
+      finalTargetType = 'personal';
+      finalTargetName = profile.full_name || 'Personnel';
+      targetHasPatient = false;
+    }
+
+    // ✅ LOGIQUE UNIFIÉE - VÉRIFICATION DE L'ABONNEMENT
     let status = 'creee';
     let requiresPayment = false;
     let paymentAmount = 0;
@@ -352,8 +379,8 @@ router.post('/', async (req, res) => {
     let finalAidantId = null;
 
     if (status !== 'attente_paiement') {
-      const targetTypeForAidant = patient_id ? 'patient' : 'personal_account';
-      const targetIdForAidant = patient_id || user.id;
+      const targetTypeForAidant = finalPatientId ? 'patient' : 'personal_account';
+      const targetIdForAidant = finalPatientId || user.id;
       
       let foundId = await getActiveAidantForTarget(targetTypeForAidant, targetIdForAidant, familyId);
 
@@ -398,7 +425,7 @@ router.post('/', async (req, res) => {
 
     const orderData = {
       user_id: user.id,
-      patient_id: patient_id || null,
+      patient_id: finalPatientId,
       target_type: finalTargetType,
       target_name: finalTargetName,
       family_id: user.id,
@@ -436,6 +463,8 @@ router.post('/', async (req, res) => {
       console.error('❌ Erreur Supabase insertion:', error);
       return res.status(500).json({ error: error.message });
     }
+
+    console.log('✅ Commande créée avec succès, ID:', data.id);
 
     let patient = null;
     if (data.patient_id) {
@@ -644,11 +673,9 @@ router.post('/:id/confirm-payment', async (req, res) => {
 
     if (error) throw error;
 
-    // ✅ NOTIFICATION AUTOMATIQUE EN DIRECT AUX AIDANTS APRES PAIEMENT
     const targetDisplay = order.target_name || 'un client';
 
     if (aidantId) {
-      // ✅ CORRECTION : Récupérer le user_id de l'aidant
       const { data: aidantProfile } = await supabase.from('aidants').select('user_id').eq('id', aidantId).maybeSingle();
       if (aidantProfile?.user_id) {
         await createNotification({
@@ -889,8 +916,8 @@ router.post('/:id/cancel', async (req, res) => {
     }
 
     if (existingOrder.aidant_id && existingOrder.status === 'en_cours') {
-      const { data: aidant } = await supabase.from('aidants').select('user_id').eq('id', existingOrder.aidant_id).single();
-      if (aidant) await decrementAidantOrders(aidant.user_id);
+      const { data: informants } = await supabase.from('aidants').select('user_id').eq('id', existingOrder.aidant_id).single();
+      if (informants) await decrementAidantOrders(informants.user_id);
     }
 
     const { data, error } = await supabase
