@@ -84,7 +84,7 @@ const getAidantIdFromUserIdOrId = async (userIdOrId) => {
 };
 
 // =============================================
-// 1️⃣ TOUTES LES ROUTES STATIQUES (SANS :id) - PLACÉES TOUT EN HAUT 🚀
+// 1️⃣ TOUTES LES ROUTES STATIQUES  
 // =============================================
 
 // ✅ 1.1 RÉCUPÉRER LES COMPTES DISPONIBLES POUR L'ADMIN
@@ -434,14 +434,64 @@ router.post('/', async (req, res) => {
       return res.status(403).json({ error: 'Non autorisé à créer une visite' });
     }
 
+    // ✅ EXTRACTION SANS BLOCAGE DES CIBLES POUR LES COMPTES FAMILLES AVEC PATIENTS
+    let finalPatientId = patient_id || null;
+    let finalTargetType = target_type || (patient_id ? 'patient' : 'personal');
+    let finalTargetName = target_name || null;
+    let finalUserId = target_user_id || user.id;
+
+    if (patient_id) {
+      const { data: patient, error: patientError } = await supabase
+        .from('patients')
+        .select('id, first_name, last_name')
+        .eq('id', patient_id)
+        .single();
+
+      if (patientError || !patient) {
+        return res.status(404).json({ error: 'Patient non trouvé' });
+      }
+      finalPatientId = patient_id;
+      finalTargetType = 'patient';
+      finalTargetName = `${patient.first_name} ${patient.last_name}`;
+    } else {
+      const targetUid = target_user_id || user.id;
+      const { data: account, error: accountError } = await supabase
+        .from('profiles')
+        .select('id, full_name')
+        .eq('id', targetUid)
+        .single();
+
+      if (accountError || !account) {
+        return res.status(404).json({ error: 'Compte non trouvé' });
+      }
+      finalPatientId = null;
+      finalTargetType = 'personal';
+      finalTargetName = account.full_name || 'Personnel';
+      finalUserId = targetUid;
+    }
+
+    // Si c'est pour un patient (bénéficiaire), vérifier la liaison de sécurité
+    if (profile.role === 'family' && finalPatientId) {
+      const { data: link } = await supabase
+        .from('patient_family_links')
+        .select('patient_id')
+        .eq('family_id', user.id)
+        .eq('patient_id', finalPatientId)
+        .maybeSingle();
+
+      if (!link) {
+        return res.status(403).json({ error: 'Vous n\'êtes pas lié à ce patient' });
+      }
+    }
+
     const { createVisit } = require('../services/visit.service');
 
     const result = await createVisit({
       userId: user.id,
-      patientId: patient_id || null,
-      targetType: target_type || (patient_id ? 'patient' : 'personal'),
-      targetName: target_name || null,
-      targetUserId: target_user_id || user.id,
+      patientId: finalPatientId,
+      targetType: finalTargetType,
+      targetName: finalTargetName,
+      targetUserId: finalUserId,
       scheduledDate: scheduled_date,
       scheduledTime: scheduled_time,
       durationMinutes: duration_minutes || 60,
@@ -705,7 +755,7 @@ router.post('/:id/confirm-payment', async (req, res) => {
       }
     }
 
-    // ✅ MISE À JOUR ALIGNÉE SUR LE SCHÉMA REEL (SANS LA COLONNE IS_PAID)
+    // ✅ MISE À JOUR ALIGNÉE SUR LE SCHÉMA REEL (SANS LA COLONNE IS_PAID ET CONFORME AUX DEUX CONSTRAINTES SQL)
     const { data: updatedVisit, error: updateError } = await supabase
       .from('visites')
       .update({
@@ -1751,4 +1801,3 @@ router.post('/:id/convert-to-subscription', async (req, res) => {
 });
 
 module.exports = router;
- 
