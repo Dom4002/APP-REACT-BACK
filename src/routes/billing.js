@@ -1,6 +1,5 @@
- // 📁 backend/src/routes/billing.js
-// ✅ CONTROLEUR DE FACTURATION COMPLET : TRAITEMENTS DES SIGNALS WEBHOOKS ET GENERATION FEDAPAY
-
+// 📁 backend/src/routes/billing.js
+ 
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 const { FedaPay, Transaction } = require('fedapay');
@@ -130,7 +129,6 @@ async function getActiveAidantForTarget(targetType, targetId, familyId) {
       return null;
     }
 
-    // ✅ Vérifier si data est un aidant_id
     const { data: aidantById, error: errorById } = await supabase
       .from('aidants')
       .select('id')
@@ -141,7 +139,6 @@ async function getActiveAidantForTarget(targetType, targetId, familyId) {
       return data;
     }
 
-    // ✅ Vérifier si data est un user_id
     const { data: aidantByUser, error: errorByUser } = await supabase
       .from('aidants')
       .select('id')
@@ -314,7 +311,7 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
       },
     });
 
-    // 2️⃣ ✅ CORRECTIF : NOTIFIER TOUS LES AIDANTS DISPONIBLES ET SOUS LEUR QUOTA !
+    // 2️⃣ NOTIFIER TOUS LES AIDANTS DISPONIBLES ET SOUS LEUR QUOTA
     const { data: aidants } = await supabase
       .from('aidants')
       .select('user_id, current_orders, max_orders')
@@ -323,7 +320,6 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
       .eq('status', 'approved');
 
     if (aidants && aidants.length > 0) {
-      // Filtrer les aidants qui ont encore de la place dans leur quota
       const availableAidants = aidants.filter(
         a => (a.current_orders || 0) < (a.max_orders || 2)
       );
@@ -331,7 +327,7 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
       if (availableAidants.length > 0) {
         for (const aidant of availableAidants) {
           await supabase.from('notifications').insert({
-            user_id: aidant.user_id, // ✅ Profiles.id (vrai ID de profil)
+            user_id: aidant.user_id, // ✅ Profiles.id (profiles.id à la place d'aidant_id)
             title: '🛒 Nouvelle commande disponible',
             body: `Commande de ${targetName} — ${orderDataToInsert.description}`,
             type: 'commande',
@@ -378,7 +374,6 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
       return null;
     }
 
-    // ✅ RÉCUPÉRER L'AIDANT ACTIF APRÈS PAIEMENT
     const familyId = visit.user_id;
     const targetType = visit.patient_id ? 'patient' : 'personal_account';
     const targetId = visit.patient_id || visit.user_id;
@@ -389,9 +384,14 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
       console.log(`✅ Aidant trouvé après paiement: ${aidantId}`);
     }
 
-    // ✅ CONSTRUIRE L'OBJET DE MISE À JOUR
+    // ✅ TRANSITION STRICTE DE TOUTES LES CONTRAINTES POSTGRESQL "chk_draft_is_draft" & "chk_draft_requires_payment"
     const updateData = {
       status: 'planifiee',
+      is_draft: false,                     // 🔓 Chk_draft_is_draft (doit être false quand pas brouillon)
+      requires_payment: false,             // 🔓 Chk_draft_requires_payment (doit être false quand pas brouillon)
+      payment_status: 'completed',         // 🔓 Chk_payment_status_completed (doit être completed)
+      payment_confirmed_at: new Date().toISOString(),
+      payment_transaction_id: transactionId,
       aidant_id: aidantId || null,
       metadata: {
         ...(visit.metadata || {}),
@@ -405,18 +405,16 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
       }
     };
 
-    // ✅ Pour les visites personnelles, s'assurer que patient_id est null (retrait de TypeScript "as any")
     if (visit.target_type === 'personal' || visit.target_type === 'personal_account') {
       delete updateData.patient_id;
     }
 
     console.log('📤 Mise à jour visite avec:', JSON.stringify(updateData, null, 2));
 
-    // ✅ CORRECTIF DE DESTRUCTURATION : Data lié à updatedVisit pour éviter le crash ReferenceError
     const { data: updatedVisit, error: updateError } = await supabase
       .from('visites')
       .update(updateData)
-      .eq('id', visitId) // ✅ CORRECTIF : visitId au lieu de id
+      .eq('id', visitId) 
       .select(`
         *,
         patient:patients(*),
@@ -431,9 +429,13 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
     if (updateError) {
       console.error('❌ Erreur mise à jour visite:', updateError.message);
       
-      // ✅ TENTATIVE DE RÉCUPÉRATION SI CONFLIT SQL
-      if (updateError.message.includes('chk_planned_not_draft')) {
-        console.log('🔄 Tentative de récupération avec patient_id = user_id...');
+      // ✅ TENTATIVE DE RÉCUPÉRATION SECURE SI ERREUR PATIENT_ID FALLBACK
+      if (
+        updateError.message.includes('chk_planned_not_draft') || 
+        updateError.message.includes('chk_draft_is_draft') || 
+        updateError.message.includes('chk_draft_requires_payment')
+      ) {
+        console.log('🔄 Tentative de récupération fallback...');
         
         if (!aidantId) {
           aidantId = await getActiveAidantForTarget(targetType, targetId, familyId);
@@ -441,7 +443,12 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
         
         const fallbackData = {
           status: 'planifiee',
-          patient_id: visit.user_id,
+          is_draft: false,
+          requires_payment: false,
+          payment_status: 'completed',
+          payment_confirmed_at: new Date().toISOString(),
+          payment_transaction_id: transactionId,
+          patient_id: visit.user_id, 
           aidant_id: aidantId || null,
           target_type: 'personal',
           target_name: visit.target_name || 'Personnel',
@@ -468,7 +475,6 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
         if (!retryError && retryVisit) {
           console.log('✅ Visite récupérée avec patient_id fallback:', retryVisit.id);
           
-          // ✅ NOTIFICATIONS POUR LE FALLBACK
           if (retryVisit.aidant_id) {
             const { data: aidant } = await supabase
               .from('aidants')
@@ -498,7 +504,7 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
           return retryVisit;
         }
         
-        console.error('❌ Échec de la récupération:', retryError?.message);
+        console.error('❌ Échec de la récupération fallback:', retryError?.message);
       }
       
       return null;
@@ -508,10 +514,10 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
 
     const targetDisplay = updatedVisit.target_name || (updatedVisit.patient ? `${updatedVisit.patient.first_name} ${updatedVisit.patient.last_name}` : 'Personnel');
 
-    // 1️⃣ NOTIFICATION À L'AIDANT ASSIGNÉ (AVEC VRAI USER_ID)
+    // 1️⃣ NOTIFICATION À L'AIDANT ASSIGNÉ (AVEC SON VRAI USER_ID)
     if (updatedVisit.aidant_id && updatedVisit.aidant?.user?.id) {
       await supabase.from('notifications').insert({
-        user_id: updatedVisit.aidant.user.id, // ✅ Profiles.id (vrai ID d'utilisateur)
+        user_id: updatedVisit.aidant.user.id, // ✅ Profiles.id (profiles.id à la place de l'aidant_id)
         title: '📅 Nouvelle visite à valider',
         body: `Visite pour ${targetDisplay} le ${updatedVisit.scheduled_date} à ${updatedVisit.scheduled_time}`,
         type: 'visite',
@@ -620,7 +626,7 @@ router.post('/generate-payment', async (req, res) => {
 
   try {
     const authHeader = req.headers.authorization || '';
-    const authToken = authHeader.replace('Bearer ', '').trim(); // ✅ Renommé en authToken pour éviter la collision
+    const authToken = authHeader.replace('Bearer ', '').trim();
 
     if (!authToken) {
       return res.status(401).json({
@@ -741,7 +747,6 @@ router.post('/generate-payment', async (req, res) => {
     FedaPay.setApiKey(FEDAPAY_SECRET_KEY);
     FedaPay.setEnvironment(FEDAPAY_ENV === 'sandbox' ? 'sandbox' : 'live');
 
-    // ✅ CONSTRUIRE LES MÉTADONNÉES COMPLÈTES
     const metadata = {
       user_id: user.id,
       plan_id: plan_id || null,
@@ -790,10 +795,8 @@ router.post('/generate-payment', async (req, res) => {
       });
     }
 
-    // ✅ Renommer la variable locale pour éviter la collision de noms (checkoutToken au lieu de token)
     const checkoutToken = await transaction.generateToken();
 
-    // Enregistrement du paiement
     const paymentData = {
       user_id: user.id,
       amount: finalAmount,
@@ -940,7 +943,7 @@ router.get('/verify-payment', async (req, res) => {
 });
 
 // ============================================================
-// 🔔 WEBHOOK FEDAPAY - CONFIRMATION EN ARRIÈRE-PLAN AVEC NOTIFICATIONS AIDANTS
+// 🔔 WEBHOOK FEDAPAY
 // ============================================================
 router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const startTime = Date.now();
@@ -991,7 +994,6 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
 
     const metadata = payment.metadata || {};
     
-    // Détermination robuste des paramètres
     const type = metadata.type || payment.type || 'subscription';
     const isPonctual = metadata.is_ponctual === true || metadata.is_ponctual === 'true' || payment.is_ponctual;
     const subscriptionId = metadata.abonnement_id || payment.abonnement_id || null;
@@ -1024,20 +1026,16 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     const paymentRecord = updatedPayment || payment;
     let result = null;
 
-    // 1️⃣ CAS A : VISITE PONCTUELLE
     if (type === 'visit' && visitId) {
       result = await processPonctualVisit(paymentRecord, transactionId, visitId, metadata);
     } 
-    // 2️⃣ CAS B : COMMANDE PONCTUELLE
     else if (type === 'order' || isPonctual) {
       result = await createPonctualOrder(paymentRecord, transactionId, orderData);
     } 
-    // 3️⃣ CAS C : ABONNEMENT
     else if (type === 'subscription' && subscriptionId) {
       result = await activateSubscription(paymentRecord, subscriptionId);
     }
 
-    // ✅ NOTIFICATION GLOBALE UNIFIÉE (Évite les Toasts en doubles)
     try {
       let notificationTitle = '✅ Paiement confirmé';
       let notificationBody = `Votre paiement de ${paymentRecord.amount} FCFA a été confirmé.`;
