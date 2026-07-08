@@ -1,12 +1,11 @@
 // 📁 backend/src/controllers/visit.controller.js
-
+ 
 const { supabase } = require('../services/supabase.service');
 const { 
   createVisit,
   assignAidantToVisit,
   getPendingAidantVisits,
   validateVisitWithoutAidant,
-  VISIT_STATUS,
 } = require('../services/visit.service');
 const { 
   getVisitWizardOptions,
@@ -46,20 +45,49 @@ const createVisitController = asyncWrapper(async (req, res) => {
       });
     }
 
-    // ✅ Déterminer la cible
+    // ✅ DÉTERMINER LA CIBLE DE MANIÈRE FLUIDE SANS BLOCAGE "HAS_PATIENT"
     let finalPatientId = patient_id || null;
     let finalTargetType = target_type || (patient_id ? 'patient' : 'personal');
     let finalTargetName = target_name || null;
     let finalUserId = target_user_id || user.id;
-    let coordinatorId = ['admin', 'coordinator'].includes(profile.role) ? user.id : null;
 
-    // ✅ Si famille, vérifier les permissions
-    if (profile.role === 'family' && patient_id) {
+    if (patient_id) {
+      const { data: patient, error: patientError } = await supabase
+        .from('patients')
+        .select('id, first_name, last_name, category, created_by')
+        .eq('id', patient_id)
+        .single();
+
+      if (patientError || !patient) {
+        return res.status(404).json({ error: 'Patient non trouvé' });
+      }
+      finalPatientId = patient_id;
+      finalTargetType = 'patient';
+      finalTargetName = `${patient.first_name} ${patient.last_name}`;
+    } else {
+      const targetUid = target_user_id || user.id;
+      const { data: account, error: accountError } = await supabase
+        .from('profiles')
+        .select('id, full_name')
+        .eq('id', targetUid)
+        .single();
+
+      if (accountError || !account) {
+        return res.status(404).json({ error: 'Compte non trouvé' });
+      }
+      finalPatientId = null;
+      finalTargetType = 'personal';
+      finalTargetName = account.full_name || 'Personnel';
+      finalUserId = targetUid;
+    }
+
+    // ✅ Si famille, vérifier les permissions sur le patient associé
+    if (profile.role === 'family' && finalPatientId) {
       const { data: link } = await supabase
         .from('patient_family_links')
         .select('patient_id')
         .eq('family_id', user.id)
-        .eq('patient_id', patient_id)
+        .eq('patient_id', finalPatientId)
         .maybeSingle();
 
       if (!link) {
@@ -70,7 +98,7 @@ const createVisitController = asyncWrapper(async (req, res) => {
       }
     }
 
-    // ✅ Créer la visite via le service
+    // ✅ Créer la visite via le service unifié
     const result = await createVisit({
       userId: user.id,
       patientId: finalPatientId,
@@ -88,11 +116,11 @@ const createVisitController = asyncWrapper(async (req, res) => {
       wizardChoice: wizard_choice || null,
       selectedAidantId: selected_aidant_id || null,
       profile: profile,
-      coordinatorId: coordinatorId,
+      coordinatorId: ['admin', 'coordinator'].includes(profile.role) ? user.id : null,
     });
 
     if (!result.success) {
-      // ✅ Si c'est une erreur de wizard, retourner les options
+      // ✅ Si c'est une erreur de wizard, retourner les options de sélection
       if (result.code === 'WIZARD_REQUIRED' || result.code === 'ALL_AIDANTS_FULL') {
         return res.status(400).json({
           success: false,
@@ -146,7 +174,6 @@ const getWizardOptions = asyncWrapper(async (req, res) => {
       });
     }
 
-    // ✅ Vérifier les permissions
     const isAdmin = ['admin', 'coordinator'].includes(userRole);
     const isFamily = userRole === 'family';
 
@@ -157,7 +184,6 @@ const getWizardOptions = asyncWrapper(async (req, res) => {
       });
     }
 
-    // ✅ Si famille, vérifier que la cible lui appartient
     if (isFamily) {
       if (targetType === 'patient') {
         const { data: link } = await supabase
@@ -183,8 +209,8 @@ const getWizardOptions = asyncWrapper(async (req, res) => {
       }
     }
 
-    const finalFamilyId = isFamily ? userId : (familyId || userId);
-    const options = await getVisitWizardOptions(targetType, targetId, finalFamilyId, userRole);
+    const familyIdParam = isFamily ? userId : (familyId || null);
+    const options = await getVisitWizardOptions(targetType, targetId, familyIdParam, userRole);
 
     res.json({
       success: true,
@@ -192,10 +218,7 @@ const getWizardOptions = asyncWrapper(async (req, res) => {
     });
   } catch (error) {
     console.error('❌ getWizardOptions error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message || 'Erreur lors de la récupération des options',
-    });
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -232,10 +255,40 @@ const adminAssignAidant = asyncWrapper(async (req, res) => {
       });
     }
 
+    const { data: visit, error } = await supabase
+      .from('visites')
+      .select(`
+        *,
+        patient:patients(*),
+        aidant:aidants!visites_aidant_id_fkey (
+          id,
+          user_id,
+          specialties,
+          available,
+          rating,
+          total_missions,
+          completed_missions,
+          cancelled_missions,
+          user:profiles!aidants_user_id_fkey (
+            id,
+            full_name,
+            email,
+            phone,
+            avatar_url
+          )
+        )
+      `)
+      .eq('id', visitId)
+      .single();
+
+    if (error) {
+      console.error('❌ Erreur récupération visite:', error);
+    }
+
     res.json({
       success: true,
       message: result.message || 'Aidant assigné avec succès',
-      visit: result.visit,
+      visit: visit || result.visit,
       assignment_type: result.assignment_type,
       is_permanent: result.is_permanent,
       forced: result.forced || false,
@@ -256,7 +309,6 @@ const getPendingAidantVisitsController = asyncWrapper(async (req, res) => {
   try {
     const visits = await getPendingAidantVisits();
 
-    // Enrichir avec les relations
     const visitsWithRelations = await Promise.all(visits.map(async (visit) => {
       let patient = null;
       if (visit.patient_id) {
@@ -307,7 +359,6 @@ const getAvailableAidants = asyncWrapper(async (req, res) => {
     const userId = req.user.id;
     const { targetType, targetId, zone, specialty, minRating } = req.query;
 
-    // Vérifier que l'utilisateur est une famille
     if (req.profile?.role !== 'family') {
       return res.status(403).json({
         success: false,
@@ -315,7 +366,6 @@ const getAvailableAidants = asyncWrapper(async (req, res) => {
       });
     }
 
-    // Vérifier que la cible appartient à la famille
     if (targetType === 'patient' && targetId) {
       const { data: link } = await supabase
         .from('patient_family_links')
@@ -362,7 +412,6 @@ const validatePendingAidantVisit = asyncWrapper(async (req, res) => {
     const { id } = req.params;
     const { aidantId, assignmentType = 'permanente' } = req.body;
 
-    // Vérifier que la visite existe
     const { data: visit, error: visitError } = await supabase
       .from('visites')
       .select('*')
@@ -376,7 +425,7 @@ const validatePendingAidantVisit = asyncWrapper(async (req, res) => {
       });
     }
 
-    if (visit.status !== VISIT_STATUS.WAITING_AIDANT) {
+    if (visit.status !== 'en_attente_aidant') {
       return res.status(400).json({
         success: false,
         error: `La visite n'est pas en attente d'aidant. Statut: ${visit.status}`,
