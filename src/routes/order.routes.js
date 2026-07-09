@@ -1,5 +1,4 @@
 // 📁 backend/src/routes/order.routes.js
-// ✅ GESTION DES COMMANDES - ACCÈS ET VISIBILITÉ EN TEMPS RÉEL COMPLETS POUR LES AIDANTS DISPONIBLES
 
 const express = require('express');
 const router = express.Router();
@@ -20,9 +19,8 @@ const {
 router.use(authMiddleware);
 
 // =============================================
-// CONSTANTES
+// CONSTANTES - TARIFS ET QUOTAS
 // =============================================
-
 const ORDER_PONCTUAL_PRICES = {
   medicaments: 5000,
   produits_bebe: 5000,
@@ -33,8 +31,6 @@ const ORDER_PONCTUAL_PRICES = {
 };
 
 const DEFAULT_ORDER_PRICE = 2500;
-
-// ✅ QUOTA MAX DE COMMANDES EN COURS PAR AIDANT
 const MAX_ORDERS_IN_PROGRESS = 2;
 
 const getPonctualOrderPriceLocal = (type, items) => {
@@ -46,7 +42,7 @@ const getPonctualOrderPriceLocal = (type, items) => {
 };
 
 // =============================================
-// RÉCUPÉRER L'AIDANT_ID
+// UTILITAIRES AIDANTS ET QUOTAS
 // =============================================
 const getAidantIdFromUserIdOrId = async (userIdOrId) => {
   const { data: aidantById, error: errorById } = await supabase
@@ -72,9 +68,6 @@ const getAidantIdFromUserIdOrId = async (userIdOrId) => {
   return null;
 };
 
-// =============================================
-// VÉRIFIER LE QUOTA DE COMMANDES EN COURS
-// =============================================
 const checkAidantOrderQuota = async (aidantUserId) => {
   try {
     const { data: aidant, error: aidantError } = await supabase
@@ -117,14 +110,11 @@ const checkAidantOrderQuota = async (aidantUserId) => {
   }
 };
 
-// =============================================
-// INC/DEC CURRENT_ORDERS
-// =============================================
 const incrementAidantOrders = async (aidantUserId) => {
   try {
     const { data: aidant, error: aidantError } = await supabase
       .from('aidants')
-      .select('id, current_orders, max_orders')
+      .select('id, current_orders')
       .eq('user_id', aidantUserId)
       .single();
 
@@ -140,12 +130,7 @@ const incrementAidantOrders = async (aidantUserId) => {
       })
       .eq('id', aidant.id);
 
-    if (error) {
-      console.error('❌ incrementAidantOrders error:', error);
-      return false;
-    }
-
-    return true;
+    return !error;
   } catch (error) {
     console.error('❌ incrementAidantOrders error:', error);
     return false;
@@ -156,7 +141,7 @@ const decrementAidantOrders = async (aidantUserId) => {
   try {
     const { data: aidant, error: aidantError } = await supabase
       .from('aidants')
-      .select('id, current_orders, max_orders')
+      .select('id, current_orders')
       .eq('user_id', aidantUserId)
       .single();
 
@@ -172,12 +157,7 @@ const decrementAidantOrders = async (aidantUserId) => {
       })
       .eq('id', aidant.id);
 
-    if (error) {
-      console.error('❌ decrementAidantOrders error:', error);
-      return false;
-    }
-
-    return true;
+    return !error;
   } catch (error) {
     console.error('❌ decrementAidantOrders error:', error);
     return false;
@@ -185,10 +165,10 @@ const decrementAidantOrders = async (aidantUserId) => {
 };
 
 // =============================================
-// 1️⃣ TOUTES LES ROUTES STATIQUES (SANS :id) - PLACÉES TOUT EN HAUT
+// 1️⃣ ROUTES STATIQUES (SANS PARAMÈTRE :id)
 // =============================================
 
-// ✅ 1.1 OBTENIR LES COMMANDES DISPONIBLES (POUR LES AIDANTS)
+// ✅ 1.1 COMMANDES DISPONIBLES (AIDANTS UNIQUEMENT)
 router.get('/available', async (req, res) => {
   try {
     const { user, profile } = req;
@@ -248,7 +228,6 @@ router.get('/', async (req, res) => {
         aidant:aidants!commandes_aidant_id_fkey(*, user:profiles(*))
       `);
 
-    // Filtre par rôle
     if (profile.role === 'family') {
       query = query.eq('user_id', user.id);
     } else if (profile.role === 'aidant') {
@@ -259,20 +238,16 @@ router.get('/', async (req, res) => {
         .single();
 
       if (aidant) {
-        // ✅ CORRECTIF DE VISIBILITÉ SÉCURISÉ : L'aidant voit ses propres commandes assignées 
-        // ET les nouvelles commandes disponibles non assignées (aidant_id nul)
         query = query.or(`aidant_id.eq.${aidant.id},and(aidant_id.is.null,status.in.(creee,en_attente,disponible))`);
       } else {
         return res.json([]);
       }
     }
 
-    // Filtre par statut
     if (status) {
       query = query.eq('status', status);
     }
 
-    // Filtre "disponible" pour les aidants
     if (available === 'true' && profile.role === 'aidant') {
       query = query.in('status', ['creee', 'en_attente', 'disponible']);
     }
@@ -287,10 +262,10 @@ router.get('/', async (req, res) => {
 });
 
 // =============================================
-// 2️⃣ ROUTES DE MANIPULATION D'ÉCRITURE (AVEC ROUTE COORDONNÉE '/')
+// 2️⃣ ROUTE DE CRÉATION COORDONNÉE (POST '/')
 // =============================================
 
-// ✅ 2.1 CRÉER UNE COMMANDE (Avec détection asynchrone flexible pour proches/personnel)
+// ✅ 2.1 CRÉER UNE COMMANDE (CORRIGÉ AVEC LATITUDE / LONGITUDE)
 router.post('/', async (req, res) => {
   try {
     console.log('📥 Création commande - Body reçu:', JSON.stringify(req.body, null, 2));
@@ -302,6 +277,8 @@ router.post('/', async (req, res) => {
       type,
       description,
       address,
+      latitude,       
+      longitude,        
       estimated_amount,
       items,
       prescription_url,
@@ -322,11 +299,9 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'Les champs obligatoires sont manquants' });
     }
 
-    // ✅ DÉTERMINER DE MANIÈRE FLEXIBLE LA CIBLE (Retrait du bloc "hasPatient" restrictif)
     let finalPatientId = null;
     let finalTargetType = 'personal';
     let finalTargetName = target_name || null;
-    let targetHasPatient = false;
     let familyId = user.id;
 
     if (patient_id) {
@@ -343,15 +318,12 @@ router.post('/', async (req, res) => {
       finalPatientId = patient_id;
       finalTargetType = 'patient';
       finalTargetName = `${patient.first_name} ${patient.last_name}`;
-      targetHasPatient = true;
     } else {
       finalPatientId = null;
       finalTargetType = 'personal';
       finalTargetName = profile.full_name || 'Personnel';
-      targetHasPatient = false;
     }
 
-    // ✅ LOGIQUE UNIFIÉE - VÉRIFICATION DE L'ABONNEMENT
     let status = 'creee';
     let requiresPayment = false;
     let paymentAmount = 0;
@@ -371,10 +343,6 @@ router.post('/', async (req, res) => {
       status = 'creee';
       requiresPayment = false;
       subscriptionId = subscriptionCheck.subscription?.id || null;
-    } else if (subscriptionCheck.hasActiveSubscription && subscriptionCheck.remainingOrders === 0) {
-      requiresPayment = true;
-      status = 'attente_paiement';
-      paymentAmount = getPonctualOrderPriceLocal(type, items);
     } else {
       requiresPayment = true;
       status = 'attente_paiement';
@@ -396,10 +364,10 @@ router.post('/', async (req, res) => {
           console.log(`✅ Aidant automatique trouvé pour la commande: ${finalAidantId}`);
         }
       } else if (selected_aidant_id && wizard_choice) {
-        const selectedAidantId = await getAidantIdFromUserIdOrId(selected_aidant_id);
-        if (selectedAidantId) {
+        const selectedId = await getAidantIdFromUserIdOrId(selected_aidant_id);
+        if (selectedId) {
           if (wizard_choice === 'ponctuelle') {
-            finalAidantId = selectedAidantId;
+            finalAidantId = selectedId;
           } else if (wizard_choice === 'permanente') {
             const { data: aidant, error } = await supabase
               .from('aidants')
@@ -418,12 +386,8 @@ router.post('/', async (req, res) => {
                 });
               }
             }
-            finalAidantId = selectedAidantId;
+            finalAidantId = selectedId;
           }
-        }
-      } else {
-        if (wizard_choice === 'without_aidant' && ['admin', 'coordinator'].includes(profile.role)) {
-          finalAidantId = null;
         }
       }
     }
@@ -437,6 +401,8 @@ router.post('/', async (req, res) => {
       type: type,
       description: description,
       address: address,
+      latitude: latitude || null,     
+      longitude: longitude || null,   
       estimated_amount: estimated_amount || 0,
       items: items || [],
       prescription_url: prescription_url || null,
@@ -449,7 +415,6 @@ router.post('/', async (req, res) => {
         requires_payment: requiresPayment,
         created_by: user.id,
         created_at: new Date().toISOString(),
-        auto_assigned_aidant: !!finalAidantId && !selected_aidant_id,
         payment_amount: requiresPayment ? paymentAmount : null,
         subscription_used: subscriptionId ? true : false,
         ponctual_mode: requiresPayment ? true : false,
@@ -473,14 +438,14 @@ router.post('/', async (req, res) => {
 
     let patient = null;
     if (data.patient_id) {
-      const { data: patientData } = await supabase.from('patients').select('*').eq('id', data.patient_id).single();
-      patient = patientData;
+      const { data: pData } = await supabase.from('patients').select('*').eq('id', data.patient_id).single();
+      patient = pData;
     }
 
     let family = null;
     if (data.family_id) {
-      const { data: familyData } = await supabase.from('profiles').select('*').eq('id', data.family_id).single();
-      family = familyData;
+      const { data: fData } = await supabase.from('profiles').select('*').eq('id', data.family_id).single();
+      family = fData;
     }
 
     const fullOrder = { ...data, patient, family };
@@ -501,11 +466,10 @@ router.post('/', async (req, res) => {
       });
     } else {
       if (finalAidantId) {
-        // ✅ CORRECTION : Utiliser le user_id de l'aidant
         const { data: aidantProfile } = await supabase.from('aidants').select('user_id').eq('id', finalAidantId).maybeSingle();
         if (aidantProfile?.user_id) {
           await createNotification({
-            userId: aidantProfile.user_id, // ✅ Profiles.id au lieu de aidant_id
+            userId: aidantProfile.user_id,
             title: '🛒 Nouvelle commande assignée automatiquement',
             body: `Commande de ${targetDisplay} - ${description}`,
             type: 'commande',
@@ -525,7 +489,7 @@ router.post('/', async (req, res) => {
         if (availableAidants.length > 0) {
           for (const aidant of availableAidants) {
             await createNotification({
-              userId: aidant.user_id, // ✅ Correct (profiles.id)
+              userId: aidant.user_id,
               title: '🛒 Nouvelle commande disponible',
               body: `Commande de ${targetDisplay} - ${description}`,
               type: 'commande',
@@ -614,15 +578,14 @@ router.get('/:id', async (req, res) => {
       aidant = aidantData;
     }
 
-    const fullOrder = { ...data, patient, family, aidant };
-    res.json(fullOrder);
+    res.json({ ...data, patient, family, aidant });
   } catch (error) {
     console.error('❌ Get order error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// ✅ 3.2 CONFIRMER PAIEMENT COMMANDE PONCTUELLE et NOTIFIER EN DIRECT
+// ✅ 3.2 CONFIRMER LE PAIEMENT D'UNE COMMANDE PONCTUELLE
 router.post('/:id/confirm-payment', async (req, res) => {
   try {
     const { id } = req.params;
@@ -678,15 +641,13 @@ router.post('/:id/confirm-payment', async (req, res) => {
 
     if (error) throw error;
 
-    // ✅ NOTIFICATION AUTOMATIQUE EN DIRECT AUX AIDANTS APRES PAIEMENT
     const targetDisplay = order.target_name || 'un client';
 
     if (aidantId) {
-      // ✅ CORRECTION : Récupérer le user_id de l'aidant
       const { data: aidantProfile } = await supabase.from('aidants').select('user_id').eq('id', aidantId).maybeSingle();
       if (aidantProfile?.user_id) {
         await createNotification({
-          userId: aidantProfile.user_id, // ✅ ID de profil (profiles.id) à la place de l'aidant_id
+          userId: aidantProfile.user_id,
           title: '🛒 Nouvelle commande à prendre',
           body: `Commande de ${targetDisplay} - ${order.description}`,
           type: 'commande',
@@ -706,7 +667,7 @@ router.post('/:id/confirm-payment', async (req, res) => {
       if (availableAidants.length > 0) {
         for (const aidant of availableAidants) {
           await createNotification({
-            userId: aidant.user_id, // ✅ Correct (profiles.id)
+            userId: aidant.user_id,
             title: '🛒 Nouvelle commande disponible',
             body: `Commande de ${targetDisplay} - ${order.description}`,
             type: 'commande',
@@ -733,7 +694,7 @@ router.post('/:id/confirm-payment', async (req, res) => {
   }
 });
 
-// ✅ 3.3 PRENDRE UNE COMMANDE (par un aidant) - AVEC QUOTA
+// ✅ 3.3 PRENDRE UNE COMMANDE (AIDANT) - CONTRÔLE AVEC QUOTAS
 router.post('/:id/take', async (req, res) => {
   try {
     const { id } = req.params;
@@ -749,7 +710,6 @@ router.post('/:id/take', async (req, res) => {
       return res.status(404).json({ error: 'Commande non trouvée' });
     }
 
-    // ✅ Statuts acceptables pour la prise
     const availableStatuses = ['creee', 'en_attente', 'disponible'];
     if (!availableStatuses.includes(order.status)) {
       return res.status(400).json({ 
@@ -757,10 +717,9 @@ router.post('/:id/take', async (req, res) => {
       });
     }
 
-    // ✅ Vérifier que l'aidant est disponible
     const { data: aidant, error: aidantError } = await supabase
       .from('aidants')
-      .select('id, available, is_verified, current_assignments, max_assignments')
+      .select('id, available, is_verified')
       .eq('user_id', user.id)
       .single();
 
@@ -772,7 +731,6 @@ router.post('/:id/take', async (req, res) => {
       return res.status(403).json({ error: 'Vous n\'êtes pas disponible ou vérifié' });
     }
 
-    // ✅ Vérifier le quota de commandes EN COURS (max 2)
     const quotaCheck = await checkAidantOrderQuota(user.id);
     if (!quotaCheck.canTake) {
       return res.status(403).json({ 
@@ -783,15 +741,12 @@ router.post('/:id/take', async (req, res) => {
       });
     }
 
-    // ✅ Si la commande a déjà un aidant assigné
     if (order.aidant_id && order.aidant_id !== aidant.id) {
       return res.status(403).json({ error: 'Cette commande est déjà assignée à un autre aidant' });
     }
 
-    // ✅ Incrémenter current_orders
     const incremented = await incrementAidantOrders(user.id);
     if (!incremented) {
-      console.error('❌ Échec incrémentation current_orders');
       return res.status(500).json({ error: 'Erreur lors de la prise de commande' });
     }
 
@@ -810,12 +765,10 @@ router.post('/:id/take', async (req, res) => {
       .single();
 
     if (error) {
-      // Rollback: décrémenter si erreur
       await decrementAidantOrders(user.id);
       throw error;
     }
 
-    // ✅ Notification à la famille
     const targetDisplay = order.target_name || (order.patient ? `${order.patient.first_name} ${order.patient.last_name}` : 'Personnel');
 
     if (order.family_id) {
@@ -843,15 +796,11 @@ router.post('/:id/take', async (req, res) => {
   }
 });
 
-// =============================================
-// ✅ METTRE À JOUR LE STATUT D'UNE COMMANDE
-// =============================================
+// ✅ 3.4 METTRE À JOUR LE STATUT D'UNE COMMANDE (ADMIN)
 router.post('/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
-
-    console.log(`📥 Mise à jour statut commande ${id} -> ${status}`);
 
     if (!status) {
       return res.status(400).json({ error: 'Le champ "status" est obligatoire' });
@@ -899,7 +848,7 @@ router.post('/:id/status', async (req, res) => {
   }
 });
 
-// ✅ 3.5 LIVRER UNE COMMANDE
+// ✅ 3.5 FINALISER LA LIVRAISON D'UNE COMMANDE (LIVRER)
 router.post('/:id/deliver', async (req, res) => {
   try {
     const { id } = req.params;
@@ -971,8 +920,8 @@ router.post('/:id/cancel', async (req, res) => {
     }
 
     if (existingOrder.aidant_id && existingOrder.status === 'en_cours') {
-      const { data: informants } = await supabase.from('aidants').select('user_id').eq('id', existingOrder.aidant_id).single();
-      if (informants) await decrementAidantOrders(informants.user_id);
+      const { data: informant } = await supabase.from('aidants').select('user_id').eq('id', existingOrder.aidant_id).single();
+      if (informant) await decrementAidantOrders(informant.user_id);
     }
 
     const { data, error } = await supabase
@@ -1010,7 +959,7 @@ router.post('/:id/cancel', async (req, res) => {
   }
 });
 
-// ✅ 3.7 AUTO-VALIDATION D'UNE COMMANDE (après 12h)
+// ✅ 3.7 AUTO-VALIDATION EN CAS DE DÉPASSEMENT DES 12 HEURES (ADMIN)
 router.post('/:id/auto-validate', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
   try {
     const { id } = req.params;
