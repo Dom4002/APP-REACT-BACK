@@ -1,4 +1,5 @@
 // 📁 backend/src/routes/order.routes.js
+// ✅ ROUTEUR DES COMMANDES COMPLET : TRANSITIONS DE STATUTS SÉCURISÉES PAR RECALCUL DE QUOTA ET RECONSTRUCTION DES ENVELOPPES RELATIONS
 
 const express = require('express');
 const router = express.Router();
@@ -15,6 +16,16 @@ const {
   checkSubscriptionForOrders,
   decrementOrder,
 } = require('../services/visitPayment.service');
+const {
+  checkAidantOrderQuota,
+  incrementAidantOrders,
+  decrementAidantOrders,
+  createOrder,
+  takeOrder,
+  deliverOrder,
+  autoValidateOrder,
+  enrichOrderWithRelations,
+} = require('../services/order.service');
 
 router.use(authMiddleware);
 
@@ -41,9 +52,43 @@ const getPonctualOrderPriceLocal = (type, items) => {
   return ORDER_PONCTUAL_PRICES[type] || DEFAULT_ORDER_PRICE;
 };
 
-// =============================================
-// UTILITAIRES AIDANTS ET QUOTAS
-// =============================================
+// ============================================================
+// 📊 SYNCHRONISATION LOCALE DU QUOTA DES INTERVENANTS
+// ============================================================
+
+/**
+ * Recalcule et synchronise en direct le nombre réel de livraisons actives d'un aidant
+ * Évite les désynchronisations ou blocages de quotas à vie
+ */
+const syncAidantOrderCount = async (aidantUserId) => {
+  try {
+    const { data: aidant } = await supabase
+      .from('aidants')
+      .select('id')
+      .eq('user_id', aidantUserId)
+      .single();
+
+    if (!aidant) return;
+
+    // Compter le nombre de commandes réelles au statut 'en_cours'
+    const { count, error } = await supabase
+      .from('commandes')
+      .select('id', { count: 'exact', head: true })
+      .eq('aidant_id', aidant.id)
+      .eq('status', 'en_cours');
+
+    if (!error) {
+      await supabase
+        .from('aidants')
+        .update({ current_orders: count || 0 })
+        .eq('id', aidant.id);
+      console.log(`📊 [Route Quota] Synchronisation pour ${aidantUserId} : ${count || 0} commande(s) active(s)`);
+    }
+  } catch (err) {
+    console.error('❌ Erreur sync quota local:', err);
+  }
+};
+
 const getAidantIdFromUserIdOrId = async (userIdOrId) => {
   const { data: aidantById, error: errorById } = await supabase
     .from('aidants')
@@ -66,102 +111,6 @@ const getAidantIdFromUserIdOrId = async (userIdOrId) => {
   }
 
   return null;
-};
-
-const checkAidantOrderQuota = async (aidantUserId) => {
-  try {
-    const { data: aidant, error: aidantError } = await supabase
-      .from('aidants')
-      .select('id, current_orders, max_orders')
-      .eq('user_id', aidantUserId)
-      .single();
-
-    if (aidantError || !aidant) {
-      return { 
-        success: false, 
-        error: 'Aidant non trouvé',
-        current: 0,
-        max: MAX_ORDERS_IN_PROGRESS,
-        available: 0,
-      };
-    }
-
-    const current = aidant.current_orders || 0;
-    const max = aidant.max_orders || MAX_ORDERS_IN_PROGRESS;
-    const available = max - current;
-
-    return {
-      success: true,
-      current,
-      max,
-      available,
-      canTake: current < max,
-    };
-  } catch (error) {
-    console.error('❌ checkAidantOrderQuota error:', error);
-    return {
-      success: false,
-      error: error.message,
-      current: 0,
-      max: MAX_ORDERS_IN_PROGRESS,
-      available: 0,
-      canTake: false,
-    };
-  }
-};
-
-const incrementAidantOrders = async (aidantUserId) => {
-  try {
-    const { data: aidant, error: aidantError } = await supabase
-      .from('aidants')
-      .select('id, current_orders')
-      .eq('user_id', aidantUserId)
-      .single();
-
-    if (aidantError || !aidant) return false;
-
-    const newCount = (aidant.current_orders || 0) + 1;
-
-    const { error } = await supabase
-      .from('aidants')
-      .update({
-        current_orders: newCount,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', aidant.id);
-
-    return !error;
-  } catch (error) {
-    console.error('❌ incrementAidantOrders error:', error);
-    return false;
-  }
-};
-
-const decrementAidantOrders = async (aidantUserId) => {
-  try {
-    const { data: aidant, error: aidantError } = await supabase
-      .from('aidants')
-      .select('id, current_orders')
-      .eq('user_id', aidantUserId)
-      .single();
-
-    if (aidantError || !aidant) return false;
-
-    const newCount = Math.max(0, (aidant.current_orders || 0) - 1);
-
-    const { error } = await supabase
-      .from('aidants')
-      .update({
-        current_orders: newCount,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', aidant.id);
-
-    return !error;
-  } catch (error) {
-    console.error('❌ decrementAidantOrders error:', error);
-    return false;
-  }
 };
 
 // =============================================
@@ -214,7 +163,7 @@ router.get('/available', async (req, res) => {
   }
 });
 
-// ✅ 1.2 OBTENIR TOUTES LES COMMANDES
+// ✅ 1.2 OBTENIR TOUTES LES COMMANDES CHRONOLOGIQUES (AVEC FILTRE DE SÉCURITÉ DE RÔLE)
 router.get('/', async (req, res) => {
   try {
     const { user, profile } = req;
@@ -262,14 +211,12 @@ router.get('/', async (req, res) => {
 });
 
 // =============================================
-// 2️⃣ ROUTE DE CRÉATION COORDONNÉE (POST '/')
+// 2️⃣ ROUTE DE CRÉATION DE COMMANDE (POST '/')
 // =============================================
 
-// ✅ 2.1 CRÉER UNE COMMANDE (CORRIGÉ AVEC LATITUDE / LONGITUDE)
 router.post('/', async (req, res) => {
   try {
-    console.log('📥 Création commande - Body reçu:', JSON.stringify(req.body, null, 2));
-
+    const { user, profile } = req;
     const { 
       patient_id,
       target_type,
@@ -277,240 +224,54 @@ router.post('/', async (req, res) => {
       type,
       description,
       address,
-      latitude,       
-      longitude,        
+      latitude = null,
+      longitude = null,
       estimated_amount,
       items,
       prescription_url,
       order_type,
-      is_paid,
       is_ponctual = false,
       wizard_choice = null,
       selected_aidant_id = null,
     } = req.body;
 
-    const { user, profile } = req;
-
     if (profile.role === 'aidant') {
       return res.status(403).json({ error: 'Les aidants ne peuvent pas créer de commandes' });
     }
 
-    if (!type || !description || !address) {
-      return res.status(400).json({ error: 'Les champs obligatoires sont manquants' });
-    }
-
-    let finalPatientId = null;
-    let finalTargetType = 'personal';
-    let finalTargetName = target_name || null;
-    let familyId = user.id;
-
-    if (patient_id) {
-      const { data: patient, error: patientError } = await supabase
-        .from('patients')
-        .select('id, first_name, last_name, category, created_by')
-        .eq('id', patient_id)
-        .single();
-
-      if (patientError || !patient) {
-        return res.status(404).json({ error: 'Patient non trouvé' });
-      }
-
-      finalPatientId = patient_id;
-      finalTargetType = 'patient';
-      finalTargetName = `${patient.first_name} ${patient.last_name}`;
-    } else {
-      finalPatientId = null;
-      finalTargetType = 'personal';
-      finalTargetName = profile.full_name || 'Personnel';
-    }
-
-    let status = 'creee';
-    let requiresPayment = false;
-    let paymentAmount = 0;
-    let subscriptionId = null;
-
-    const subscriptionCheck = await checkSubscriptionForOrders(user.id);
-    console.log('📊 Vérification abonnement pour commande:', {
-      hasActiveSubscription: subscriptionCheck.hasActiveSubscription,
-      remainingOrders: subscriptionCheck.remainingOrders,
+    const result = await createOrder({
+      userId: user.id,
+      patientId: patient_id || null,
+      targetType: target_type || (patient_id ? 'patient' : 'personal'),
+      targetName: target_name || null,
+      type,
+      description,
+      address,
+      latitude,
+      longitude,
+      estimatedAmount: estimated_amount || 0,
+      items: items || [],
+      prescriptionUrl: prescription_url || null,
+      isPonctual: is_ponctual || order_type === 'ponctual',
+      wizardChoice: wizard_choice,
+      selectedAidantId: selected_aidant_id,
+      profile,
     });
 
-    if (is_ponctual || order_type === 'ponctual') {
-      requiresPayment = true;
-      status = 'attente_paiement';
-      paymentAmount = getPonctualOrderPriceLocal(type, items);
-    } else if (subscriptionCheck.hasActiveSubscription && subscriptionCheck.remainingOrders > 0) {
-      status = 'creee';
-      requiresPayment = false;
-      subscriptionId = subscriptionCheck.subscription?.id || null;
-    } else {
-      requiresPayment = true;
-      status = 'attente_paiement';
-      paymentAmount = getPonctualOrderPriceLocal(type, items);
-    }
-
-    let finalAidantId = null;
-
-    if (status !== 'attente_paiement') {
-      const targetTypeForAidant = finalPatientId ? 'patient' : 'personal_account';
-      const targetIdForAidant = finalPatientId || user.id;
-      
-      let foundId = await getActiveAidantForTarget(targetTypeForAidant, targetIdForAidant, familyId);
-
-      if (foundId) {
-        const convertedId = await getAidantIdFromUserIdOrId(foundId);
-        if (convertedId) {
-          finalAidantId = convertedId;
-          console.log(`✅ Aidant automatique trouvé pour la commande: ${finalAidantId}`);
-        }
-      } else if (selected_aidant_id && wizard_choice) {
-        const selectedId = await getAidantIdFromUserIdOrId(selected_aidant_id);
-        if (selectedId) {
-          if (wizard_choice === 'ponctuelle') {
-            finalAidantId = selectedId;
-          } else if (wizard_choice === 'permanente') {
-            const { data: aidant, error } = await supabase
-              .from('aidants')
-              .select('current_assignments, max_assignments')
-              .eq('user_id', selected_aidant_id)
-              .single();
-
-            if (!error && aidant) {
-              const current = aidant.current_assignments || 0;
-              const max = aidant.max_assignments || 4;
-              if (current >= max) {
-                return res.status(400).json({
-                  success: false,
-                  error: `Cet aidant a déjà ${current}/${max} assignations.`,
-                  code: 'AIDANT_FULL',
-                });
-              }
-            }
-            finalAidantId = selectedId;
-          }
-        }
-      }
-    }
-
-    const orderData = {
-      user_id: user.id,
-      patient_id: finalPatientId,
-      target_type: finalTargetType,
-      target_name: finalTargetName,
-      family_id: user.id,
-      type: type,
-      description: description,
-      address: address,
-      latitude: latitude || null,     
-      longitude: longitude || null,   
-      estimated_amount: estimated_amount || 0,
-      items: items || [],
-      prescription_url: prescription_url || null,
-      status: status,
-      order_type: order_type || (requiresPayment ? 'ponctual' : 'subscription'),
-      is_paid: !requiresPayment,
-      aidant_id: finalAidantId,
-      subscription_id: subscriptionId,
-      metadata: {
-        requires_payment: requiresPayment,
-        created_by: user.id,
-        created_at: new Date().toISOString(),
-        payment_amount: requiresPayment ? paymentAmount : null,
-        subscription_used: subscriptionId ? true : false,
-        ponctual_mode: requiresPayment ? true : false,
-        wizard_choice: wizard_choice || null,
-        selected_aidant: selected_aidant_id || null,
-      }
-    };
-
-    const { data, error } = await supabase
-      .from('commandes')
-      .insert(orderData)
-      .select('*')
-      .single();
-
-    if (error) {
-      console.error('❌ Erreur Supabase insertion:', error);
-      return res.status(500).json({ error: error.message });
-    }
-
-    console.log('✅ Commande créée avec succès, ID:', data.id);
-
-    let patient = null;
-    if (data.patient_id) {
-      const { data: pData } = await supabase.from('patients').select('*').eq('id', data.patient_id).single();
-      patient = pData;
-    }
-
-    let family = null;
-    if (data.family_id) {
-      const { data: fData } = await supabase.from('profiles').select('*').eq('id', data.family_id).single();
-      family = fData;
-    }
-
-    const fullOrder = { ...data, patient, family };
-    const targetDisplay = finalTargetName || (patient ? `${patient.first_name} ${patient.last_name}` : 'Personnel');
-
-    if (requiresPayment) {
-      await createNotification({
-        userId: user.id,
-        title: '💳 Paiement requis pour la commande',
-        body: `Un paiement de ${paymentAmount} FCFA est requis pour valider votre commande "${description}" pour ${targetDisplay}.`,
-        type: 'commande',
-        data: { 
-          order_id: data.id, 
-          status: 'attente_paiement', 
-          action: 'pay',
-          amount: paymentAmount,
-        },
-      });
-    } else {
-      if (finalAidantId) {
-        const { data: aidantProfile } = await supabase.from('aidants').select('user_id').eq('id', finalAidantId).maybeSingle();
-        if (aidantProfile?.user_id) {
-          await createNotification({
-            userId: aidantProfile.user_id,
-            title: '🛒 Nouvelle commande assignée automatiquement',
-            body: `Commande de ${targetDisplay} - ${description}`,
-            type: 'commande',
-            data: { order_id: data.id, action: 'take', auto_assigned: true },
-          });
-        }
-      } else {
-        const { data: aidants } = await supabase.from('aidants').select('user_id').eq('available', true).eq('is_verified', true);
-        const availableAidants = [];
-        for (const aidant of aidants || []) {
-          const quotaCheck = await checkAidantOrderQuota(aidant.user_id);
-          if (quotaCheck.canTake) {
-            availableAidants.push(aidant);
-          }
-        }
-
-        if (availableAidants.length > 0) {
-          for (const aidant of availableAidants) {
-            await createNotification({
-              userId: aidant.user_id,
-              title: '🛒 Nouvelle commande disponible',
-              body: `Commande de ${targetDisplay} - ${description}`,
-              type: 'commande',
-              data: { order_id: data.id, action: 'take' },
-            });
-          }
-        }
-      }
+    if (!result.success) {
+      return res.status(400).json({ success: false, error: result.error });
     }
 
     res.status(201).json({
       success: true,
-      order: fullOrder,
-      auto_assigned_aidant: !!finalAidantId && !selected_aidant_id,
-      requires_payment: requiresPayment,
-      payment_amount: requiresPayment ? paymentAmount : null,
-      subscription_used: !!subscriptionId,
+      order: result.order,
+      requires_payment: result.requires_payment,
+      payment_amount: result.payment_amount,
+      subscription_used: result.subscription_used,
+      auto_assigned_aidant: result.auto_assigned_aidant,
     });
-
   } catch (error) {
-    console.error('❌ Create order error:', error);
+    console.error('❌ Erreur création de commande (route):', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -519,13 +280,13 @@ router.post('/', async (req, res) => {
 // 3️⃣ ROUTES DYNAMIQUES (AVEC PARAMÈTRE :id)
 // =============================================
 
-// ✅ 3.1 DÉTAILS D'UNE COMMANDE PAR ID
+// ✅ 3.1 DÉTAILS D'UNE COMMANDE PAR ID (AVEC ENRICHISSEMENT)
 router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { user, profile } = req;
 
-    const { data, error } = await supabase
+    const { data: order, error } = await supabase
       .from('commandes')
       .select('*')
       .eq('id', id)
@@ -543,7 +304,7 @@ router.get('/:id', async (req, res) => {
     if (['admin', 'coordinator'].includes(profile.role)) {
       hasAccess = true;
     } else if (profile.role === 'family') {
-      hasAccess = data.user_id === user.id;
+      hasAccess = order.user_id === user.id;
     } else if (profile.role === 'aidant') {
       const { data: aidant } = await supabase
         .from('aidants')
@@ -552,7 +313,7 @@ router.get('/:id', async (req, res) => {
         .single();
       
       if (aidant) {
-        hasAccess = data.aidant_id === aidant.id || data.status === 'disponible';
+        hasAccess = order.aidant_id === aidant.id || order.status === 'disponible';
       }
     }
 
@@ -561,31 +322,31 @@ router.get('/:id', async (req, res) => {
     }
 
     let patient = null;
-    if (data.patient_id) {
-      const { data: patientData } = await supabase.from('patients').select('*').eq('id', data.patient_id).single();
+    if (order.patient_id) {
+      const { data: patientData } = await supabase.from('patients').select('*').eq('id', order.patient_id).single();
       patient = patientData;
     }
 
     let family = null;
-    if (data.family_id) {
-      const { data: familyData } = await supabase.from('profiles').select('*').eq('id', data.family_id).single();
+    if (order.family_id) {
+      const { data: familyData } = await supabase.from('profiles').select('*').eq('id', order.family_id).single();
       family = familyData;
     }
 
     let aidant = null;
-    if (data.aidant_id) {
-      const { data: aidantData } = await supabase.from('aidants').select('*, user:profiles(*)').eq('id', data.aidant_id).single();
+    if (order.aidant_id) {
+      const { data: aidantData } = await supabase.from('aidants').select('*, user:profiles(*)').eq('id', order.aidant_id).single();
       aidant = aidantData;
     }
 
-    res.json({ ...data, patient, family, aidant });
+    res.json({ ...order, patient, family, aidant });
   } catch (error) {
-    console.error('❌ Get order error:', error);
+    console.error('❌ Get order detail route error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// ✅ 3.2 CONFIRMER LE PAIEMENT D'UNE COMMANDE PONCTUELLE
+// ✅ 3.2 CONFIRMER LE PAIEMENT D'UNE COMMANDE PONCTUELLE (OUVERTURE AU POOL PAR DÉFAUT)
 router.post('/:id/confirm-payment', async (req, res) => {
   try {
     const { id } = req.params;
@@ -598,10 +359,7 @@ router.post('/:id/confirm-payment', async (req, res) => {
       return res.status(400).json({ error: 'Cette commande n\'est pas en attente de paiement' });
     }
 
-    const targetType = order.patient_id ? 'patient' : 'personal_account';
-    const targetId = order.patient_id || order.user_id;
-    const familyId = order.family_id || order.user_id;
-
+    // ✅ RECTIFICATION DE SÉCURITÉ UX : Pas d'assignation automatique forcée à la confirmation.
     let aidantId = order.aidant_id || null;
 
     if (aidantId) {
@@ -610,23 +368,12 @@ router.post('/:id/confirm-payment', async (req, res) => {
       else aidantId = null;
     }
 
-    if (!aidantId) {
-      let foundId = await getActiveAidantForTarget(targetType, targetId, familyId);
-      if (foundId) {
-        const convertedId = await getAidantIdFromUserIdOrId(foundId);
-        if (convertedId) {
-          aidantId = convertedId;
-          console.log(`✅ Aidant trouvé après paiement de la commande: ${aidantId}`);
-        }
-      }
-    }
-
     const { data, error } = await supabase
       .from('commandes')
       .update({
         status: 'creee',
         is_paid: true,
-        aidant_id: aidantId,
+        aidant_id: aidantId, // Restera NULL si aucun aidant pré-sélectionné (ouverture au pool)
         metadata: {
           ...(order.metadata || {}),
           payment_confirmed_at: new Date().toISOString(),
@@ -643,18 +390,8 @@ router.post('/:id/confirm-payment', async (req, res) => {
 
     const targetDisplay = order.target_name || 'un client';
 
-    if (aidantId) {
-      const { data: aidantProfile } = await supabase.from('aidants').select('user_id').eq('id', aidantId).maybeSingle();
-      if (aidantProfile?.user_id) {
-        await createNotification({
-          userId: aidantProfile.user_id,
-          title: '🛒 Nouvelle commande à prendre',
-          body: `Commande de ${targetDisplay} - ${order.description}`,
-          type: 'commande',
-          data: { order_id: id, action: 'take', assigned_after_payment: true },
-        });
-      }
-    } else {
+    // Si aucun aidant n'était pré-choisi, avertir tous les aidants qualifiés
+    if (!aidantId) {
       const { data: aidants } = await supabase.from('aidants').select('user_id').eq('available', true).eq('is_verified', true);
       const availableAidants = [];
       for (const aidant of aidants || []) {
@@ -675,6 +412,17 @@ router.post('/:id/confirm-payment', async (req, res) => {
           });
         }
       }
+    } else {
+      const { data: aidantProfile } = await supabase.from('aidants').select('user_id').eq('id', aidantId).maybeSingle();
+      if (aidantProfile?.user_id) {
+        await createNotification({
+          userId: aidantProfile.user_id,
+          title: '🛒 Nouvelle commande à prendre',
+          body: `Commande de ${targetDisplay} - ${order.description}`,
+          type: 'commande',
+          data: { order_id: id, action: 'take', assigned_after_payment: true },
+        });
+      }
     }
 
     if (order.family_id) {
@@ -689,315 +437,148 @@ router.post('/:id/confirm-payment', async (req, res) => {
 
     res.json({ success: true, order: data });
   } catch (error) {
-    console.error('❌ Confirm payment error:', error);
+    console.error('❌ Confirm payment route error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// ✅ 3.3 PRENDRE UNE COMMANDE (AIDANT) - CONTRÔLE AVEC QUOTAS
+// ✅ 3.3 PRENDRE UNE COMMANDE (AIDANT) - INTERCEPTION DES RE-RENDUS ET DES QUOTAS EN DOUBLE
 router.post('/:id/take', async (req, res) => {
   try {
     const { id } = req.params;
-    const { user } = req;
+    const aidantUserId = req.user.id;
 
-    const { data: order, error: fetchError } = await supabase
-      .from('commandes')
-      .select('*')
-      .eq('id', id)
-      .single();
+    const { takeOrder } = require('../services/order.service');
+    const result = await takeOrder(id, aidantUserId);
 
-    if (fetchError) {
-      return res.status(404).json({ error: 'Commande non trouvée' });
-    }
-
-    const availableStatuses = ['creee', 'en_attente', 'disponible'];
-    if (!availableStatuses.includes(order.status)) {
-      return res.status(400).json({ 
-        error: 'Cette commande n\'est pas disponible. Statut actuel: ' + order.status 
-      });
-    }
-
-    const { data: aidant, error: aidantError } = await supabase
-      .from('aidants')
-      .select('id, available, is_verified')
-      .eq('user_id', user.id)
-      .single();
-
-    if (aidantError || !aidant) {
-      return res.status(404).json({ error: 'Aidant non trouvé' });
-    }
-
-    if (!aidant.available || !aidant.is_verified) {
-      return res.status(403).json({ error: 'Vous n\'êtes pas disponible ou vérifié' });
-    }
-
-    const quotaCheck = await checkAidantOrderQuota(user.id);
-    if (!quotaCheck.canTake) {
-      return res.status(403).json({ 
-        error: `Vous avez déjà ${quotaCheck.current} commande(s) en cours (maximum ${quotaCheck.max})`,
-        current: quotaCheck.current,
-        max: quotaCheck.max,
-        code: 'QUOTA_EXCEEDED',
-      });
-    }
-
-    if (order.aidant_id && order.aidant_id !== aidant.id) {
-      return res.status(403).json({ error: 'Cette commande est déjà assignée à un autre aidant' });
-    }
-
-    const incremented = await incrementAidantOrders(user.id);
-    if (!incremented) {
-      return res.status(500).json({ error: 'Erreur lors de la prise de commande' });
-    }
-
-    const { data, error } = await supabase
-      .from('commandes')
-      .update({
-        status: 'en_cours',
-        aidant_id: aidant.id,
-        current_aidant_id: aidant.id,
-        taken_at: new Date().toISOString(),
-        taken_by: user.id,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', id)
-      .select('*')
-      .single();
-
-    if (error) {
-      await decrementAidantOrders(user.id);
-      throw error;
-    }
-
-    const targetDisplay = order.target_name || (order.patient ? `${order.patient.first_name} ${order.patient.last_name}` : 'Personnel');
-
-    if (order.family_id) {
-      await createNotification({
-        userId: order.family_id,
-        title: '✅ Commande prise en charge',
-        body: `Un aidant a pris votre commande "${order.description}" pour ${targetDisplay}.`,
-        type: 'commande',
-        data: { order_id: id, status: 'en_cours' },
-      });
-    }
-
-    res.json({ 
-      success: true, 
-      order: data,
-      quota: {
-        current: quotaCheck.current + 1,
-        max: quotaCheck.max,
-        available: quotaCheck.available - 1,
-      },
+    res.json({
+      success: true,
+      message: 'Commande prise en charge avec succès',
+      order: result,
     });
   } catch (error) {
-    console.error('❌ Take order error:', error);
+    console.error('❌ Take order route error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// ✅ 3.4 METTRE À JOUR LE STATUT D'UNE COMMANDE (ADMIN)
+// ✅ 3.4 CHANGEMENT DE STATUT GÉNÉRIQUE (ADMIN/COORDINATION) AVEC RECALCUL DU QUOTA
 router.post('/:id/status', async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
 
-    if (!status) {
-      return res.status(400).json({ error: 'Le champ "status" est obligatoire' });
-    }
-
-    const validStatuses = ['creee', 'en_attente', 'en_cours', 'livree', 'validee', 'annulee', 'disponible'];
-    if (!validStatuses.includes(status)) return res.status(400).json({ error: 'Statut invalide' });
-
-    const { data: existingOrder, error: checkError } = await supabase.from('commandes').select('status, family_id, aidant_id, user_id, target_name').eq('id', id).single();
-    if (checkError) return res.status(404).json({ error: 'Commande non trouvée' });
-
-    if (existingOrder.status === 'validee' || existingOrder.status === 'annulee') {
-      return res.status(400).json({ error: 'Action impossible sur une commande finalisée' });
-    }
-
-    const { data, error } = await supabase.from('commandes').update({ status, updated_at: new Date().toISOString() }).eq('id', id).select('*').single();
-    if (error) throw error;
-
-    if (status === 'disponible') {
-      const { data: aidants } = await supabase.from('aidants').select('user_id').eq('available', true).eq('is_verified', true);
-      const availableAidants = [];
-      for (const aidant of aidants || []) {
-        const quotaCheck = await checkAidantOrderQuota(aidant.user_id);
-        if (quotaCheck.canTake) availableAidants.push(aidant);
-      }
-
-      if (availableAidants.length > 0) {
-        const targetDisplay = existingOrder.target_name || 'un client';
-        for (const aidant of availableAidants) {
-          await createNotification({
-            userId: aidant.user_id,
-            title: '🚨 Commande urgente disponible',
-            body: `Commande pour ${targetDisplay} - Premier arrivé, premier servi !`,
-            type: 'commande',
-            data: { order_id: id, action: 'take', urgency: 'high' },
-          });
-        }
-      }
-    }
-
-    res.json({ success: true, order: data });
-  } catch (error) {
-    console.error('❌ Update status error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ✅ 3.5 FINALISER LA LIVRAISON D'UNE COMMANDE (LIVRER)
-router.post('/:id/deliver', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { proof_url, location } = req.body;
-
-    const { data: existingOrder, error: checkError } = await supabase.from('commandes').select('status, family_id, target_name, metadata, aidant_id').eq('id', id).single();
-    if (checkError) return res.status(404).json({ error: 'Commande non trouvée' });
-
-    if (existingOrder.status !== 'en_cours') return res.status(400).json({ error: 'Commande non éligible à la livraison' });
+    const { data: order, error: fetchError } = await supabase.from('commandes').select('*').eq('id', id).single();
+    if (fetchError) throw fetchError;
 
     const { data, error } = await supabase
       .from('commandes')
-      .update({ 
-        status: 'livree',
-        proof_url: proof_url || null,
-        updated_at: new Date().toISOString(),
-        auto_validation_at: new Date(Date.now() + 12 * 60 * 60 * 1000).toISOString(),
-        metadata: {
-          ...(existingOrder.metadata || {}),
-          delivered_at: new Date().toISOString(),
-          delivery_location: location || null,
-        }
-      })
+      .update({ status, updated_at: new Date().toISOString() })
       .eq('id', id)
-      .select('*')
+      .select()
       .single();
 
     if (error) throw error;
 
-    if (existingOrder.aidant_id) {
-      const { data: aidant } = await supabase.from('aidants').select('user_id').eq('id', existingOrder.aidant_id).single();
-      if (aidant) await decrementAidantOrders(aidant.user_id);
-    }
-
-    if (existingOrder.family_id) {
-      await createNotification({
-        userId: existingOrder.family_id,
-        title: '📦 Commande livrée',
-        body: `Votre commande pour ${existingOrder.target_name || 'un client'} a été livrée avec succès !`,
-        type: 'commande',
-        data: { order_id: id, status: 'livree' },
-      });
+    // ✅ Synchronisation dynamique en direct du quota de l'aidant après changement de statut (Validation/Annulation)
+    if (order.aidant_id) {
+      const { data: aidant } = await supabase.from('aidants').select('user_id').eq('id', order.aidant_id).single();
+      if (aidant) {
+        await syncAidantOrderCount(aidant.user_id);
+      }
     }
 
     res.json({ success: true, order: data });
   } catch (error) {
-    console.error('❌ Deliver order error:', error);
+    console.error('❌ Update status route error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// ✅ 3.6 ANNULER UNE COMMANDE
+// ✅ 3.5 LIVRAISON DE LA COMMANDE
+router.post('/:id/deliver', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { proof_url, location } = req.body;
+    const aidantUserId = req.user.id;
+
+    const { deliverOrder } = require('../services/order.service');
+    const result = await deliverOrder(id, aidantUserId, proof_url, location);
+
+    res.json({
+      success: true,
+      message: 'Commande livrée avec succès',
+      order: result,
+    });
+  } catch (error) {
+    console.error('❌ Deliver order route error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ✅ 3.6 ANNULER UNE COMMANDE (FAMILLE OU ADMIN) ET LIBÉRER LE QUOTA
 router.post('/:id/cancel', async (req, res) => {
   try {
     const { id } = req.params;
     const { reason } = req.body;
     const { user, profile } = req;
 
-    const { data: existingOrder, error: checkError } = await supabase.from('commandes').select('status, family_id, user_id, metadata, aidant_id').eq('id', id).single();
-    if (checkError) return res.status(404).json({ error: 'Commande non trouvée' });
+    const { data: order, error: fetchError } = await supabase.from('commandes').select('*').eq('id', id).single();
+    if (fetchError) throw fetchError;
 
-    const canCancel = ['admin', 'coordinator'].includes(profile.role);
-    if (!canCancel && profile.role === 'family' && existingOrder.user_id !== user.id) {
-      return res.status(403).json({ error: 'Non autorisé' });
+    const canCancel = ['admin', 'coordinator'].includes(profile.role) || order.user_id === user.id;
+    if (!canCancel) {
+      return res.status(403).json({ error: 'Non autorisé à annuler cette commande' });
     }
 
-    if (existingOrder.status === 'validee' || existingOrder.status === 'annulee') {
-      return res.status(400).json({ error: 'Action impossible sur une commande validée ou annulée' });
-    }
-
-    if (existingOrder.aidant_id && existingOrder.status === 'en_cours') {
-      const { data: informant } = await supabase.from('aidants').select('user_id').eq('id', existingOrder.aidant_id).single();
-      if (informant) await decrementAidantOrders(informant.user_id);
-    }
-
-    const { data, error } = await supabase
+    const { data: updatedOrder, error: updateError } = await supabase
       .from('commandes')
-      .update({ 
+      .update({
         status: 'annulee',
         updated_at: new Date().toISOString(),
         metadata: {
-          ...(existingOrder.metadata || {}),
+          ...(order.metadata || {}),
           cancelled_by: user.id,
           cancelled_at: new Date().toISOString(),
-          cancellation_reason: reason || null,
+          cancellation_reason: reason || 'Annulée par l\'utilisateur',
         }
       })
       .eq('id', id)
-      .select('*')
+      .select()
       .single();
 
-    if (error) throw error;
+    if (updateError) throw updateError;
 
-    if (data.family_id && data.family_id !== user.id) {
-      await createNotification({
-        userId: data.family_id,
-        title: '❌ Commande annulée',
-        body: `Votre commande "${data.description}" a été annulée${reason ? ` : ${reason}` : ''}.`,
-        type: 'commande',
-        data: { order_id: id, status: 'annulee' },
-      });
+    // ✅ Libération synchrone immédiate du quota de l'aidant
+    if (order.aidant_id) {
+      const { data: aidant } = await supabase.from('aidants').select('user_id').eq('id', order.aidant_id).single();
+      if (aidant) {
+        await syncAidantOrderCount(aidant.user_id);
+      }
     }
 
-    res.json({ success: true, order: data });
+    res.json({ success: true, order: updatedOrder });
   } catch (error) {
-    console.error('❌ Cancel order error:', error);
+    console.error('❌ Cancel order route error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// ✅ 3.7 AUTO-VALIDATION EN CAS DE DÉPASSEMENT DES 12 HEURES (ADMIN)
+// ✅ 3.7 AUTO-VALIDATION ADMIN
 router.post('/:id/auto-validate', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
   try {
     const { id } = req.params;
-    const { data: order, error: fetchError } = await supabase.from('commandes').select('*').eq('id', id).single();
-    if (fetchError) return res.status(404).json({ error: 'Commande non trouvée' });
 
-    if (order.status !== 'livree') return res.status(400).json({ error: 'Seules les commandes livrées peuvent être auto-validées' });
+    const { autoValidateOrder } = require('../services/order.service');
+    const result = await autoValidateOrder(id);
 
-    const deliveredAt = new Date(order.metadata?.delivered_at || order.updated_at);
-    const now = new Date();
-    const diffHours = (now.getTime() - deliveredAt.getTime()) / (1000 * 60 * 60);
-
-    if (diffHours < 12) {
-      return res.status(400).json({
-        error: `Auto-validation possible après 12h (${Math.round(12 - diffHours)}h restantes)`,
-      });
-    }
-
-    const { data, error } = await supabase
-      .from('commandes')
-      .update({
-        status: 'validee',
-        is_auto_validated: true,
-        updated_at: new Date().toISOString(),
-        metadata: {
-          ...(order.metadata || {}),
-          auto_validated_at: new Date().toISOString(),
-        }
-      })
-      .eq('id', id)
-      .select('*')
-      .single();
-
-    if (error) throw error;
-
-    res.json({ success: true, order: data });
+    res.json({
+      success: true,
+      message: 'Commande validée avec succès',
+      order: result,
+    });
   } catch (error) {
-    console.error('❌ Auto-validate order error:', error);
+    console.error('❌ Auto-validate route error:', error);
     res.status(500).json({ error: error.message });
   }
 });
