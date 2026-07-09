@@ -1,5 +1,6 @@
 // 📁 backend/src/routes/visit.routes.js
- 
+// ✅ ROUTEUR VISITES COMPLET : INTEGRATION DES COLONNES ADRESSE ET GPS POUR LES VISITES PROCHES ET PERSONNELLES
+
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../services/supabase.service');
@@ -84,7 +85,7 @@ const getAidantIdFromUserIdOrId = async (userIdOrId) => {
 };
 
 // =============================================
-// 1️⃣ TOUTES LES ROUTES STATIQUES  
+// 1️⃣ TOUTES LES ROUTES STATIQUES (SANS :id) - PLACÉES TOUT EN HAUT 🚀
 // =============================================
 
 // ✅ 1.1 RÉCUPÉRER LES COMPTES DISPONIBLES POUR L'ADMIN
@@ -427,6 +428,9 @@ router.post('/', async (req, res) => {
       aidant_id = null,
       wizard_choice = null,
       selected_aidant_id = null,
+      address = null,                     // ✅ EXTRACT ADRESSE
+      latitude = null,                    // ✅ EXTRACT GPS LAT
+      longitude = null,                   // ✅ EXTRACT GPS LNG
     } = req.body;
 
     const canCreate = ['admin', 'coordinator'].includes(profile.role) || profile.role === 'family';
@@ -434,7 +438,7 @@ router.post('/', async (req, res) => {
       return res.status(403).json({ error: 'Non autorisé à créer une visite' });
     }
 
-    // ✅ EXTRACTION SANS BLOCAGE DES CIBLES POUR LES COMPTES FAMILLES AVEC PATIENTS
+    // EXTRACTION DE LA CIBLE
     let finalPatientId = patient_id || null;
     let finalTargetType = target_type || (patient_id ? 'patient' : 'personal');
     let finalTargetName = target_name || null;
@@ -470,7 +474,6 @@ router.post('/', async (req, res) => {
       finalUserId = targetUid;
     }
 
-    // Si c'est pour un patient (bénéficiaire), vérifier la liaison de sécurité
     if (profile.role === 'family' && finalPatientId) {
       const { data: link } = await supabase
         .from('patient_family_links')
@@ -504,6 +507,9 @@ router.post('/', async (req, res) => {
       selectedAidantId: selected_aidant_id || null,
       profile: profile,
       coordinatorId: ['admin', 'coordinator'].includes(profile.role) ? user.id : null,
+      address: address || null,              // ✅ INJECTION ADRESSE DANS LE SERVICE
+      latitude: latitude || null,            // ✅ INJECTION LATITUDE DANS LE SERVICE
+      longitude: longitude || null,          // ✅ INJECTION LONGITUDE DANS LE SERVICE
     });
 
     if (!result.success) {
@@ -1541,6 +1547,7 @@ router.post('/:id/cancel', async (req, res) => {
       .from('visites')
       .update({
         status: 'annulee',
+        updated_at: new Date().toISOString(),
         metadata: {
           ...(visit.metadata || {}),
           cancelled_by: user.id,
