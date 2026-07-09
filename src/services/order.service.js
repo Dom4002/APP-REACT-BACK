@@ -1,5 +1,6 @@
 // 📁 backend/src/services/order.service.js
- 
+// ✅ SERVICE DE COMMANDES COMPLET : ALIGNEMENT DES SECURE QUOTAS DYNAMIQUES ET RETRAIT D'ASSIGNATION AUTOMATIQUE D'OFFICE
+
 const { supabase } = require('./supabase.service');
 const { createNotification } = require('./notification.service');
 
@@ -27,13 +28,13 @@ const MAX_ORDERS_IN_PROGRESS = 2;
 const AUTO_VALIDATION_HOURS = 12;
 
 // ============================================================
-// 📊 DOUBLE CONTRÔLE ET SYNCHRONISATION DYNAMIQUE DU QUOTA
+// 📊 ALGORITHME DE SYNCHRONISATION DYNAMIQUE DES QUOTAS
 // ============================================================
 
 /**
- * Recalcule et synchronise en direct le nombre réel de livraisons actives d'un aidant
- * Évite les désynchronisations ou blocages à vie du quota d'intervenant
- * @param {string} aidantUserId - UUID de l'aidant
+ * Recalcule et synchronise en direct le nombre réel de livraisons actives (en_cours) d'un aidant.
+ * Résout le problème des quotas bloqués à vie.
+ * @param {string} aidantUserId - UUID de l'aidant (user_id)
  */
 const syncAidantOrderCount = async (aidantUserId) => {
   try {
@@ -45,7 +46,7 @@ const syncAidantOrderCount = async (aidantUserId) => {
 
     if (!aidant) return;
 
-    // Recenser uniquement les commandes réelles au statut 'en_cours'
+    // Compter les commandes actuellement en cours ('en_cours') de cet aidant en base de données
     const { count, error } = await supabase
       .from('commandes')
       .select('id', { count: 'exact', head: true })
@@ -57,10 +58,10 @@ const syncAidantOrderCount = async (aidantUserId) => {
         .from('aidants')
         .update({ current_orders: count || 0 })
         .eq('id', aidant.id);
-      console.log(`📊 [Quota] Recalcul synchrone pour ${aidantUserId} : ${count || 0} commande(s) active(s)`);
+      console.log(`📊 [Quota Service] Recalcul synchrone pour l'aidant ${aidantUserId} : ${count || 0} commande(s) active(s)`);
     }
   } catch (err) {
-    console.error('❌ Erreur recalcul quota syncAidantOrderCount:', err);
+    console.error('❌ Erreur sync quota syncAidantOrderCount:', err);
   }
 };
 
@@ -71,7 +72,7 @@ const syncAidantOrderCount = async (aidantUserId) => {
  */
 const checkAidantOrderQuota = async (aidantUserId) => {
   try {
-    // 1️⃣ Forcer la synchronisation dynamique en direct
+    // 1️⃣ Forcer le recalcul dynamique en direct avant toute vérification
     await syncAidantOrderCount(aidantUserId);
 
     const { data: aidant, error } = await supabase
@@ -115,8 +116,24 @@ const checkAidantOrderQuota = async (aidantUserId) => {
   }
 };
 
+/**
+ * Incrémente le nombre de commandes en cours d'un aidant (conservé pour rétrocompatibilité, délégué au sync)
+ */
+const incrementAidantOrders = async (aidantUserId) => {
+  await syncAidantOrderCount(aidantUserId);
+  return true;
+};
+
+/**
+ * Décrémente le nombre de commandes en cours d'un aidant (conservé pour rétrocompatibilité, délégué au sync)
+ */
+const decrementAidantOrders = async (aidantUserId) => {
+  await syncAidantOrderCount(aidantUserId);
+  return true;
+};
+
 // ============================================================
-// CRÉATION DE COMMANDE
+// CRÉATION DE COMMANDE SANS ASSIGNATION AUTOMATIQUE D'OFFICE
 // ============================================================
 
 const createOrder = async ({
@@ -127,8 +144,8 @@ const createOrder = async ({
   type,
   description,
   address,
-  latitude = null,
-  longitude = null,
+  latitude = null,   
+  longitude = null,  
   estimatedAmount,
   items,
   prescriptionUrl,
@@ -152,12 +169,16 @@ const createOrder = async ({
 
     if (isPonctual) {
       requiresPayment = true;
-      status = ORDER_STATUS.PENDING; // 'en_attente' de paiement
+      status = ORDER_STATUS.PENDING;
       paymentAmount = getPonctualOrderPrice(type, items);
     } else if (hasActiveSubscription && remainingOrders > 0) {
       status = ORDER_STATUS.CREATED;
       requiresPayment = false;
       subscriptionId = subscription?.id || null;
+    } else if (hasActiveSubscription && remainingOrders === 0) {
+      requiresPayment = true;
+      status = ORDER_STATUS.PENDING;
+      paymentAmount = getPonctualOrderPrice(type, items);
     } else {
       requiresPayment = true;
       status = ORDER_STATUS.PENDING;
@@ -165,13 +186,34 @@ const createOrder = async ({
     }
 
     // ✅ RECTIFICATION DE SÉCURITÉ UX : Les commandes partent vierges (aidant_id = null)
-    // Aucun aidant lié (comme getActiveAidantForTarget) n'est pré-assigné d'office à la création.
+    // Aucun aidant permanent lié (via getActiveAidantForTarget) n'est affecté de force à la création.
     let finalAidantId = null;
 
     if (selectedAidantId) {
       const convertedId = await getAidantIdFromUserIdOrId(selectedAidantId);
       if (convertedId) {
-        finalAidantId = convertedId;
+        if (wizardChoice === 'permanente') {
+          const { data: aidant, error } = await supabase
+            .from('aidants')
+            .select('current_assignments, max_assignments')
+            .eq('user_id', selectedAidantId)
+            .single();
+
+          if (!error && aidant) {
+            const current = aidant.current_assignments || 0;
+            const max = aidant.max_assignments || 4;
+            if (current >= max) {
+              return {
+                success: false,
+                error: `Cet aidant est complet (${current}/${max} assignations)`,
+                code: 'AIDANT_FULL',
+              };
+            }
+          }
+          finalAidantId = convertedId;
+        } else if (wizardChoice === 'ponctuelle') {
+          finalAidantId = convertedId;
+        }
       }
     }
 
@@ -184,21 +226,21 @@ const createOrder = async ({
       type: type,
       description: description,
       address: address,
-      latitude: latitude,
-      longitude: longitude,
+      latitude: latitude,     
+      longitude: longitude,   
       estimated_amount: estimatedAmount || 0,
       items: items || [],
       prescription_url: prescriptionUrl || null,
       status: status,
       order_type: requiresPayment ? ORDER_TYPES.PONCTUAL : ORDER_TYPES.SUBSCRIPTION,
       is_paid: !requiresPayment,
-      aidant_id: finalAidantId,
+      aidant_id: finalAidantId, // Vierge si aucun aidant n'a été spécifié expressément
       subscription_id: subscriptionId,
       metadata: {
         requires_payment: requiresPayment,
         created_by: userId,
         created_at: new Date().toISOString(),
-        auto_assigned_aidant: false, // Plus d'assignation automatique d'office
+        auto_assigned_aidant: false, // Aucun aidant n'est auto-assigné d'office
         payment_amount: requiresPayment ? paymentAmount : null,
         subscription_used: subscriptionId ? true : false,
         ponctual_mode: requiresPayment ? true : false,
@@ -238,7 +280,7 @@ const createOrder = async ({
         },
       });
     } else {
-      // ✅ Diffuser à tous les aidants disponibles du pool
+      // ✅ Diffuser la commande disponible à tous les aidants libres
       await notifyAvailableAidantsForOrder(order.id, {
         targetDisplay,
         description,
@@ -266,7 +308,7 @@ const createOrder = async ({
 };
 
 // ============================================================
-// PRISE DE COMMANDE
+// PRISE DE COMMANDE AVEC TRANSITIONS DE QUOTAS SÉCURISÉES
 // ============================================================
 
 const takeOrder = async (orderId, aidantUserId) => {
@@ -289,14 +331,14 @@ const takeOrder = async (orderId, aidantUserId) => {
     if (!availableStatuses.includes(order.status)) {
       return {
         success: false,
-        error: `Cette commande n'est plus disponible. Statut: ${order.status}`,
+        error: `Cette commande n'est pas disponible. Statut: ${order.status}`,
         code: 'ORDER_NOT_AVAILABLE',
       };
     }
 
     const { data: aidant, error: aidantError } = await supabase
       .from('aidants')
-      .select('id, available, is_verified, current_assignments, max_assignments')
+      .select('id, available, is_verified')
       .eq('user_id', aidantUserId)
       .single();
 
@@ -311,12 +353,11 @@ const takeOrder = async (orderId, aidantUserId) => {
     if (!aidant.available || !aidant.is_verified) {
       return {
         success: false,
-        error: 'Votre compte n\'est pas disponible ou vérifié',
+        error: 'Aidant non disponible ou non vérifié',
         code: 'AIDANT_NOT_AVAILABLE',
       };
     }
 
-    // Contrôler le quota en direct
     const quotaCheck = await checkAidantOrderQuota(aidantUserId);
     if (!quotaCheck.canTake) {
       return {
@@ -328,11 +369,18 @@ const takeOrder = async (orderId, aidantUserId) => {
       };
     }
 
-    // Mettre à jour l'aidant gérant de la commande
+    if (order.aidant_id && order.aidant_id !== aidant.id) {
+      return {
+        success: false,
+        error: 'Cette commande est déjà attribuée à un autre aidant',
+        code: 'ALREADY_ASSIGNED',
+      };
+    }
+
     const { data: updatedOrder, error: updateError } = await supabase
       .from('commandes')
       .update({
-        status: ORDER_STATUS.IN_PROGRESS, // Passe au statut 'en_cours'
+        status: ORDER_STATUS.IN_PROGRESS,
         aidant_id: aidant.id,
         current_aidant_id: aidant.id,
         taken_at: new Date().toISOString(),
@@ -351,7 +399,7 @@ const takeOrder = async (orderId, aidantUserId) => {
       };
     }
 
-    // Réajuster de manière dynamique le quota
+    // ✅ RECALCUL ET ENREGISTREMENT EN DIRECT DU NOUVEAU QUOTA REEL
     await syncAidantOrderCount(aidantUserId);
 
     const targetDisplay = order.target_name || 'un client';
@@ -359,7 +407,7 @@ const takeOrder = async (orderId, aidantUserId) => {
       await createNotification({
         userId: order.family_id,
         title: '✅ Commande prise en charge',
-        body: `L'intervenant a pris en charge votre commande "${order.description}" pour ${targetDisplay}.`,
+        body: `Un aidant a pris votre commande "${order.description}" pour ${targetDisplay}.`,
         type: 'commande',
         data: { order_id: orderId, status: ORDER_STATUS.IN_PROGRESS },
       });
@@ -387,7 +435,7 @@ const takeOrder = async (orderId, aidantUserId) => {
 };
 
 // ============================================================
-// LIVRAISON DE COMMANDE
+// LIVRAISON DE COMMANDE AVEC RETRAIT DE QUOTA DYNAMIQUE
 // ============================================================
 
 const deliverOrder = async (orderId, aidantUserId, proofUrl = null, location = null) => {
@@ -406,10 +454,26 @@ const deliverOrder = async (orderId, aidantUserId, proofUrl = null, location = n
       };
     }
 
+    if (order.aidant_id) {
+      const { data: aidant } = await supabase
+        .from('aidants')
+        .select('user_id')
+        .eq('id', order.aidant_id)
+        .single();
+
+      if (aidant && aidant.user_id !== aidantUserId) {
+        return {
+          success: false,
+          error: 'Vous n\'êtes pas l\'aidant assigné à cette commande',
+          code: 'NOT_ASSIGNED',
+        };
+      }
+    }
+
     if (order.status !== ORDER_STATUS.IN_PROGRESS) {
       return {
         success: false,
-        error: `Seules les commandes en cours de traitement peuvent être livrées.`,
+        error: `Seules les commandes en cours de livraison peuvent être finalisées.`,
         code: 'INVALID_STATUS',
       };
     }
@@ -419,7 +483,7 @@ const deliverOrder = async (orderId, aidantUserId, proofUrl = null, location = n
     const { data: updatedOrder, error: updateError } = await supabase
       .from('commandes')
       .update({
-        status: ORDER_STATUS.DELIVERED, // Passe au statut 'livree'
+        status: ORDER_STATUS.DELIVERED,
         proof_url: proofUrl || null,
         updated_at: new Date().toISOString(),
         auto_validation_at: autoValidationAt.toISOString(),
@@ -441,7 +505,7 @@ const deliverOrder = async (orderId, aidantUserId, proofUrl = null, location = n
       };
     }
 
-    // ✅ Libérer dynamiquement le quota de l'aidant
+    // ✅ LIBÉRATION DIRECTE DE CRÉNEAU DE QUOTA EN BASE DE DONNÉES
     await syncAidantOrderCount(aidantUserId);
 
     const targetDisplay = order.target_name || 'un client';
@@ -449,7 +513,7 @@ const deliverOrder = async (orderId, aidantUserId, proofUrl = null, location = n
       await createNotification({
         userId: order.family_id,
         title: '📦 Commande livrée',
-        body: `Votre commande pour ${targetDisplay} a été livrée !`,
+        body: `Votre commande pour ${targetDisplay} a été livrée avec succès !`,
         type: 'commande',
         data: { order_id: orderId, status: ORDER_STATUS.DELIVERED },
       });
@@ -473,7 +537,7 @@ const deliverOrder = async (orderId, aidantUserId, proofUrl = null, location = n
 };
 
 // ============================================================
-// AUTO-VALIDATION
+// AUTO-VALIDATION (LIBÉRATION DU QUOTA DE SÉCURITÉ)
 // ============================================================
 
 const autoValidateOrder = async (orderId) => {
@@ -495,7 +559,7 @@ const autoValidateOrder = async (orderId) => {
     if (order.status !== ORDER_STATUS.DELIVERED) {
       return {
         success: false,
-        error: `Action impossible. Statut: ${order.status}`,
+        error: `Seules les commandes livrées peuvent être validées automatiquement.`,
         code: 'INVALID_STATUS',
       };
     }
@@ -503,7 +567,7 @@ const autoValidateOrder = async (orderId) => {
     const { data: updatedOrder, error: updateError } = await supabase
       .from('commandes')
       .update({
-        status: ORDER_STATUS.VALIDATED, // Passe au statut 'validee'
+        status: ORDER_STATUS.VALIDATED,
         is_auto_validated: true,
         updated_at: new Date().toISOString(),
         metadata: {
@@ -523,7 +587,7 @@ const autoValidateOrder = async (orderId) => {
       };
     }
 
-    // Réaligner le quota par sécurité de la commande validée
+    // ✅ Synchronisation synchrone du quota de l'intervenant pour libérer sa place
     if (order.aidant_id) {
       const { data: aidant } = await supabase.from('aidants').select('user_id').eq('id', order.aidant_id).single();
       if (aidant) {
@@ -546,7 +610,7 @@ const autoValidateOrder = async (orderId) => {
 };
 
 // ============================================================
-// NOTIFICATIONS ET RE-RENDUS
+// NOTIFICATIONS ET RE-RENDUS GLOBAUX
 // ============================================================
 
 const notifyAvailableAidantsForOrder = async (orderId, { targetDisplay, description }) => {
@@ -578,7 +642,7 @@ const notifyAvailableAidantsForOrder = async (orderId, { targetDisplay, descript
 };
 
 // ============================================================
-// FONCTIONS DE LIENS ET D'ENVELOPPES
+// FONCTIONS UTILITAIRES ET DE LIENS RELATIONS
 // ============================================================
 
 const enrichOrderWithRelations = async (order) => {
@@ -708,6 +772,7 @@ module.exports = {
   ORDER_TYPES,
   MAX_ORDERS_IN_PROGRESS,
   AUTO_VALIDATION_HOURS,
+  syncAidantOrderCount,  
   checkAidantOrderQuota,
   incrementAidantOrders,
   decrementAidantOrders,
