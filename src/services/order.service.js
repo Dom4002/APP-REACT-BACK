@@ -173,6 +173,8 @@ const decrementAidantOrders = async (aidantUserId) => {
  * @param {string} params.type - Type de commande
  * @param {string} params.description - Description
  * @param {string} params.address - Adresse
+ * @param {number} params.latitude - Latitude (optionnel)
+ * @param {number} params.longitude - Longitude (optionnel)
  * @param {number} params.estimatedAmount - Montant estimé
  * @param {Array} params.items - Articles
  * @param {string} params.prescriptionUrl - URL de prescription
@@ -190,6 +192,8 @@ const createOrder = async ({
   type,
   description,
   address,
+  latitude = null,   // ✅ AJOUT : Extraction de la latitude
+  longitude = null,  // ✅ AJOUT : Extraction de la longitude
   estimatedAmount,
   items,
   prescriptionUrl,
@@ -203,7 +207,6 @@ const createOrder = async ({
     const finalTargetName = targetName || (patientId ? null : profile?.full_name);
     const familyId = userId;
 
-    // 1. Vérifier l'abonnement
     const { hasActiveSubscription, remainingOrders, subscription } = 
       await checkSubscriptionForOrders(userId);
 
@@ -213,35 +216,29 @@ const createOrder = async ({
     let subscriptionId = null;
 
     if (isPonctual) {
-      // Mode ponctuel → paiement requis
       requiresPayment = true;
       status = ORDER_STATUS.WAITING_PAYMENT;
       paymentAmount = getPonctualOrderPrice(type, items);
     } else if (hasActiveSubscription && remainingOrders > 0) {
-      // Abonnement actif avec commandes disponibles
       status = ORDER_STATUS.CREATED;
       requiresPayment = false;
       subscriptionId = subscription?.id || null;
     } else if (hasActiveSubscription && remainingOrders === 0) {
-      // Abonnement actif mais plus de commandes
       requiresPayment = true;
       status = ORDER_STATUS.WAITING_PAYMENT;
       paymentAmount = getPonctualOrderPrice(type, items);
     } else {
-      // Pas d'abonnement
       requiresPayment = true;
       status = ORDER_STATUS.WAITING_PAYMENT;
       paymentAmount = getPonctualOrderPrice(type, items);
     }
 
-    // 2. Déterminer l'aidant à assigner
     let finalAidantId = null;
 
     if (status !== ORDER_STATUS.WAITING_PAYMENT) {
       const targetTypeForAidant = patientId ? 'patient' : 'personal_account';
       const targetIdForAidant = patientId || userId;
 
-      // Vérifier si un aidant est déjà assigné à la cible
       let foundId = await getActiveAidantForTarget(
         targetTypeForAidant,
         targetIdForAidant,
@@ -254,11 +251,9 @@ const createOrder = async ({
           finalAidantId = convertedId;
         }
       } else if (selectedAidantId && wizardChoice) {
-        // L'utilisateur a choisi un aidant via le wizard
         const convertedId = await getAidantIdFromUserIdOrId(selectedAidantId);
         if (convertedId) {
           if (wizardChoice === 'permanente') {
-            // Vérifier le quota avant d'assigner
             const { data: aidant, error } = await supabase
               .from('aidants')
               .select('current_assignments, max_assignments')
@@ -284,7 +279,6 @@ const createOrder = async ({
       }
     }
 
-    // 3. Créer la commande
     const orderData = {
       user_id: userId,
       patient_id: patientId || null,
@@ -294,6 +288,8 @@ const createOrder = async ({
       type: type,
       description: description,
       address: address,
+      latitude: latitude,     // ✅ AJOUT : Insertion du paramètre dans le schéma de Supabase
+      longitude: longitude,   // ✅ AJOUT : Insertion du paramètre dans le schéma de Supabase
       estimated_amount: estimatedAmount || 0,
       items: items || [],
       prescription_url: prescriptionUrl || null,
@@ -330,7 +326,6 @@ const createOrder = async ({
       };
     }
 
-    // 4. Notifications
     const targetDisplay = finalTargetName || 'un client';
 
     if (requiresPayment) {
@@ -356,7 +351,6 @@ const createOrder = async ({
           data: { order_id: order.id, action: 'take', auto_assigned: true },
         });
       } else {
-        // Notifier les aidants disponibles
         await notifyAvailableAidantsForOrder(order.id, {
           targetDisplay,
           description,
@@ -364,7 +358,6 @@ const createOrder = async ({
       }
     }
 
-    // 5. Récupérer les relations
     const fullOrder = await enrichOrderWithRelations(order);
 
     return {
@@ -397,7 +390,6 @@ const createOrder = async ({
  */
 const takeOrder = async (orderId, aidantUserId) => {
   try {
-    // 1. Récupérer la commande
     const { data: order, error: fetchError } = await supabase
       .from('commandes')
       .select('*')
@@ -412,7 +404,6 @@ const takeOrder = async (orderId, aidantUserId) => {
       };
     }
 
-    // 2. Vérifier que la commande est disponible
     const availableStatuses = ['creee', 'en_attente', 'disponible'];
     if (!availableStatuses.includes(order.status)) {
       return {
@@ -422,7 +413,6 @@ const takeOrder = async (orderId, aidantUserId) => {
       };
     }
 
-    // 3. Vérifier que l'aidant existe et est disponible
     const { data: aidant, error: aidantError } = await supabase
       .from('aidants')
       .select('id, available, is_verified, current_assignments, max_assignments')
@@ -445,7 +435,6 @@ const takeOrder = async (orderId, aidantUserId) => {
       };
     }
 
-    // 4. Vérifier le quota de commandes en cours
     const quotaCheck = await checkAidantOrderQuota(aidantUserId);
     if (!quotaCheck.canTake) {
       return {
@@ -457,7 +446,6 @@ const takeOrder = async (orderId, aidantUserId) => {
       };
     }
 
-    // 5. Si la commande a déjà un aidant assigné
     if (order.aidant_id && order.aidant_id !== aidant.id) {
       return {
         success: false,
@@ -466,7 +454,6 @@ const takeOrder = async (orderId, aidantUserId) => {
       };
     }
 
-    // 6. Incrémenter current_orders
     const incremented = await incrementAidantOrders(aidantUserId);
     if (!incremented) {
       return {
@@ -476,7 +463,6 @@ const takeOrder = async (orderId, aidantUserId) => {
       };
     }
 
-    // 7. Mettre à jour la commande
     const { data: updatedOrder, error: updateError } = await supabase
       .from('commandes')
       .update({
@@ -492,7 +478,6 @@ const takeOrder = async (orderId, aidantUserId) => {
       .single();
 
     if (updateError) {
-      // Rollback: décrémenter
       await decrementAidantOrders(aidantUserId);
       return {
         success: false,
@@ -501,7 +486,6 @@ const takeOrder = async (orderId, aidantUserId) => {
       };
     }
 
-    // 8. Notification à la famille
     const targetDisplay = order.target_name || 'un client';
     if (order.family_id) {
       await createNotification({
@@ -513,7 +497,6 @@ const takeOrder = async (orderId, aidantUserId) => {
       });
     }
 
-    // 9. Enrichir la commande
     const fullOrder = await enrichOrderWithRelations(updatedOrder);
 
     return {
@@ -549,7 +532,6 @@ const takeOrder = async (orderId, aidantUserId) => {
  */
 const deliverOrder = async (orderId, aidantUserId, proofUrl = null, location = null) => {
   try {
-    // 1. Récupérer la commande
     const { data: order, error: fetchError } = await supabase
       .from('commandes')
       .select('*')
@@ -564,7 +546,6 @@ const deliverOrder = async (orderId, aidantUserId, proofUrl = null, location = n
       };
     }
 
-    // 2. Vérifier que l'aidant est bien assigné
     if (order.aidant_id) {
       const { data: aidant } = await supabase
         .from('aidants')
@@ -581,7 +562,6 @@ const deliverOrder = async (orderId, aidantUserId, proofUrl = null, location = n
       }
     }
 
-    // 3. Vérifier que la commande est en cours
     if (order.status !== ORDER_STATUS.IN_PROGRESS) {
       return {
         success: false,
@@ -590,10 +570,8 @@ const deliverOrder = async (orderId, aidantUserId, proofUrl = null, location = n
       };
     }
 
-    // 4. Décrémenter current_orders (libérer le quota)
     await decrementAidantOrders(aidantUserId);
 
-    // 5. Mettre à jour la commande
     const autoValidationAt = new Date(Date.now() + AUTO_VALIDATION_HOURS * 60 * 60 * 1000);
 
     const { data: updatedOrder, error: updateError } = await supabase
@@ -614,7 +592,6 @@ const deliverOrder = async (orderId, aidantUserId, proofUrl = null, location = n
       .single();
 
     if (updateError) {
-      // Rollback: réincrémenter
       await incrementAidantOrders(aidantUserId);
       return {
         success: false,
@@ -623,7 +600,6 @@ const deliverOrder = async (orderId, aidantUserId, proofUrl = null, location = n
       };
     }
 
-    // 6. Notification à la famille
     const targetDisplay = order.target_name || 'un client';
     if (order.family_id) {
       await createNotification({
@@ -635,7 +611,6 @@ const deliverOrder = async (orderId, aidantUserId, proofUrl = null, location = n
       });
     }
 
-    // 7. Enrichir la commande
     const fullOrder = await enrichOrderWithRelations(updatedOrder);
 
     return {
@@ -686,7 +661,6 @@ const autoValidateOrder = async (orderId) => {
       };
     }
 
-    // Vérifier que 12h se sont écoulées
     const deliveredAt = new Date(order.metadata?.delivered_at || order.updated_at);
     const now = new Date();
     const diffHours = (now.getTime() - deliveredAt.getTime()) / (1000 * 60 * 60);
@@ -741,9 +715,6 @@ const autoValidateOrder = async (orderId) => {
 // NOTIFICATIONS
 // ============================================================
 
-/**
- * Notifie les aidants disponibles d'une nouvelle commande
- */
 const notifyAvailableAidantsForOrder = async (orderId, { targetDisplay, description }) => {
   try {
     const { data: aidants } = await supabase
@@ -754,7 +725,6 @@ const notifyAvailableAidantsForOrder = async (orderId, { targetDisplay, descript
 
     if (!aidants || aidants.length === 0) return;
 
-    // Filtrer ceux qui ont de la place
     const availableAidants = [];
     for (const aidant of aidants) {
       const quotaCheck = await checkAidantOrderQuota(aidant.user_id);
@@ -781,9 +751,6 @@ const notifyAvailableAidantsForOrder = async (orderId, { targetDisplay, descript
 // FONCTIONS UTILITAIRES
 // ============================================================
 
-/**
- * Enrichit une commande avec ses relations
- */
 const enrichOrderWithRelations = async (order) => {
   let patient = null;
   if (order.patient_id) {
@@ -832,9 +799,6 @@ const enrichOrderWithRelations = async (order) => {
   };
 };
 
-/**
- * Calcule le prix d'une commande ponctuelle
- */
 const getPonctualOrderPrice = (type, items) => {
   const ORDER_PONCTUAL_PRICES = {
     medicaments: 5000,
@@ -842,7 +806,7 @@ const getPonctualOrderPrice = (type, items) => {
     produits_hygiene: 4000,
     courses: 3000,
     repas: 4000,
-    autre: 5000,
+    autre: 2500,
   };
 
   if (items && items.length > 0) {
@@ -852,9 +816,6 @@ const getPonctualOrderPrice = (type, items) => {
   return ORDER_PONCTUAL_PRICES[type] || 2500;
 };
 
-/**
- * Convertit un user_id en aidant_id
- */
 const getAidantIdFromUserIdOrId = async (userIdOrId) => {
   const { data: aidantById, error: errorById } = await supabase
     .from('aidants')
@@ -875,9 +836,6 @@ const getAidantIdFromUserIdOrId = async (userIdOrId) => {
   return null;
 };
 
-/**
- * Vérifie l'abonnement pour les commandes
- */
 const checkSubscriptionForOrders = async (userId) => {
   try {
     const { data: subscription, error } = await supabase
@@ -888,16 +846,7 @@ const checkSubscriptionForOrders = async (userId) => {
       .gte('end_date', new Date().toISOString().split('T')[0])
       .maybeSingle();
 
-    if (error) {
-      console.error('❌ checkSubscriptionForOrders error:', error);
-      return {
-        hasActiveSubscription: false,
-        remainingOrders: 0,
-        subscription: null,
-      };
-    }
-
-    if (!subscription) {
+    if (error || !subscription) {
       return {
         hasActiveSubscription: false,
         remainingOrders: 0,
@@ -925,29 +874,18 @@ const checkSubscriptionForOrders = async (userId) => {
 // ============================================================
 
 module.exports = {
-  // Constantes
   ORDER_STATUS,
   ORDER_TYPES,
   MAX_ORDERS_IN_PROGRESS,
   AUTO_VALIDATION_HOURS,
-
-  // Quota
   checkAidantOrderQuota,
   incrementAidantOrders,
   decrementAidantOrders,
-
-  // Création
   createOrder,
-
-  // Actions
   takeOrder,
   deliverOrder,
   autoValidateOrder,
-
-  // Notifications
   notifyAvailableAidantsForOrder,
-
-  // Utilitaires
   enrichOrderWithRelations,
   getPonctualOrderPrice,
   getAidantIdFromUserIdOrId,
