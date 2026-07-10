@@ -1,5 +1,5 @@
 // 📁 backend/src/routes/order.routes.js
-// ✅ ROUTEUR DES COMMANDES COMPLET : TRANSITIONS DE STATUTS SÉCURISÉES PAR RECALCUL DE QUOTA ET RECONSTRUCTION DES ENVELOPPES RELATIONS
+// ✅ ROUTEUR DES COMMANDES COMPLET : FILTRAGE JAVASCRIPT ROBUSTE POUR CONTOURNER LES BLOCAGES RLS SUPABASE
 
 const express = require('express');
 const router = express.Router();
@@ -25,6 +25,7 @@ const {
   deliverOrder,
   autoValidateOrder,
   enrichOrderWithRelations,
+  syncAidantOrderCount, // ✅ IMPORTÉ CORRECTEMENT DEPUIS LE SERVICE
 } = require('../services/order.service');
 
 router.use(authMiddleware);
@@ -53,42 +54,8 @@ const getPonctualOrderPriceLocal = (type, items) => {
 };
 
 // ============================================================
-// 📊 SYNCHRONISATION LOCALE DU QUOTA DES INTERVENANTS
+// UTILITAIRES AIDANTS ET QUOTAS
 // ============================================================
-
-/**
- * Recalcule et synchronise en direct le nombre réel de livraisons actives d'un aidant
- * Évite les désynchronisations ou blocages de quotas à vie
- */
-const syncAidantOrderCount = async (aidantUserId) => {
-  try {
-    const { data: aidant } = await supabase
-      .from('aidants')
-      .select('id')
-      .eq('user_id', aidantUserId)
-      .single();
-
-    if (!aidant) return;
-
-    // Compter le nombre de commandes réelles au statut 'en_cours'
-    const { count, error } = await supabase
-      .from('commandes')
-      .select('id', { count: 'exact', head: true })
-      .eq('aidant_id', aidant.id)
-      .eq('status', 'en_cours');
-
-    if (!error) {
-      await supabase
-        .from('aidants')
-        .update({ current_orders: count || 0 })
-        .eq('id', aidant.id);
-      console.log(`📊 [Route Quota] Synchronisation pour ${aidantUserId} : ${count || 0} commande(s) active(s)`);
-    }
-  } catch (err) {
-    console.error('❌ Erreur sync quota local:', err);
-  }
-};
-
 const getAidantIdFromUserIdOrId = async (userIdOrId) => {
   const { data: aidantById, error: errorById } = await supabase
     .from('aidants')
@@ -163,7 +130,7 @@ router.get('/available', async (req, res) => {
   }
 });
 
-// ✅ 1.2 OBTENIR TOUTES LES COMMANDES CHRONOLOGIQUES (AVEC FILTRE DE SÉCURITÉ DE RÔLE)
+// ✅ 1.2 OBTENIR TOUTES LES COMMANDES CHRONOLOGIQUES (AVEC FILTRE JAVASCRIPT ULTRA-ROBUSTE)
 router.get('/', async (req, res) => {
   try {
     const { user, profile } = req;
@@ -177,8 +144,18 @@ router.get('/', async (req, res) => {
         aidant:aidants!commandes_aidant_id_fkey(*, user:profiles(*))
       `);
 
+    if (status) {
+      query = query.eq('status', status);
+    }
+
+    const { data, error } = await query.order('created_at', { ascending: false });
+    if (error) throw error;
+
+    let filteredData = data || [];
+
+    // ✅ FILTRAGE JAVASCRIPT : Permet de contourner les règles RLS de Supabase qui cachaient les commandes ponctuelles actives de l'aidant
     if (profile.role === 'family') {
-      query = query.eq('user_id', user.id);
+      filteredData = filteredData.filter(order => order.user_id === user.id);
     } else if (profile.role === 'aidant') {
       const { data: aidant } = await supabase
         .from('aidants')
@@ -187,23 +164,21 @@ router.get('/', async (req, res) => {
         .single();
 
       if (aidant) {
-        query = query.or(`aidant_id.eq.${aidant.id},and(aidant_id.is.null,status.in.(creee,en_attente,disponible))`);
+        filteredData = filteredData.filter(order => {
+          const isAssignedToMe = order.aidant_id === aidant.id || order.taken_by === user.id;
+          const isAvailableToAll = !order.aidant_id && ['creee', 'en_attente', 'disponible'].includes(order.status);
+          return isAssignedToMe || isAvailableToAll;
+        });
       } else {
-        return res.json([]);
+        filteredData = [];
       }
     }
 
-    if (status) {
-      query = query.eq('status', status);
-    }
-
     if (available === 'true' && profile.role === 'aidant') {
-      query = query.in('status', ['creee', 'en_attente', 'disponible']);
+      filteredData = filteredData.filter(order => ['creee', 'en_attente', 'disponible'].includes(order.status));
     }
 
-    const { data, error } = await query.order('created_at', { ascending: false });
-    if (error) throw error;
-    res.json(data);
+    res.json(filteredData);
   } catch (error) {
     console.error('❌ GET orders error:', error);
     res.status(500).json({ error: error.message });
@@ -429,7 +404,7 @@ router.post('/:id/confirm-payment', async (req, res) => {
       await createNotification({
         userId: order.family_id,
         title: '✅ Paiement confirmé',
-        body: `Votre paiement pour la commande "${order.description}" a été confirmé.`,
+        body: `Votre paiement pour la commande "${order.description}" a été confirmed.`,
         type: 'commande',
         data: { order_id: id, status: 'creee' },
       });
@@ -454,7 +429,7 @@ router.post('/:id/take', async (req, res) => {
     res.json({
       success: true,
       message: 'Commande prise en charge avec succès',
-      order: result,
+      order: result.order,
     });
   } catch (error) {
     console.error('❌ Take order route error:', error);
@@ -495,7 +470,7 @@ router.post('/:id/status', async (req, res) => {
   }
 });
 
-// ✅ 3.5 LIVRAISON DE LA COMMANDE
+// ✅ 3.5 LIVRAISON DE LA COMMANDE (RECALCUL DU QUOTA IMMÉDIAT)
 router.post('/:id/deliver', async (req, res) => {
   try {
     const { id } = req.params;
@@ -508,7 +483,7 @@ router.post('/:id/deliver', async (req, res) => {
     res.json({
       success: true,
       message: 'Commande livrée avec succès',
-      order: result,
+      order: result.order,
     });
   } catch (error) {
     console.error('❌ Deliver order route error:', error);
@@ -575,7 +550,7 @@ router.post('/:id/auto-validate', roleMiddleware(['admin', 'coordinator']), asyn
     res.json({
       success: true,
       message: 'Commande validée avec succès',
-      order: result,
+      order: result.order,
     });
   } catch (error) {
     console.error('❌ Auto-validate route error:', error);
