@@ -1,5 +1,5 @@
 // 📁 backend/src/services/order.service.js
-// ✅ SERVICE DE COMMANDES COMPLET : ALIGNEMENT DES SECURE QUOTAS DYNAMIQUES ET RETRAIT D'ASSIGNATION AUTOMATIQUE D'OFFICE
+// ✅ SERVICE DE COMMANDES COMPLET : SYNCHRONISATION DYNAMIQUE DES QUOTAS ET FIN DE L'ASSIGNATION AUTO D'OFFICE
 
 const { supabase } = require('./supabase.service');
 const { createNotification } = require('./notification.service');
@@ -587,7 +587,7 @@ const autoValidateOrder = async (orderId) => {
       };
     }
 
-    // ✅ Synchronisation synchrone du quota de l'intervenant pour libérer sa place
+    // ✅ Synchronisation du quota de l'intervenant pour libérer sa place
     if (order.aidant_id) {
       const { data: aidant } = await supabase.from('aidants').select('user_id').eq('id', order.aidant_id).single();
       if (aidant) {
