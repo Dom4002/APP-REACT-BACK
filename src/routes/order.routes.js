@@ -1,5 +1,4 @@
 // 📁 backend/src/routes/order.routes.js
-// ✅ ROUTEUR DES COMMANDES COMPLET : FILTRAGE JAVASCRIPT ROBUSTE POUR CONTOURNER LES BLOCAGES RLS SUPABASE
 
 const express = require('express');
 const router = express.Router();
@@ -25,7 +24,7 @@ const {
   deliverOrder,
   autoValidateOrder,
   enrichOrderWithRelations,
-  syncAidantOrderCount, // ✅ IMPORTÉ CORRECTEMENT DEPUIS LE SERVICE
+  syncAidantOrderCount,
 } = require('../services/order.service');
 
 router.use(authMiddleware);
@@ -130,7 +129,7 @@ router.get('/available', async (req, res) => {
   }
 });
 
-// ✅ 1.2 OBTENIR TOUTES LES COMMANDES CHRONOLOGIQUES (AVEC FILTRE JAVASCRIPT ULTRA-ROBUSTE)
+// ✅ 1.2 OBTENIR TOUTES LES COMMANDES CHRONOLOGIQUES (AVEC FILTRE JAVASCRIPT ROBUSTE)
 router.get('/', async (req, res) => {
   try {
     const { user, profile } = req;
@@ -153,7 +152,6 @@ router.get('/', async (req, res) => {
 
     let filteredData = data || [];
 
-    // ✅ FILTRAGE JAVASCRIPT : Permet de contourner les règles RLS de Supabase qui cachaient les commandes ponctuelles actives de l'aidant
     if (profile.role === 'family') {
       filteredData = filteredData.filter(order => order.user_id === user.id);
     } else if (profile.role === 'aidant') {
@@ -321,7 +319,7 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// ✅ 3.2 CONFIRMER LE PAIEMENT D'UNE COMMANDE PONCTUELLE (OUVERTURE AU POOL PAR DÉFAUT)
+// ✅ 3.2 CONFIRMER LE PAIEMENT D'UNE COMMANDE PONCTUELLE
 router.post('/:id/confirm-payment', async (req, res) => {
   try {
     const { id } = req.params;
@@ -334,7 +332,6 @@ router.post('/:id/confirm-payment', async (req, res) => {
       return res.status(400).json({ error: 'Cette commande n\'est pas en attente de paiement' });
     }
 
-    // ✅ RECTIFICATION DE SÉCURITÉ UX : Pas d'assignation automatique forcée à la confirmation.
     let aidantId = order.aidant_id || null;
 
     if (aidantId) {
@@ -348,7 +345,7 @@ router.post('/:id/confirm-payment', async (req, res) => {
       .update({
         status: 'creee',
         is_paid: true,
-        aidant_id: aidantId, // Restera NULL si aucun aidant pré-sélectionné (ouverture au pool)
+        aidant_id: aidantId,
         metadata: {
           ...(order.metadata || {}),
           payment_confirmed_at: new Date().toISOString(),
@@ -365,7 +362,6 @@ router.post('/:id/confirm-payment', async (req, res) => {
 
     const targetDisplay = order.target_name || 'un client';
 
-    // Si aucun aidant n'était pré-choisi, avertir tous les aidants qualifiés
     if (!aidantId) {
       const { data: aidants } = await supabase.from('aidants').select('user_id').eq('available', true).eq('is_verified', true);
       const availableAidants = [];
@@ -389,7 +385,7 @@ router.post('/:id/confirm-payment', async (req, res) => {
       }
     } else {
       const { data: aidantProfile } = await supabase.from('aidants').select('user_id').eq('id', aidantId).maybeSingle();
-      if (aidantProfile?.user_id) {
+      if (antProfile?.user_id) {
         await createNotification({
           userId: aidantProfile.user_id,
           title: '🛒 Nouvelle commande à prendre',
@@ -404,7 +400,7 @@ router.post('/:id/confirm-payment', async (req, res) => {
       await createNotification({
         userId: order.family_id,
         title: '✅ Paiement confirmé',
-        body: `Votre paiement pour la commande "${order.description}" a été confirmed.`,
+        body: `Votre paiement pour la commande "${order.description}" a été confirmé.`,
         type: 'commande',
         data: { order_id: id, status: 'creee' },
       });
@@ -425,6 +421,15 @@ router.post('/:id/take', async (req, res) => {
 
     const { takeOrder } = require('../services/order.service');
     const result = await takeOrder(id, aidantUserId);
+
+    // ✅ CORRECTION SÉCURITÉ APPLIQUÉE : Retourner une erreur 400 si l'opération a échoué au niveau du service
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        error: result.error,
+        code: result.code,
+      });
+    }
 
     res.json({
       success: true,
@@ -455,7 +460,6 @@ router.post('/:id/status', async (req, res) => {
 
     if (error) throw error;
 
-    // ✅ Synchronisation dynamique en direct du quota de l'aidant après changement de statut (Validation/Annulation)
     if (order.aidant_id) {
       const { data: aidant } = await supabase.from('aidants').select('user_id').eq('id', order.aidant_id).single();
       if (aidant) {
@@ -470,7 +474,7 @@ router.post('/:id/status', async (req, res) => {
   }
 });
 
-// ✅ 3.5 LIVRAISON DE LA COMMANDE (RECALCUL DU QUOTA IMMÉDIAT)
+// ✅ 3.5 LIVRAISON DE LA COMMANDE
 router.post('/:id/deliver', async (req, res) => {
   try {
     const { id } = req.params;
@@ -491,7 +495,7 @@ router.post('/:id/deliver', async (req, res) => {
   }
 });
 
-// ✅ 3.6 ANNULER UNE COMMANDE (FAMILLE OU ADMIN) ET LIBÉRER LE QUOTA
+// ✅ 3.6 ANNULER UNE COMMANDE ET LIBÉRER LE QUOTA
 router.post('/:id/cancel', async (req, res) => {
   try {
     const { id } = req.params;
@@ -524,7 +528,6 @@ router.post('/:id/cancel', async (req, res) => {
 
     if (updateError) throw updateError;
 
-    // ✅ Libération synchrone immédiate du quota de l'aidant
     if (order.aidant_id) {
       const { data: aidant } = await supabase.from('aidants').select('user_id').eq('id', order.aidant_id).single();
       if (aidant) {
