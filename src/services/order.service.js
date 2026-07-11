@@ -1,5 +1,5 @@
 // 📁 backend/src/services/order.service.js
-// ✅ SERVICE DE COMMANDES COMPLET : SYNCHRONISATION DYNAMIQUE DES QUOTAS ET FIN DE L'ASSIGNATION AUTO D'OFFICE
+// ✅ SERVICE DE COMMANDES COMPLET : SYNCHRONISATION DYNAMIQUE DES QUOTAS SANS LIMITE DE QUOTA MAXIMUM EN COURS
 
 const { supabase } = require('./supabase.service');
 const { createNotification } = require('./notification.service');
@@ -24,16 +24,14 @@ const ORDER_TYPES = {
   PONCTUAL: 'ponctual',
 };
 
-const MAX_ORDERS_IN_PROGRESS = 2;
 const AUTO_VALIDATION_HOURS = 12;
 
 // ============================================================
-// 📊 ALGORITHME DE SYNCHRONISATION DYNAMIQUE DES QUOTAS
+// 📊 ALGORITHME DE SYNCHRONISATION DES QUOTAS DE COMMANDES ACTIVES
 // ============================================================
 
 /**
  * Recalcule et synchronise en direct le nombre réel de livraisons actives (en_cours) d'un aidant.
- * Résout le problème des quotas bloqués à vie.
  * @param {string} aidantUserId - UUID de l'aidant (user_id)
  */
 const syncAidantOrderCount = async (aidantUserId) => {
@@ -66,18 +64,18 @@ const syncAidantOrderCount = async (aidantUserId) => {
 };
 
 /**
- * Vérifie le quota de commandes en cours d'un aidant
+ * Vérifie l'activité de commandes en cours d'un aidant (Toujours autorisé : canTake = true)
  * @param {string} aidantUserId - UUID de l'aidant (user_id)
- * @returns {Promise<Object>} - { canTake, current, max, available }
+ * @returns {Promise<Object>} - { canTake: true, current, max: Infinity, available: Infinity }
  */
 const checkAidantOrderQuota = async (aidantUserId) => {
   try {
-    // 1️⃣ Forcer le recalcul dynamique en direct avant toute vérification
+    // Forcer le recalcul dynamique en direct
     await syncAidantOrderCount(aidantUserId);
 
     const { data: aidant, error } = await supabase
       .from('aidants')
-      .select('id, current_orders, max_orders')
+      .select('id, current_orders')
       .eq('user_id', aidantUserId)
       .single();
 
@@ -86,22 +84,20 @@ const checkAidantOrderQuota = async (aidantUserId) => {
         success: false,
         error: 'Aidant non trouvé',
         current: 0,
-        max: MAX_ORDERS_IN_PROGRESS,
-        available: 0,
-        canTake: false,
+        max: 999,
+        available: 999,
+        canTake: true, // ✅ Toujours autorisé : plus de blocage de quota
       };
     }
 
     const current = aidant.current_orders || 0;
-    const max = aidant.max_orders || MAX_ORDERS_IN_PROGRESS;
-    const available = max - current;
 
     return {
       success: true,
       current,
-      max,
-      available,
-      canTake: current < max,
+      max: 999,
+      available: 999,
+      canTake: true, // ✅ Toujours autorisé : plus de blocage de quota
     };
   } catch (error) {
     console.error('❌ checkAidantOrderQuota error:', error);
@@ -109,15 +105,15 @@ const checkAidantOrderQuota = async (aidantUserId) => {
       success: false,
       error: error.message,
       current: 0,
-      max: MAX_ORDERS_IN_PROGRESS,
-      available: 0,
-      canTake: false,
+      max: 999,
+      available: 999,
+      canTake: true,
     };
   }
 };
 
 /**
- * Incrémente le nombre de commandes en cours d'un aidant (conservé pour rétrocompatibilité, délégué au sync)
+ * Incrémente le nombre de commandes (délégué au sync)
  */
 const incrementAidantOrders = async (aidantUserId) => {
   await syncAidantOrderCount(aidantUserId);
@@ -125,7 +121,7 @@ const incrementAidantOrders = async (aidantUserId) => {
 };
 
 /**
- * Décrémente le nombre de commandes en cours d'un aidant (conservé pour rétrocompatibilité, délégué au sync)
+ * Décrémente le nombre de commandes (délégué au sync)
  */
 const decrementAidantOrders = async (aidantUserId) => {
   await syncAidantOrderCount(aidantUserId);
@@ -133,7 +129,7 @@ const decrementAidantOrders = async (aidantUserId) => {
 };
 
 // ============================================================
-// CRÉATION DE COMMANDE SANS ASSIGNATION AUTOMATIQUE D'OFFICE
+// CRÉATION DE COMMANDE
 // ============================================================
 
 const createOrder = async ({
@@ -185,8 +181,6 @@ const createOrder = async ({
       paymentAmount = getPonctualOrderPrice(type, items);
     }
 
-    // ✅ RECTIFICATION DE SÉCURITÉ UX : Les commandes partent vierges (aidant_id = null)
-    // Aucun aidant permanent lié (via getActiveAidantForTarget) n'est affecté de force à la création.
     let finalAidantId = null;
 
     if (selectedAidantId) {
@@ -234,13 +228,13 @@ const createOrder = async ({
       status: status,
       order_type: requiresPayment ? ORDER_TYPES.PONCTUAL : ORDER_TYPES.SUBSCRIPTION,
       is_paid: !requiresPayment,
-      aidant_id: finalAidantId, // Vierge si aucun aidant n'a été spécifié expressément
+      aidant_id: finalAidantId,
       subscription_id: subscriptionId,
       metadata: {
         requires_payment: requiresPayment,
         created_by: userId,
         created_at: new Date().toISOString(),
-        auto_assigned_aidant: false, // Aucun aidant n'est auto-assigné d'office
+        auto_assigned_aidant: false,
         payment_amount: requiresPayment ? paymentAmount : null,
         subscription_used: subscriptionId ? true : false,
         ponctual_mode: requiresPayment ? true : false,
@@ -249,7 +243,7 @@ const createOrder = async ({
       },
     };
 
-    const { data: order, error } = await supabase
+    const { data: order, error: error } = await supabase
       .from('commandes')
       .insert(orderData)
       .select('*')
@@ -280,7 +274,6 @@ const createOrder = async ({
         },
       });
     } else {
-      // ✅ Diffuser la commande disponible à tous les aidants libres
       await notifyAvailableAidantsForOrder(order.id, {
         targetDisplay,
         description,
@@ -359,15 +352,6 @@ const takeOrder = async (orderId, aidantUserId) => {
     }
 
     const quotaCheck = await checkAidantOrderQuota(aidantUserId);
-    if (!quotaCheck.canTake) {
-      return {
-        success: false,
-        error: `Vous avez déjà ${quotaCheck.current} commande(s) en cours (maximum ${quotaCheck.max})`,
-        code: 'QUOTA_EXCEEDED',
-        current: quotaCheck.current,
-        max: quotaCheck.max,
-      };
-    }
 
     if (order.aidant_id && order.aidant_id !== aidant.id) {
       return {
@@ -399,7 +383,6 @@ const takeOrder = async (orderId, aidantUserId) => {
       };
     }
 
-    // ✅ RECALCUL ET ENREGISTREMENT EN DIRECT DU NOUVEAU QUOTA REEL
     await syncAidantOrderCount(aidantUserId);
 
     const targetDisplay = order.target_name || 'un client';
@@ -420,8 +403,8 @@ const takeOrder = async (orderId, aidantUserId) => {
       order: fullOrder,
       quota: {
         current: quotaCheck.current + 1,
-        max: quotaCheck.max,
-        available: quotaCheck.available - 1,
+        max: 999,
+        available: 999,
       },
     };
   } catch (error) {
@@ -505,7 +488,6 @@ const deliverOrder = async (orderId, aidantUserId, proofUrl = null, location = n
       };
     }
 
-    // ✅ LIBÉRATION DIRECTE DE CRÉNEAU DE QUOTA EN BASE DE DONNÉES
     await syncAidantOrderCount(aidantUserId);
 
     const targetDisplay = order.target_name || 'un client';
@@ -537,7 +519,7 @@ const deliverOrder = async (orderId, aidantUserId, proofUrl = null, location = n
 };
 
 // ============================================================
-// AUTO-VALIDATION (LIBÉRATION DU QUOTA DE SÉCURITÉ)
+// AUTO-VALIDATION (LIBÉRATION DU QUOTA)
 // ============================================================
 
 const autoValidateOrder = async (orderId) => {
@@ -587,7 +569,6 @@ const autoValidateOrder = async (orderId) => {
       };
     }
 
-    // ✅ Synchronisation du quota de l'intervenant pour libérer sa place
     if (order.aidant_id) {
       const { data: aidant } = await supabase.from('aidants').select('user_id').eq('id', order.aidant_id).single();
       if (aidant) {
@@ -625,16 +606,13 @@ const notifyAvailableAidantsForOrder = async (orderId, { targetDisplay, descript
     if (!aidants || aidants.length === 0) return;
 
     for (const aidant of aidants) {
-      const quotaCheck = await checkAidantOrderQuota(aidant.user_id);
-      if (quotaCheck.canTake) {
-        await createNotification({
-          userId: aidant.user_id,
-          title: '🛒 Nouvelle commande disponible',
-          body: `Commande de ${targetDisplay} - ${description}`,
-          type: 'commande',
-          data: { order_id: orderId, action: 'take' },
-        });
-      }
+      await createNotification({
+        userId: aidant.user_id,
+        title: '🛒 Nouvelle commande disponible',
+        body: `Commande de ${targetDisplay} - ${description}`,
+        type: 'commande',
+        data: { order_id: orderId, action: 'take' },
+      });
     }
   } catch (error) {
     console.error('❌ notifyAvailableAidantsForOrder error:', error);
@@ -770,7 +748,6 @@ const checkSubscriptionForOrders = async (userId) => {
 module.exports = {
   ORDER_STATUS,
   ORDER_TYPES,
-  MAX_ORDERS_IN_PROGRESS,
   AUTO_VALIDATION_HOURS,
   syncAidantOrderCount,  
   checkAidantOrderQuota,
