@@ -1,5 +1,6 @@
 // 📁 backend/src/routes/billing.js
- 
+// ✅ BILLET ET PAIEMENTS : ALIGNEMENT DES DURÉES D'ABONNEMENTS (2, 3, 4, 5 SEMAINES) SUR LA GRILLE TARIFAIRE
+
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 const { FedaPay, Transaction } = require('fedapay');
@@ -115,15 +116,13 @@ async function getActiveAidantForTarget(targetType, targetId, familyId) {
 
     if (!data) return null;
 
-    const { data: aidantById, error: errorById } = await supabase
+    const { data: sidebarId, error: errorById } = await supabase
       .from('aidants')
       .select('id')
       .eq('id', data)
       .maybeSingle();
 
-    if (!errorById && aidantById) {
-      return data;
-    }
+    if (!errorById && sidebarId) return data;
 
     const { data: aidantByUser, error: errorByUser } = await supabase
       .from('aidants')
@@ -131,9 +130,7 @@ async function getActiveAidantForTarget(targetType, targetId, familyId) {
       .eq('user_id', data)
       .maybeSingle();
 
-    if (!errorByUser && aidantByUser) {
-      return aidantByUser.id;
-    }
+    if (!errorByUser && aidantByUser) return aidantByUser.id;
 
     return null;
   } catch (error) {
@@ -147,21 +144,33 @@ async function createPendingSubscription(userId, offerId, offer, patientId = nul
     const startDate = new Date();
     const endDate = new Date();
 
-    switch (offer.type) {
-      case 'trimestrielle':
-        endDate.setMonth(endDate.getMonth() + 3);
-        break;
-      case 'annuelle':
-        endDate.setFullYear(endDate.getFullYear() + 1);
-        break;
-      case 'mensuelle':
-      default:
-        endDate.setMonth(endDate.getMonth() + 1);
-        break;
+    // ✅ COHÉRENCE : Aligner dynamiquement la durée de l'abonnement sur la grille tarifaire officielle
+    let durationDays = offer.duration_days || 30;
+
+    if (offer.category === 'maman_bebe') {
+      const nameLower = offer.name.toLowerCase();
+      if (nameLower.includes('essentiel')) {
+        durationDays = 14; // 2 semaines
+      } else if (nameLower.includes('confort')) {
+        durationDays = 21; // 3 semaines
+      } else if (nameLower.includes('sérénité')) {
+        durationDays = 28; // 4 semaines
+      } else if (nameLower.includes('privilège')) {
+        durationDays = 35; // 5 semaines
+      }
     }
 
-    const totalVisits = offer.total_visits || 0;
-    const totalOrders = offer.total_orders || 0;
+    endDate.setDate(startDate.getDate() + durationDays);
+
+    let totalVisits = offer.total_visits || 0;
+    if (!totalVisits) {
+      totalVisits = offer.visits_per_week ? (offer.visits_per_week * Math.ceil(durationDays / 7)) : 0;
+    }
+    
+    let totalOrders = offer.total_orders || 0;
+    if (!totalOrders) {
+      totalOrders = Math.ceil(durationDays / 7);
+    }
 
     console.log('📝 Création abonnement pour user_id:', userId);
 
@@ -254,8 +263,8 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
         type: orderDataToInsert.type,
         description: orderDataToInsert.description,
         address: orderDataToInsert.address,
-        latitude: orderDataToInsert.latitude || null, // ✅ ENREGISTREMENT GPS DU WEBHOOK
-        longitude: orderDataToInsert.longitude || null, // ✅ ENREGISTREMENT GPS DU WEBHOOK
+        latitude: orderDataToInsert.latitude || null,
+        longitude: orderDataToInsert.longitude || null,
         status: 'creee',
         estimated_amount: paymentRecord.amount || 0,
         final_amount: paymentRecord.amount || 0,
@@ -678,11 +687,12 @@ router.post('/generate-payment', async (req, res) => {
     let subscriptionRecord = null;
     let actualAbonnementId = null;
 
-    if (!is_ponctual && abonnement_id) {
+    if (!is_ponctual && (abonnement_id || plan_id)) {
+      const targetOfferId = abonnement_id || plan_id;
       const { data: offer, error: offerError } = await supabase
         .from('offres')
         .select('id, name, type, price, total_visits, total_orders')
-        .eq('id', abonnement_id)
+        .eq('id', targetOfferId)
         .single();
 
       if (offerError) {
@@ -1066,7 +1076,6 @@ router.post('/resolve-maps', async (req, res) => {
 
     console.log('🔄 [Google Maps] Résolution du lien court:', url);
 
-    // Effectuer une requête d'en-tête (HEAD) pour suivre la redirection de l'URL Google Maps raccourcie
     const response = await axios.get(url, {
       maxRedirects: 5,
       validateStatus: (status) => status >= 200 && status < 400,
