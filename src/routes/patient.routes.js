@@ -1,5 +1,6 @@
 // 📁 backend/src/routes/patient.routes.js
- 
+// ✅ ROUTEUR PATIENTS : RÉSOLUTIONS DES ATTRIBUTIONS ACTIVES DE L'AIDANT (PATIENTS & COMPTES EN DIRECT)
+
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../services/supabase.service');
@@ -9,7 +10,7 @@ const { roleMiddleware } = require('../middleware/role.middleware');
 router.use(authMiddleware);
 
 // =============================================
-// ✅ LISTE DES PATIENTS - FILTRÉE PAR RÔLE
+// ✅ LISTE DES PATIENTS - FILTRÉE PAR RÔLE AVEC REPLI D'ASSIGNATIONS SECURISE
 // =============================================
 router.get('/', async (req, res) => {
   try {
@@ -30,45 +31,95 @@ router.get('/', async (req, res) => {
       } else {
         return res.json([]);
       }
+      
+      const { data, error } = await query.order('created_at', { ascending: false });
+      if (error) throw error;
+      return res.json(data);
     }
     
-    // 🦸 AIDANT → Patients assignés via les visites
+    // 🦸 AIDANT → Patients et Comptes Personnels assignés via active aidant_assignments
     else if (profile.role === 'aidant') {
-      // 1. Récupérer l'aidant
-      const { data: aidant, error: aidantError } = await supabase
-        .from('aidants')
-        .select('id')
-        .eq('user_id', user.id)
-        .single();
+      console.log('🦸 Aidant connecté - Résolution des bénéficiaires assignés');
 
-      if (aidantError || !aidant) {
+      // 1. Récupérer les assignations actives pour cet aidant (par son user_id)
+      const { data: assignments, error: assignmentsError } = await supabase
+        .from('aidant_assignments')
+        .select('target_type, target_id')
+        .eq('aidant_user_id', user.id)
+        .eq('status', 'active');
+
+      if (assignmentsError) {
+        console.error('❌ Erreur récupération assignations aidant:', assignmentsError);
         return res.json([]);
       }
 
-      // 2. Récupérer les patients via les visites assignées
-      const { data: visits, error: visitsError } = await supabase
-        .from('visites')
-        .select('patient_id')
-        .eq('aidant_id', aidant.id)
-        .not('patient_id', 'is', null);
-
-      if (visitsError) {
-        console.error('❌ Erreur récupération visites aidant:', visitsError);
+      if (!assignments || assignments.length === 0) {
         return res.json([]);
       }
 
-      // 3. Extraire les IDs uniques des patients
-      const patientIds = [...new Set(visits?.map(v => v.patient_id).filter(Boolean))];
-      
+      // Filtrer les cibles
+      const patientIds = assignments
+        .filter(a => a.target_type === 'patient')
+        .map(a => a.target_id);
+
+      const personalAccountIds = assignments
+        .filter(a => a.target_type === 'personal_account' || a.target_type === 'personal')
+        .map(a => a.target_id);
+
+      let finalPatients = [];
+
+      // Charger les vrais patients rattachés
       if (patientIds.length > 0) {
-        query = query.in('id', patientIds);
-      } else {
-        return res.json([]);
-      }
-    }
-    // 👔 ADMIN / COORDINATEUR → Tous les patients
-    // Pas de filtre supplémentaire
+        const { data: dbPatients, error: dbPatientsError } = await supabase
+          .from('patients')
+          .select('*')
+          .in('id', patientIds);
 
+        if (!dbPatientsError && dbPatients) {
+          finalPatients = [...dbPatients];
+        }
+      }
+
+      // Charger les comptes personnels suivis en direct (et les mapper au format Patient pour le frontend)
+      if (personalAccountIds.length > 0) {
+        const { data: dbProfiles, error: dbProfilesError } = await supabase
+          .from('profiles')
+          .select('id, full_name, email, phone, avatar_url, patient_category')
+          .in('id', personalAccountIds);
+
+        if (!dbProfilesError && dbProfiles) {
+          const mappedPersonalProfiles = dbProfiles.map(p => ({
+            id: p.id,
+            first_name: p.full_name,
+            last_name: '(Compte Personnel)', // Indication visuelle claire de l'abonné
+            age: null,
+            gender: null,
+            address: 'Adresse du compte de l\'abonné', // Par défaut
+            phone: p.phone,
+            emergency_contact: null,
+            emergency_contact_name: null,
+            category: p.patient_category || 'senior', // Type de profil
+            status: 'active',
+            notes: 'Abonné suivi en direct sur son compte personnel',
+            allergies: null,
+            treatments: null,
+            conditions: null,
+            medical_history: null,
+            preferred_language: 'fr',
+            special_requirements: null,
+            created_by: p.id,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          }));
+
+          finalPatients = [...finalPatients, ...mappedPersonalProfiles];
+        }
+      }
+
+      return res.json(finalPatients);
+    }
+    
+    // 👔 ADMIN / COORDINATEUR → Tous les patients
     const { data, error } = await query.order('created_at', { ascending: false });
     if (error) throw error;
     res.json(data);
@@ -86,7 +137,7 @@ router.get('/:id', async (req, res) => {
     const { id } = req.params;
     const { user, profile } = req;
 
-    // 1. Récupérer le patient
+    // 1. Récupérer le patient ou le profil selon la cible rattachée
     const { data: patient, error } = await supabase
       .from('patients')
       .select('*')
@@ -95,7 +146,33 @@ router.get('/:id', async (req, res) => {
 
     if (error) {
       if (error.code === 'PGRST116') {
-        return res.status(404).json({ error: 'Patient non trouvé' });
+        // Fallback : Vérifier s'il s'agit d'un profil de compte personnel
+        const { data: userProfile, error: profileErr } = await supabase
+          .from('profiles')
+          .select('id, full_name, email, phone, avatar_url, patient_category')
+          .eq('id', id)
+          .single();
+
+        if (!profileErr && userProfile) {
+          const mappedProfile = {
+            id: userProfile.id,
+            first_name: userProfile.full_name,
+            last_name: '(Compte Personnel)',
+            age: null,
+            gender: null,
+            address: 'Adresse personnelle',
+            phone: userProfile.phone,
+            category: userProfile.patient_category || 'senior',
+            status: 'active',
+            notes: 'Suivi direct du compte personnel',
+            preferred_language: 'fr',
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+          return res.json(mappedProfile);
+        }
+
+        return res.status(404).json({ error: 'Bénéficiaire non trouvé' });
       }
       throw error;
     }
@@ -114,26 +191,18 @@ router.get('/:id', async (req, res) => {
         .maybeSingle();
       hasAccess = !!link;
     } else if (profile.role === 'aidant') {
-      const { data: aidant } = await supabase
-        .from('aidants')
+      const { data: assignment } = await supabase
+        .from('aidant_assignments')
         .select('id')
-        .eq('user_id', user.id)
-        .single();
-
-      if (aidant) {
-        const { data: visit } = await supabase
-          .from('visites')
-          .select('id')
-          .eq('aidant_id', aidant.id)
-          .eq('patient_id', id)
-          .limit(1)
-          .maybeSingle();
-        hasAccess = !!visit;
-      }
+        .eq('aidant_user_id', user.id)
+        .eq('target_id', id)
+        .eq('status', 'active')
+        .maybeSingle();
+      hasAccess = !!assignment;
     }
 
     if (!hasAccess) {
-      return res.status(403).json({ error: 'Accès non autorisé à ce patient' });
+      return res.status(403).json({ error: 'Accès non autorisé' });
     }
 
     res.json(patient);
@@ -163,14 +232,13 @@ router.post('/', roleMiddleware(['coordinator', 'admin']), async (req, res) => {
 });
 
 // =============================================
-// ✅ MODIFIER UN PATIENT - SEULS ADMIN/COORDINATEUR OU FAMILLE PROPRIÉTAIRE
+// ✅ MODIFIER UN PATIENT
 // =============================================
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { user, profile } = req;
 
-    // Vérifier si l'utilisateur a le droit de modifier
     let canEdit = false;
 
     if (profile.role === 'admin' || profile.role === 'coordinator') {
@@ -185,7 +253,6 @@ router.put('/:id', async (req, res) => {
       canEdit = !!link;
     }
 
-    // ❌ Les aidants ne peuvent PAS modifier les patients
     if (profile.role === 'aidant') {
       return res.status(403).json({ error: 'Les aidants ne peuvent pas modifier les patients' });
     }
@@ -210,13 +277,12 @@ router.put('/:id', async (req, res) => {
 });
 
 // =============================================
-// ✅ SUPPRIMER UN PATIENT - SEULS ADMIN/COORDINATEUR
+// ✅ SUPPRIMER UN PATIENT
 // =============================================
 router.delete('/:id', roleMiddleware(['coordinator', 'admin']), async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Vérifier que le patient existe
     const { data: patient, error: checkError } = await supabase
       .from('patients')
       .select('id')
@@ -227,10 +293,8 @@ router.delete('/:id', roleMiddleware(['coordinator', 'admin']), async (req, res)
       return res.status(404).json({ error: 'Patient non trouvé' });
     }
 
-    // Supprimer les liens familiaux
     await supabase.from('patient_family_links').delete().eq('patient_id', id);
 
-    // Supprimer le patient
     const { error } = await supabase.from('patients').delete().eq('id', id);
     if (error) throw error;
 
@@ -249,7 +313,6 @@ router.get('/:id/visits', async (req, res) => {
     const { id } = req.params;
     const { user, profile } = req;
 
-    // Vérifier l'accès au patient
     let hasAccess = false;
 
     if (profile.role === 'admin' || profile.role === 'coordinator') {
@@ -263,26 +326,18 @@ router.get('/:id/visits', async (req, res) => {
         .maybeSingle();
       hasAccess = !!link;
     } else if (profile.role === 'aidant') {
-      const { data: aidant } = await supabase
-        .from('aidants')
+      const { data: assignment } = await supabase
+        .from('aidant_assignments')
         .select('id')
-        .eq('user_id', user.id)
-        .single();
-
-      if (aidant) {
-        const { data: visit } = await supabase
-          .from('visites')
-          .select('id')
-          .eq('aidant_id', aidant.id)
-          .eq('patient_id', id)
-          .limit(1)
-          .maybeSingle();
-        hasAccess = !!visit;
-      }
+        .eq('aidant_user_id', user.id)
+        .eq('target_id', id)
+        .eq('status', 'active')
+        .maybeSingle();
+      hasAccess = !!assignment;
     }
 
     if (!hasAccess) {
-      return res.status(403).json({ error: 'Accès non autorisé aux visites de ce patient' });
+      return res.status(403).json({ error: 'Accès non autorisé' });
     }
 
     const { data, error } = await supabase
@@ -307,7 +362,6 @@ router.post('/:id/assign-aidant', roleMiddleware(['admin', 'coordinator']), asyn
     const { id } = req.params;
     const { aidantId, assignmentType = 'permanente', expiresAt = null } = req.body;
 
-    // Vérifier que le patient existe
     const { data: patient, error: patientError } = await supabase
       .from('patients')
       .select('id')
@@ -318,7 +372,6 @@ router.post('/:id/assign-aidant', roleMiddleware(['admin', 'coordinator']), asyn
       return res.status(404).json({ error: 'Patient non trouvé' });
     }
 
-    // Vérifier que l'aidant existe et est approuvé
     const { data: aidant, error: aidantError } = await supabase
       .from('aidants')
       .select('id, user_id, is_verified, status')
@@ -333,7 +386,6 @@ router.post('/:id/assign-aidant', roleMiddleware(['admin', 'coordinator']), asyn
       return res.status(400).json({ error: 'Cet aidant n\'est pas approuvé' });
     }
 
-    // Enregistrer l'assignation
     const { data: assignment, error: assignError } = await supabase
       .from('patient_aidant_assignments')
       .insert({
@@ -347,11 +399,8 @@ router.post('/:id/assign-aidant', roleMiddleware(['admin', 'coordinator']), asyn
       .single();
 
     if (assignError) {
-      // Si la table n'existe pas, on utilise patient_family_links
-      // ou on crée une entrée dans la table aidants
       console.warn('⚠️ Table patient_aidant_assignments non disponible, utilisation de patient_family_links');
       
-      // Vérifier si un lien existe déjà
       const { data: existingLink } = await supabase
         .from('patient_family_links')
         .select('id')
@@ -373,7 +422,6 @@ router.post('/:id/assign-aidant', roleMiddleware(['admin', 'coordinator']), asyn
       }
     }
 
-    // Notification à l'aidant
     await supabase.from('notifications').insert({
       user_id: aidant.user_id,
       title: '📋 Nouveau patient assigné',
@@ -401,12 +449,10 @@ router.get('/:id/aidants', async (req, res) => {
     const { id } = req.params;
     const { profile } = req;
 
-    // Seuls admin/coord peuvent voir cette info
     if (profile.role !== 'admin' && profile.role !== 'coordinator') {
       return res.status(403).json({ error: 'Accès non autorisé' });
     }
 
-    // Récupérer les aidants assignés via patient_family_links
     const { data: links, error: linksError } = await supabase
       .from('patient_family_links')
       .select(`
@@ -417,7 +463,6 @@ router.get('/:id/aidants', async (req, res) => {
 
     if (linksError) throw linksError;
 
-    // Filtrer pour ne garder que les aidants
     const aidants = links
       ?.filter(l => l.profiles?.role === 'aidant')
       .map(l => l.profiles) || [];
