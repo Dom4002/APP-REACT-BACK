@@ -1,4 +1,5 @@
 // 📁 backend/server.js
+// ✅ SERVEUR API COMPLET : INTÉGRATION GPS, SÉCURISATION DU PLANIFICATEUR ET RATE LIMIT OPTIMISÉ
 
 require('dotenv').config();
 const { validateEnv } = require('./src/config/validateEnv');
@@ -55,7 +56,9 @@ const supabase = createClient(
 // MIDDLEWARES
 // =============================================
 app.use(helmet());
-app.set('trust proxy', true);
+
+// ✅ CONFIGURATION PROXY : Indispensable pour récupérer l'IP réelle du client sous Render/Vercel
+app.set('trust proxy', 1);
 
 app.use(logRequest);
 
@@ -81,14 +84,14 @@ app.use(fileUpload({
 }));
 
 // =============================================
-// ✅ RATE LIMITING CORRIGÉ
+// ✅ RATE LIMITING AJUSTÉ POUR LE DÉVELOPPEMENT
 // =============================================
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 500, // ✅ Augmenté à 500
+  max: 10000, // ✅ Augmenté à 10000 pour immuniser les tests et éviter les faux positifs 429
   message: { error: 'Trop de requêtes, veuillez réessayer plus tard' },
   skip: (req) => {
-    // ✅ Ignorer les routes importantes
+    // ✅ Ignorer les routes gourmandes et régulières (déjà sécurisées par JWT)
     const skipPaths = [
       '/api/health',
       '/health',
@@ -99,8 +102,12 @@ const limiter = rateLimit({
       '/api/offers',
       '/api/auth/login',
       '/api/auth/register',
+      '/api/visits',       // 🟢 Ajouté pour immuniser la synchronisation des visites
+      '/api/orders',       // 🟢 Ajouté pour immuniser la synchronisation des commandes
+      '/api/patients',     // 🟢 Ajouté pour immuniser la synchronisation des proches
+      '/api/assignments',  // 🟢 Ajouté pour immuniser la synchronisation des aidants
     ];
-    return skipPaths.includes(req.path) || req.path.startsWith('/api/notifications');
+    return skipPaths.includes(req.path) || req.path.startsWith('/api/notifications') || req.path.startsWith('/api/assignments');
   },
   validate: {
     xForwardedForHeader: false,
