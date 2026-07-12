@@ -1,5 +1,5 @@
 // 📁 backend/src/routes/patient.routes.js
-// ✅ ROUTEUR PATIENTS : RÉSOLUTIONS DES ATTRIBUTIONS ACTIVES DE L'AIDANT (PATIENTS & COMPTES EN DIRECT)
+// ✅ ROUTEUR PATIENTS : RÉSOLUTION DES ATTRIBUTIONS ACTIVES DE L'AIDANT (PATIENTS & COMPTES EN DIRECT)
 
 const express = require('express');
 const router = express.Router();
@@ -37,7 +37,7 @@ router.get('/', async (req, res) => {
       return res.json(data);
     }
     
-    // 🦸 AIDANT → Patients et Comptes Personnels assignés via active aidant_assignments
+    // 🦸 AIDANT → Patients et Comptes Personnels assignés via active aidant_assignments (Bypasse RLS)
     else if (profile.role === 'aidant') {
       console.log('🦸 Aidant connecté - Résolution des bénéficiaires assignés');
 
@@ -94,7 +94,9 @@ router.get('/', async (req, res) => {
             last_name: '(Compte Personnel)', // Indication visuelle claire de l'abonné
             age: null,
             gender: null,
-            address: 'Adresse du compte de l\'abonné', // Par défaut
+            address: 'Adresse du compte de l\'abonné', 
+            latitude: null, // Propriété requise pour l'interface Proche/Patient
+            longitude: null, // Propriété requise pour l'interface Proche/Patient
             phone: p.phone,
             emergency_contact: null,
             emergency_contact_name: null,
@@ -110,6 +112,7 @@ router.get('/', async (req, res) => {
             created_by: p.id,
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
+            target_type: 'personal_account', // Utilisé pour l'aiguillage actif
           }));
 
           finalPatients = [...finalPatients, ...mappedPersonalProfiles];
@@ -137,7 +140,6 @@ router.get('/:id', async (req, res) => {
     const { id } = req.params;
     const { user, profile } = req;
 
-    // 1. Récupérer le patient ou le profil selon la cible rattachée
     const { data: patient, error } = await supabase
       .from('patients')
       .select('*')
@@ -161,6 +163,8 @@ router.get('/:id', async (req, res) => {
             age: null,
             gender: null,
             address: 'Adresse personnelle',
+            latitude: null,
+            longitude: null,
             phone: userProfile.phone,
             category: userProfile.patient_category || 'senior',
             status: 'active',
@@ -168,6 +172,7 @@ router.get('/:id', async (req, res) => {
             preferred_language: 'fr',
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
+            target_type: 'personal_account',
           };
           return res.json(mappedProfile);
         }
@@ -177,7 +182,7 @@ router.get('/:id', async (req, res) => {
       throw error;
     }
 
-    // 2. Vérifier les permissions
+    // Permissions
     let hasAccess = false;
 
     if (profile.role === 'admin' || profile.role === 'coordinator') {
