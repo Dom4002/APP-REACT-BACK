@@ -1,5 +1,5 @@
 // 📁 backend/src/routes/subscription.routes.js
- 
+// ✅ ROUTEUR ABONNEMENTS : CALCUL DE DURÉE ALIGNÉ SUR LA GRILLE OFFICIELLE (2, 3, 4, 5 SEMAINES)
 
 const express = require('express');
 const router = express.Router();
@@ -45,7 +45,6 @@ router.get('/my', async (req, res) => {
 
     if (error) throw error;
 
-    // ✅ Calculer les visites et commandes restantes
     const subscriptions = data?.map(sub => ({
       ...sub,
       remaining_visits: Math.max(0, (sub.total_visits || 0) - (sub.used_visits || 0)),
@@ -61,7 +60,7 @@ router.get('/my', async (req, res) => {
 });
 
 // =============================================
-// ✅ VÉRIFIER SI L'UTILISATEUR A UN ABONNEMENT ACTIF
+// VÉRIFIER SI L'UTILISATEUR A UN ABONNEMENT ACTIF
 // =============================================
 router.get('/active', async (req, res) => {
   try {
@@ -105,7 +104,6 @@ router.post('/', async (req, res) => {
     const { offreId, patientId } = req.body;
     const userId = req.user.id;
 
-    // ✅ Vérifier que l'offre existe
     const { data: offre, error: offreError } = await supabase
       .from('offres')
       .select('*')
@@ -114,7 +112,6 @@ router.post('/', async (req, res) => {
 
     if (offreError) throw offreError;
 
-    // ✅ Vérifier qu'il n'y a pas déjà un abonnement actif
     const { data: existing, error: existingError } = await supabase
       .from('abonnements')
       .select('id, status')
@@ -130,41 +127,38 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // ✅ Calculer les dates et les totaux
     const startDate = new Date();
     const endDate = new Date();
+
+    // ✅ COHÉRENCE : Aligner dynamiquement la durée de l'abonnement sur la grille tarifaire officielle
+    let durationDays = offre.duration_days || 30;
+
+    if (offre.category === 'maman_bebe') {
+      const nameLower = offre.name.toLowerCase();
+      if (nameLower.includes('essentiel')) {
+        durationDays = 14; // 2 semaines
+      } else if (nameLower.includes('confort')) {
+        durationDays = 21; // 3 semaines
+      } else if (nameLower.includes('sérénité')) {
+        durationDays = 28; // 4 semaines
+      } else if (nameLower.includes('privilège')) {
+        durationDays = 35; // 5 semaines
+      }
+    }
+
+    // Appliquer la durée calculée en jours
+    endDate.setDate(startDate.getDate() + durationDays);
 
     let totalVisits = offre.total_visits || offre.visits_per_month || 0;
     let totalOrders = offre.total_orders || 0;
 
-    switch (offre.type) {
-      case 'mensuelle':
-        endDate.setMonth(endDate.getMonth() + 1);
-        totalVisits = totalVisits || offre.visits_per_week * 4 || 0;
-        totalOrders = totalOrders || 4;
-        break;
-      case 'trimestrielle':
-        endDate.setMonth(endDate.getMonth() + 3);
-        totalVisits = (totalVisits || offre.visits_per_week * 4 || 0) * 3;
-        totalOrders = totalOrders * 3 || 12;
-        break;
-      case 'semestrielle':
-        endDate.setMonth(endDate.getMonth() + 6);
-        totalVisits = (totalVisits || offre.visits_per_week * 4 || 0) * 6;
-        totalOrders = totalOrders * 6 || 24;
-        break;
-      case 'annuelle':
-        endDate.setFullYear(endDate.getFullYear() + 1);
-        totalVisits = (totalVisits || offre.visits_per_week * 4 || 0) * 12;
-        totalOrders = totalOrders * 12 || 48;
-        break;
-      default:
-        endDate.setMonth(endDate.getMonth() + 1);
-        totalVisits = totalVisits || offre.visits_per_week * 4 || 0;
-        totalOrders = totalOrders || 4;
+    if (!totalVisits) {
+      totalVisits = offre.visits_per_week ? (offre.visits_per_week * Math.ceil(durationDays / 7)) : 0;
+    }
+    if (!totalOrders) {
+      totalOrders = Math.ceil(durationDays / 7);
     }
 
-    // ✅ Créer l'abonnement
     const { data: subscription, error } = await supabase
       .from('abonnements')
       .insert({
@@ -192,7 +186,6 @@ router.post('/', async (req, res) => {
 
     if (error) throw error;
 
-    // ✅ Notification
     await createNotification({
       userId,
       title: '✅ Abonnement activé',
@@ -216,7 +209,7 @@ router.post('/', async (req, res) => {
 });
 
 // =============================================
-// ✅ DÉCOMPTER UNE VISITE (AVEC VÉRIFICATION)
+// DÉCOMPTER UNE VISITE (AVEC VÉRIFICATION)
 // =============================================
 router.post('/:id/use-visit', async (req, res) => {
   try {
@@ -239,7 +232,6 @@ router.post('/:id/use-visit', async (req, res) => {
       return res.status(400).json({ error: 'Plus de visites disponibles' });
     }
 
-    // ✅ Si visite ponctuelle payée, NE PAS DÉCOMPTER
     if (isPonctual && wasPaid) {
       console.log(`ℹ️ Visite ponctuelle payée - Pas de décompte pour l'abonnement ${id}`);
       return res.json({ 
@@ -266,7 +258,6 @@ router.post('/:id/use-visit', async (req, res) => {
 
     if (error) throw error;
 
-    // ✅ Notification si plus de visites
     if (data.remaining_visits === 0) {
       await createNotification({
         userId: subscription.user_id,
@@ -277,7 +268,6 @@ router.post('/:id/use-visit', async (req, res) => {
       });
     }
 
-    // ✅ Notification du décompte
     if (data.remaining_visits > 0) {
       await createNotification({
         userId: subscription.user_id,
@@ -300,7 +290,7 @@ router.post('/:id/use-visit', async (req, res) => {
 });
 
 // =============================================
-// ✅ DÉCOMPTER UNE COMMANDE (AVEC VÉRIFICATION)
+// DÉCOMPTER UNE COMMANDE (AVEC VÉRIFICATION)
 // =============================================
 router.post('/:id/use-order', async (req, res) => {
   try {
@@ -323,7 +313,6 @@ router.post('/:id/use-order', async (req, res) => {
       return res.status(400).json({ error: 'Plus de commandes disponibles' });
     }
 
-    // ✅ Si commande ponctuelle payée, NE PAS DÉCOMPTER
     if (isPonctual && wasPaid) {
       console.log(`ℹ️ Commande ponctuelle payée - Pas de décompte pour l'abonnement ${id}`);
       return res.json({ 
@@ -350,7 +339,6 @@ router.post('/:id/use-order', async (req, res) => {
 
     if (error) throw error;
 
-    // ✅ Notification si plus de commandes
     if (data.remaining_orders === 0) {
       await createNotification({
         userId: subscription.user_id,
@@ -361,7 +349,6 @@ router.post('/:id/use-order', async (req, res) => {
       });
     }
 
-    // ✅ Notification du décompte
     if (data.remaining_orders > 0) {
       await createNotification({
         userId: subscription.user_id,
@@ -392,7 +379,6 @@ router.post('/:id/preferences', async (req, res) => {
     const { preferred_days, preferred_time } = req.body;
     const userId = req.user.id;
 
-    // ✅ Vérifier que l'abonnement appartient à l'utilisateur
     const { data: subscription, error: subError } = await supabase
       .from('abonnements')
       .select('user_id')
@@ -404,7 +390,6 @@ router.post('/:id/preferences', async (req, res) => {
       return res.status(403).json({ error: 'Non autorisé' });
     }
 
-    // ✅ Enregistrer les préférences
     const { data, error } = await supabase
       .from('subscription_preferences')
       .upsert({
@@ -419,7 +404,6 @@ router.post('/:id/preferences', async (req, res) => {
 
     if (error) throw error;
 
-    // ✅ Mettre à jour l'abonnement avec les préférences
     await supabase
       .from('abonnements')
       .update({ 
@@ -428,7 +412,6 @@ router.post('/:id/preferences', async (req, res) => {
       })
       .eq('id', id);
 
-    // ✅ Générer le planning avec les nouvelles préférences
     await supabase.rpc('generate_auto_schedule', { p_subscription_id: id });
 
     res.json({ success: true, preferences: data });
@@ -446,7 +429,6 @@ router.get('/:id/preferences', async (req, res) => {
     const { id } = req.params;
     const userId = req.user.id;
 
-    // ✅ Vérifier que l'abonnement appartient à l'utilisateur
     const { data: subscription, error: subError } = await supabase
       .from('abonnements')
       .select('user_id')
@@ -481,7 +463,6 @@ router.post('/:id/generate-schedule', async (req, res) => {
     const { id } = req.params;
     const userId = req.user.id;
 
-    // ✅ Vérifier que l'abonnement appartient à l'utilisateur
     const { data: subscription, error: subError } = await supabase
       .from('abonnements')
       .select('*')
@@ -493,14 +474,12 @@ router.post('/:id/generate-schedule', async (req, res) => {
       return res.status(403).json({ error: 'Non autorisé' });
     }
 
-    // ✅ Appeler la fonction de génération de planning
     const { data, error } = await supabase.rpc('generate_auto_schedule', { 
       p_subscription_id: id 
     });
 
     if (error) throw error;
 
-    // ✅ Récupérer le planning généré
     const { data: planning, error: planningError } = await supabase
       .from('visite_planning')
       .select('*')
@@ -528,7 +507,6 @@ router.get('/:id/planning', async (req, res) => {
     const { id } = req.params;
     const userId = req.user.id;
 
-    // ✅ Vérifier que l'abonnement appartient à l'utilisateur
     const { data: subscription, error: subError } = await supabase
       .from('abonnements')
       .select('user_id')
@@ -566,7 +544,6 @@ router.delete('/planning/:planningId', async (req, res) => {
     const { planningId } = req.params;
     const userId = req.user.id;
 
-    // ✅ Vérifier que la visite planifiée appartient à l'utilisateur
     const { data: planning, error: fetchError } = await supabase
       .from('visite_planning')
       .select(`
@@ -581,7 +558,6 @@ router.delete('/planning/:planningId', async (req, res) => {
       return res.status(403).json({ error: 'Non autorisé' });
     }
 
-    // ✅ Supprimer la visite planifiée
     const { error } = await supabase
       .from('visite_planning')
       .delete()
@@ -597,14 +573,13 @@ router.delete('/planning/:planningId', async (req, res) => {
 });
 
 // =============================================
-// ✅ RENOUVELER UN ABONNEMENT (ACTION MANUELLE)
+// RENOUVELER UN ABONNEMENT (ACTION MANUELLE)
 // =============================================
 router.post('/:id/renew', async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.id;
 
-    // ✅ Vérifier que l'abonnement appartient à l'utilisateur
     const { data: subscription, error: subError } = await supabase
       .from('abonnements')
       .select('*, offre:offres(*)')
@@ -617,7 +592,6 @@ router.post('/:id/renew', async (req, res) => {
       return res.status(404).json({ error: 'Abonnement non trouvé' });
     }
 
-    // ✅ Vérifier que l'abonnement est expiré ou sur le point d'expirer
     const endDate = new Date(subscription.end_date);
     const today = new Date();
     if (endDate > today) {
@@ -627,29 +601,27 @@ router.post('/:id/renew', async (req, res) => {
       });
     }
 
-    // ✅ Calculer la nouvelle date de fin
     const offre = subscription.offre;
     const newStartDate = new Date();
     const newEndDate = new Date();
 
-    switch (offre.type) {
-      case 'mensuelle':
-        newEndDate.setMonth(newEndDate.getMonth() + 1);
-        break;
-      case 'trimestrielle':
-        newEndDate.setMonth(newEndDate.getMonth() + 3);
-        break;
-      case 'semestrielle':
-        newEndDate.setMonth(newEndDate.getMonth() + 6);
-        break;
-      case 'annuelle':
-        newEndDate.setFullYear(newEndDate.getFullYear() + 1);
-        break;
-      default:
-        newEndDate.setMonth(newEndDate.getMonth() + 1);
+    let durationDays = offre.duration_days || 30;
+
+    if (offre.category === 'maman_bebe') {
+      const nameLower = offre.name.toLowerCase();
+      if (nameLower.includes('essentiel')) {
+        durationDays = 14; // 2 semaines
+      } else if (nameLower.includes('confort')) {
+        durationDays = 21; // 3 semaines
+      } else if (nameLower.includes('sérénité')) {
+        durationDays = 28; // 4 semaines
+      } else if (nameLower.includes('privilège')) {
+        durationDays = 35; // 5 semaines
+      }
     }
 
-    // ✅ Mettre à jour l'abonnement
+    newEndDate.setDate(newStartDate.getDate() + durationDays);
+
     const { data, error } = await supabase
       .from('abonnements')
       .update({
@@ -673,10 +645,9 @@ router.post('/:id/renew', async (req, res) => {
 
     if (error) throw error;
 
-    // ✅ Notification
     await createNotification({
       userId,
-      title: '🔄 Abonnement renouvelé',
+      title: '❌ Abonnement renouvelé',
       body: `Votre abonnement ${offre.name} a été renouvelé jusqu'au ${newEndDate.toLocaleDateString('fr-FR')}.`,
       type: 'paiement',
       data: { subscription_id: data.id },
@@ -697,7 +668,7 @@ router.post('/:id/renew', async (req, res) => {
 });
 
 // =============================================
-// ✅ ANNULER L'AUTO-RENOUVELLEMENT
+// ANNULER L'AUTO-RENOUVELLEMENT
 // =============================================
 router.post('/:id/cancel-auto-renew', async (req, res) => {
   try {
