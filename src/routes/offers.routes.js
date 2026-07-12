@@ -1,5 +1,6 @@
 // 📁 backend/src/routes/offers.routes.js
- 
+// ✅ OFFRES D'ABONNEMENTS : CALCUL DE PÉRIODE DYNAMIQUE SELON LA DURÉE RÉELLE POUR ÉVITER LES CONFLITS DE CONTRAINTES SQL
+
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../services/supabase.service');
@@ -7,11 +8,47 @@ const authMiddleware = require('../middleware/auth.middleware');
 const { roleMiddleware } = require('../middleware/role.middleware');
 
 // ============================================================
+// HELPER : CARTOGRAPHIE ET TRADUCTION DE L'OFFRE DEPUIS LA BASE
+// ============================================================
+const mapOfferFromDb = (item) => {
+  let period = item.type === 'ponctuelle' ? 'intervention' : (item.type || 'mois');
+  
+  // ✅ Traduire dynamiquement la période d'affichage selon les jours de validité réels
+  if (item.category === 'maman_bebe') {
+    if (item.duration_days === 14) period = '2 semaines';
+    else if (item.duration_days === 21) period = '3 semaines';
+    else if (item.duration_days === 28) period = '4 semaines';
+    else if (item.duration_days === 35) period = '5 semaines';
+  }
+
+  return {
+    id: item.id,
+    name: item.name,
+    category: item.category,
+    type: item.type || 'mensuelle',
+    description: item.description,
+    price: item.price || 0,
+    period: period, // ✅ Période dynamique (2, 3, 4, 5 semaines) pour l'affichage
+    visitsPerWeek: item.visits_per_week || null,
+    durationDays: item.duration_days || null,
+    features: item.features || [],
+    badge: item.badge || null,
+    is_active: item.is_active ?? true,
+    is_public: item.is_public ?? true,
+    display_order: item.display_order || 0,
+    visits_per_month: item.visits_per_month || null,
+    total_visits: item.total_visits || null,
+    total_orders: item.total_orders || null,
+    created_at: item.created_at,
+    updated_at: item.updated_at,
+  };
+};
+
+// ============================================================
 // GET /api/offers - Récupérer toutes les offres actives
 // ============================================================
 router.get('/', async (req, res) => {
   try {
-    // ✅ Récupérer TOUTES les offres actives
     const { data, error } = await supabase
       .from('offres')
       .select('*')
@@ -20,28 +57,7 @@ router.get('/', async (req, res) => {
 
     if (error) throw error;
 
-    // ✅ Transformer les données pour le frontend
-    const offers = (data || []).map((item) => ({
-      id: item.id,
-      name: item.name,
-      category: item.category,
-      type: item.type || 'mensuelle',
-      description: item.description,
-      price: item.price || 0,
-      period: item.type === 'ponctuelle' ? 'intervention' : (item.type || 'mois'),
-      visitsPerWeek: item.visits_per_week || null,
-      durationDays: item.duration_days || null,
-      features: item.features || [],
-      badge: item.badge || null,
-      is_active: item.is_active ?? true,
-      is_public: item.is_public ?? true,
-      display_order: item.display_order || 0,
-      visits_per_month: item.visits_per_month || null,
-      total_visits: item.total_visits || null,
-      total_orders: item.total_orders || null,
-      created_at: item.created_at,
-      updated_at: item.updated_at,
-    }));
+    const offers = (data || []).map(item => mapOfferFromDb(item));
 
     res.json({ 
       success: true, 
@@ -71,19 +87,16 @@ router.get('/categories', async (req, res) => {
       });
     }
 
-    // ✅ Filtrer par catégorie
     let query = supabase
       .from('offres')
       .select('*')
       .eq('is_active', true);
 
     if (category === 'ponctuelle') {
-      // ✅ Offres ponctuelles
       query = query.or(`category.eq.ponctuelle, type.eq.ponctuelle`);
     } else if (category === 'senior' || category === 'maman_bebe' || category === 'pack_confort') {
       query = query.eq('category', category);
     } else {
-      // ✅ Toutes les catégories sauf ponctuelle (pour l'onglet "all")
       query = query.neq('category', 'ponctuelle').neq('type', 'ponctuelle');
     }
 
@@ -91,27 +104,7 @@ router.get('/categories', async (req, res) => {
 
     if (error) throw error;
 
-    const offers = (data || []).map((item) => ({
-      id: item.id,
-      name: item.name,
-      category: item.category,
-      type: item.type || 'mensuelle',
-      description: item.description,
-      price: item.price || 0,
-      period: item.type === 'ponctuelle' ? 'intervention' : (item.type || 'mois'),
-      visitsPerWeek: item.visits_per_week || null,
-      durationDays: item.duration_days || null,
-      features: item.features || [],
-      badge: item.badge || null,
-      is_active: item.is_active ?? true,
-      is_public: item.is_public ?? true,
-      display_order: item.display_order || 0,
-      visits_per_month: item.visits_per_month || null,
-      total_visits: item.total_visits || null,
-      total_orders: item.total_orders || null,
-      created_at: item.created_at,
-      updated_at: item.updated_at,
-    }));
+    const offers = (data || []).map(item => mapOfferFromDb(item));
 
     res.json({
       success: true,
@@ -150,29 +143,7 @@ router.get('/:id', async (req, res) => {
       throw error;
     }
 
-    const offer = {
-      id: data.id,
-      name: data.name,
-      category: data.category,
-      type: data.type || 'mensuelle',
-      description: data.description,
-      price: data.price || 0,
-      period: data.type === 'ponctuelle' ? 'intervention' : (data.type || 'mois'),
-      visitsPerWeek: data.visits_per_week || null,
-      durationDays: data.duration_days || null,
-      features: data.features || [],
-      badge: data.badge || null,
-      is_active: data.is_active ?? true,
-      is_public: data.is_public ?? true,
-      display_order: data.display_order || 0,
-      visits_per_month: data.visits_per_month || null,
-      total_visits: data.total_visits || null,
-      total_orders: data.total_orders || null,
-      created_at: data.created_at,
-      updated_at: data.updated_at,
-    };
-
-    res.json({ success: true, data: offer });
+    res.json({ success: true, data: mapOfferFromDb(data) });
   } catch (error) {
     console.error('❌ GET /offers/:id error:', error);
     res.status(500).json({ 
@@ -205,27 +176,7 @@ router.get('/type/:type', async (req, res) => {
 
     if (error) throw error;
 
-    const offers = (data || []).map((item) => ({
-      id: item.id,
-      name: item.name,
-      category: item.category,
-      type: item.type || 'mensuelle',
-      description: item.description,
-      price: item.price || 0,
-      period: item.type === 'ponctuelle' ? 'intervention' : (item.type || 'mois'),
-      visitsPerWeek: item.visits_per_week || null,
-      durationDays: item.duration_days || null,
-      features: item.features || [],
-      badge: item.badge || null,
-      is_active: item.is_active ?? true,
-      is_public: item.is_public ?? true,
-      display_order: item.display_order || 0,
-      visits_per_month: item.visits_per_month || null,
-      total_visits: item.total_visits || null,
-      total_orders: item.total_orders || null,
-      created_at: item.created_at,
-      updated_at: item.updated_at,
-    }));
+    const offers = (data || []).map(item => mapOfferFromDb(item));
 
     res.json({
       success: true,
@@ -293,7 +244,7 @@ router.get('/ponctual', async (req, res) => {
 });
 
 // ============================================================
-// POST /api/offers - Créer une nouvelle offre (Admin/Coord uniquement)
+// POST /api/offers - Créer une nouvelle offre
 // ============================================================
 router.post('/', authMiddleware, roleMiddleware(['admin', 'coordinator']), async (req, res) => {
   try {
@@ -315,7 +266,6 @@ router.post('/', authMiddleware, roleMiddleware(['admin', 'coordinator']), async
       total_orders,
     } = req.body;
 
-    // ✅ Validation
     if (!name || !category) {
       return res.status(400).json({
         success: false,
@@ -323,9 +273,7 @@ router.post('/', authMiddleware, roleMiddleware(['admin', 'coordinator']), async
       });
     }
 
-    // ✅ Validation pour les offres ponctuelles
     if (category === 'ponctuelle' || type === 'ponctuelle') {
-      // Les offres ponctuelles ont des valeurs par défaut
       const ponctualData = {
         name,
         category: 'ponctuelle',
@@ -355,30 +303,10 @@ router.post('/', authMiddleware, roleMiddleware(['admin', 'coordinator']), async
       return res.status(201).json({
         success: true,
         message: 'Offre ponctuelle créée avec succès',
-        data: {
-          id: data.id,
-          name: data.name,
-          category: data.category,
-          type: data.type,
-          description: data.description,
-          price: data.price,
-          visits_per_week: data.visits_per_week,
-          duration_days: data.duration_days,
-          features: data.features,
-          badge: data.badge,
-          is_active: data.is_active,
-          is_public: data.is_public,
-          display_order: data.display_order,
-          visits_per_month: data.visits_per_month,
-          total_visits: data.total_visits,
-          total_orders: data.total_orders,
-          created_at: data.created_at,
-          updated_at: data.updated_at,
-        }
+        data: mapOfferFromDb(data)
       });
     }
 
-    // ✅ Offres standard (abonnements)
     const { data, error } = await supabase
       .from('offres')
       .insert({
@@ -408,26 +336,7 @@ router.post('/', authMiddleware, roleMiddleware(['admin', 'coordinator']), async
     res.status(201).json({
       success: true,
       message: 'Offre créée avec succès',
-      data: {
-        id: data.id,
-        name: data.name,
-        category: data.category,
-        type: data.type,
-        description: data.description,
-        price: data.price,
-        visits_per_week: data.visits_per_week,
-        duration_days: data.duration_days,
-        features: data.features,
-        badge: data.badge,
-        is_active: data.is_active,
-        is_public: data.is_public,
-        display_order: data.display_order,
-        visits_per_month: data.visits_per_month,
-        total_visits: data.total_visits,
-        total_orders: data.total_orders,
-        created_at: data.created_at,
-        updated_at: data.updated_at,
-      }
+      data: mapOfferFromDb(data)
     });
   } catch (error) {
     console.error('❌ POST /offers error:', error);
@@ -439,7 +348,7 @@ router.post('/', authMiddleware, roleMiddleware(['admin', 'coordinator']), async
 });
 
 // ============================================================
-// PUT /api/offers/:id - Modifier une offre (Admin/Coord uniquement)
+// PUT /api/offers/:id - Modifier une offre
 // ============================================================
 router.put('/:id', authMiddleware, roleMiddleware(['admin', 'coordinator']), async (req, res) => {
   try {
@@ -462,7 +371,6 @@ router.put('/:id', authMiddleware, roleMiddleware(['admin', 'coordinator']), asy
       total_orders,
     } = req.body;
 
-    // ✅ Vérifier que l'offre existe
     const { data: existing, error: checkError } = await supabase
       .from('offres')
       .select('id')
@@ -510,26 +418,7 @@ router.put('/:id', authMiddleware, roleMiddleware(['admin', 'coordinator']), asy
     res.json({
       success: true,
       message: 'Offre mise à jour avec succès',
-      data: {
-        id: data.id,
-        name: data.name,
-        category: data.category,
-        type: data.type,
-        description: data.description,
-        price: data.price,
-        visits_per_week: data.visits_per_week,
-        duration_days: data.duration_days,
-        features: data.features,
-        badge: data.badge,
-        is_active: data.is_active,
-        is_public: data.is_public,
-        display_order: data.display_order,
-        visits_per_month: data.visits_per_month,
-        total_visits: data.total_visits,
-        total_orders: data.total_orders,
-        created_at: data.created_at,
-        updated_at: data.updated_at,
-      }
+      data: mapOfferFromDb(data)
     });
   } catch (error) {
     console.error('❌ PUT /offers/:id error:', error);
@@ -541,13 +430,12 @@ router.put('/:id', authMiddleware, roleMiddleware(['admin', 'coordinator']), asy
 });
 
 // ============================================================
-// DELETE /api/offers/:id - Supprimer une offre (Admin uniquement)
+// DELETE /api/offers/:id - Supprimer une offre
 // ============================================================
 router.delete('/:id', authMiddleware, roleMiddleware(['admin']), async (req, res) => {
   try {
     const { id } = req.params;
 
-    // ✅ Vérifier que l'offre n'est pas utilisée par des abonnements actifs
     const { data: subscriptions, error: subError } = await supabase
       .from('abonnements')
       .select('id')
@@ -564,7 +452,6 @@ router.delete('/:id', authMiddleware, roleMiddleware(['admin']), async (req, res
       });
     }
 
-    // ✅ Soft delete : désactiver plutôt que supprimer
     const { error } = await supabase
       .from('offres')
       .update({ 
@@ -589,11 +476,10 @@ router.delete('/:id', authMiddleware, roleMiddleware(['admin']), async (req, res
 });
 
 // ============================================================
-// POST /api/offers/sync - Synchroniser les offres (Admin uniquement)
+// POST /api/offers/sync - Synchroniser les offres
 // ============================================================
 router.post('/sync', authMiddleware, roleMiddleware(['admin']), async (req, res) => {
   try {
-    // ✅ Récupérer toutes les offres (actives et inactives)
     const { data, error } = await supabase
       .from('offres')
       .select('*')
@@ -601,27 +487,7 @@ router.post('/sync', authMiddleware, roleMiddleware(['admin']), async (req, res)
 
     if (error) throw error;
 
-    const offers = (data || []).map((item) => ({
-      id: item.id,
-      name: item.name,
-      category: item.category,
-      type: item.type || 'mensuelle',
-      description: item.description,
-      price: item.price || 0,
-      period: item.type === 'ponctuelle' ? 'intervention' : (item.type || 'mois'),
-      visitsPerWeek: item.visits_per_week || null,
-      durationDays: item.duration_days || null,
-      features: item.features || [],
-      badge: item.badge || null,
-      is_active: item.is_active ?? true,
-      is_public: item.is_public ?? true,
-      display_order: item.display_order || 0,
-      visits_per_month: item.visits_per_month || null,
-      total_visits: item.total_visits || null,
-      total_orders: item.total_orders || null,
-      created_at: item.created_at,
-      updated_at: item.updated_at,
-    }));
+    const offers = (data || []).map(item => mapOfferFromDb(item));
 
     res.json({
       success: true,
