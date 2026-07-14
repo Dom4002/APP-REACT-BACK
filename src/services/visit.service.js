@@ -226,7 +226,7 @@ const createVisit = async ({
     if (wizardChoice === 'without_aidant') {
       finalAidantId = null;
       if (!requiresPayment) {
-        status = VISIT_STATUS.WAITING_AIDANT;  
+        status = VISIT_STATUS.WAITING_AIDANT; // Attente d'assignation par l'administration
       }
     }
 
@@ -377,7 +377,7 @@ const createVisit = async ({
       subscription_used: !!subscriptionId,
       waiting_for_aidant: status === VISIT_STATUS.WAITING_AIDANT,
     };
-  } catch (error) {  
+  } catch (error) { // 🟢 CORRECTIF : Plus de token :any ici
     console.error('❌ createVisit error:', error);
     return {
       success: false,
@@ -517,7 +517,7 @@ const assignAidantToVisit = async ({
       is_permanent: isPermanent,
       forced: force || false,
     };
-  } catch (error) {  
+  } catch (error) { // 🟢 CORRECTIF : Plus de token :any ici
     console.error('❌ assignAidantToVisit error:', error);
     return { success: false, error: error.message, code: 'UNKNOWN_ERROR' };
   }
@@ -588,7 +588,7 @@ const validateVisitWithoutAidant = async ({
     if (updateError) return { success: false, error: updateError.message, code: 'UPDATE_ERROR' };
 
     return { success: true, visit: updatedVisit, assigned: false };
-  } catch (error) {  
+  } catch (error) { // 🟢 CORRECTIF : Plus de token :any ici
     console.error('❌ validateVisitWithoutAidant error:', error);
     return { success: false, error: error.message, code: 'UNKNOWN_ERROR' };
   }
