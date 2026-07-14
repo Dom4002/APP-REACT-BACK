@@ -1,5 +1,6 @@
 // 📁 backend/src/routes/visit.routes.js
- 
+// ✅ ROUTEUR VISITES COMPLET : CHARGEMENT ET ASSIGNATION DES AIDANTS SÉCURISÉS CONTRE LES ERREURS 403 (NODE.JS CONFORME)
+
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../services/supabase.service');
@@ -580,7 +581,7 @@ router.post('/', async (req, res) => {
       subscription_used: result.subscription_used,
       waiting_for_aidant: result.waiting_for_aidant,
     });
-  } catch (error: any) {
+  } catch (error) {
     console.error('❌ Erreur création visite (route):', error);
 
     // ============================================================
