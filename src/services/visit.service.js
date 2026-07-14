@@ -79,7 +79,8 @@ const createVisit = async ({
   coordinatorId = null,
   address = null,                     
   latitude = null,                    
-  longitude = null,                   
+  longitude = null, 
+  metadata = {},  
 }) => {
   try {
     const finalTargetType = targetType || (patientId ? VISIT_TYPES.PATIENT : VISIT_TYPES.PERSONAL);
@@ -230,6 +231,7 @@ const createVisit = async ({
       }
     }
 
+
     // 3. Créer la visite en base de données
     const visitData = {
       user_id: finalUserId,
@@ -265,7 +267,9 @@ const createVisit = async ({
       assigned_by_admin: ['admin', 'coordinator'].includes(profile?.role),
       admin_assigned_at: ['admin', 'coordinator'].includes(profile?.role) ? new Date().toISOString() : null,
       waiting_for_aidant_since: status === VISIT_STATUS.WAITING_AIDANT ? new Date().toISOString() : null,
-      metadata: {
+      
+       metadata: {
+        ...metadata,  
         created_by: userId,
         created_at: new Date().toISOString(),
         is_ponctual: isPonctual || requiresPayment,
@@ -308,6 +312,7 @@ const createVisit = async ({
       `)
       .single();
 
+ 
     if (error) {
       console.error('❌ createVisit error:', error);
       return {
