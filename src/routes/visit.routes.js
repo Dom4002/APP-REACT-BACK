@@ -5,6 +5,7 @@ const express = require('express');
 const router = express.Router();
 const { supabase } = require('../services/supabase.service');
 const authMiddleware = require('../middleware/auth.middleware');
+const { getCoordinatesFromAddress } = require('../services/maps.service');
 const { roleMiddleware } = require('../middleware/role.middleware');
 const { createNotification } = require('../services/notification.service');
 const { 
@@ -355,6 +356,15 @@ router.get('/drafts/my', async (req, res) => {
   }
 });
 
+
+
+
+router.get('/geocode', async (req, res) => {
+  const { address } = req.query;
+  const coords = await getCoordinatesFromAddress(address);
+  if (coords) return res.json({ success: true, data: coords });
+  res.status(404).json({ success: false, error: 'Adresse non trouvée' });
+});
 
 // =============================================
 // 2️⃣ ROUTES DE MANIPULATION D'ÉCRITURE (ROUTE GENERIQUE '/')
