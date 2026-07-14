@@ -1,6 +1,5 @@
 // 📁 backend/src/routes/visit.routes.js
-// ✅ ROUTEUR VISITES COMPLET : CHARGEMENT ET ASSIGNATION DES AIDANTS SÉCURISÉS CONTRE LES ERREURS 403
-
+ 
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../services/supabase.service');
@@ -173,7 +172,7 @@ router.get('/pending-aidant', roleMiddleware(['admin', 'coordinator']), async (r
   }
 });
 
-// ✅ 1.3 RÉCUPÉRER LES AIDANTS DISPONIBLES (RÉSOLUTION DE SÉCURITÉ POUR ADMIN & FAMILLE)
+// ✅ 1.3 RÉCUPÉRER LES AIDANTS DISPONIBLES (RÉSOLUTION DE SÉCURITÉ POUR ADMIN & FAMILLE - EVITE LES ERREURS 403)
 router.get('/available-aidants', async (req, res) => {
   try {
     const isAdmin = ['admin', 'coordinator'].includes(req.profile.role);
@@ -193,7 +192,7 @@ router.get('/available-aidants', async (req, res) => {
     // Si admin et qu'aucun familyId n'est fourni, essayer de le trouver depuis la visite ou le patient s'ils sont passés en paramètre
     if (isAdmin && !familyId && req.query.targetId) {
       if (req.query.targetType === 'patient') {
-        const { data: link } = await supabase
+        const { data: link = null } = await supabase
           .from('patient_family_links')
           .select('family_id')
           .eq('patient_id', req.query.targetId)
@@ -273,7 +272,7 @@ router.get('/wizard-options', async (req, res) => {
 
     if (isFamily) {
       if (targetType === 'patient') {
-        const { data: link } = await supabase
+        const { data: link = null } = await supabase
           .from('patient_family_links')
           .select('id')
           .eq('family_id', userId)
@@ -454,7 +453,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-// ✅ 2.2 CRÉER UNE VISITE (S'appuie sur le service unifié visit.service.js)
+// ✅ 2.2 CRÉER UNE VISITE
 router.post('/', async (req, res) => {
   try {
     const { user, profile } = req;
@@ -473,9 +472,9 @@ router.post('/', async (req, res) => {
       aidant_id = null,
       wizard_choice = null,
       selected_aidant_id = null,
-      address = null,                     // ✅ EXTRACT ADRESSE
-      latitude = null,                    // ✅ EXTRACT GPS LAT
-      longitude = null,                   // ✅ EXTRACT GPS LNG
+      address = null,                     
+      latitude = null,                    
+      longitude = null,                   
     } = req.body;
 
     const canCreate = ['admin', 'coordinator'].includes(profile.role) || profile.role === 'family';
@@ -520,7 +519,7 @@ router.post('/', async (req, res) => {
     }
 
     if (profile.role === 'family' && finalPatientId) {
-      const { data: link } = await supabase
+      const { data: link = null } = await supabase
         .from('patient_family_links')
         .select('patient_id')
         .eq('family_id', user.id)
@@ -552,9 +551,9 @@ router.post('/', async (req, res) => {
       selectedAidantId: selected_aidant_id || null,
       profile: profile,
       coordinatorId: ['admin', 'coordinator'].includes(profile.role) ? user.id : null,
-      address: address || null,              // ✅ INJECTION ADRESSE DANS LE SERVICE
-      latitude: latitude || null,            // ✅ INJECTION LATITUDE DANS LE SERVICE
-      longitude: longitude || null,          // ✅ INJECTION LONGITUDE DANS LE SERVICE
+      address: address || null,              
+      latitude: latitude || null,            
+      longitude: longitude || null,          
     });
 
     if (!result.success) {
@@ -581,8 +580,35 @@ router.post('/', async (req, res) => {
       subscription_used: result.subscription_used,
       waiting_for_aidant: result.waiting_for_aidant,
     });
-  } catch (error) {
+  } catch (error: any) {
     console.error('❌ Erreur création visite (route):', error);
+
+    // ============================================================
+    // ✅ CORRECTIF DE SÉCURITÉ WIZARD : Interception de l'erreur d'aidants indisponibles
+    // ============================================================
+    if (error.message === 'Aucun aidant disponible' || error.message?.includes('Aucun aidant disponible')) {
+      return res.status(400).json({
+        success: false,
+        code: 'WIZARD_REQUIRED', // Redirige proprement le client sur l'ouverture de l'IHM Wizard
+        error: 'Aucun aidant disponible pour ce proche dans votre zone actuellement.',
+        wizard: {
+          hasAidant: false,
+          hasAvailableAidants: false,
+          aidants: [],
+          options: [
+            {
+              type: 'without_aidant',
+              label: '⚡ Planifier sans aidant',
+              description: 'L\'administration de Santé Plus affectera un aidant qualifié à cette visite manuellement en coulisses.',
+              quota: 0
+            }
+          ],
+          canProceed: true,
+          allFull: true
+        }
+      });
+    }
+
     res.status(500).json({ error: error.message });
   }
 });
@@ -627,9 +653,9 @@ router.get('/:id', async (req, res) => {
         hasAccess = !!links;
       }
     } else if (profile.role === 'aidant') {
-      const entrantId = await getAidantIdFromUserId(user.id);
-      if (entrantId) {
-        hasAccess = visit.aidant_id === entrantId;
+      const aidantId = await getAidantIdFromUserId(user.id);
+      if (aidantId) {
+        hasAccess = visit.aidant_id === aidantId;
       }
     }
 
