@@ -1,5 +1,5 @@
 // 📁 backend/src/routes/visit.routes.js
-// ✅ ROUTEUR VISITES COMPLET : INTEGRATION DES COLONNES ADRESSE ET GPS POUR LES VISITES PROCHES ET PERSONNELLES
+// ✅ ROUTEUR VISITES COMPLET : CHARGEMENT ET ASSIGNATION DES AIDANTS SÉCURISÉS CONTRE LES ERREURS 403
 
 const express = require('express');
 const router = express.Router();
@@ -173,24 +173,69 @@ router.get('/pending-aidant', roleMiddleware(['admin', 'coordinator']), async (r
   }
 });
 
-// ✅ 1.3 RÉCUPÉRER LES AIDANTS DISPONIBLES POUR UNE FAMILLE
+// ✅ 1.3 RÉCUPÉRER LES AIDANTS DISPONIBLES (RÉSOLUTION DE SÉCURITÉ POUR ADMIN & FAMILLE)
 router.get('/available-aidants', async (req, res) => {
   try {
-    const userId = req.user.id;
-    const { targetType, targetId } = req.query;
+    const isAdmin = ['admin', 'coordinator'].includes(req.profile.role);
+    const isFamily = req.profile.role === 'family';
 
-    if (req.profile.role !== 'family') {
+    // Seuls les familles, admins et coordinateurs peuvent chercher des aidants
+    if (!isFamily && !isAdmin) {
       return res.status(403).json({
         success: false,
-        error: 'Accès réservé aux familles',
+        error: 'Accès non autorisé',
       });
     }
 
-    const aidants = await getAvailableAidantsForFamily(userId, {
-      zone: req.query.zone,
-      specialty: req.query.specialty,
-      minRating: req.query.minRating ? parseFloat(req.query.minRating) : undefined,
-    });
+    // Déterminer le familyId cible (l'identité du foyer à proximité)
+    let familyId = isFamily ? req.user.id : (req.query.familyId || null);
+
+    // Si admin et qu'aucun familyId n'est fourni, essayer de le trouver depuis la visite ou le patient s'ils sont passés en paramètre
+    if (isAdmin && !familyId && req.query.targetId) {
+      if (req.query.targetType === 'patient') {
+        const { data: link } = await supabase
+          .from('patient_family_links')
+          .select('family_id')
+          .eq('patient_id', req.query.targetId)
+          .maybeSingle();
+        if (link) familyId = link.family_id;
+      } else {
+        familyId = req.query.targetId; // C'est directement le compte personnel
+      }
+    }
+
+    let aidants = [];
+
+    // Si on a identifié un foyer, requêter les aidants disponibles de confiance
+    if (familyId) {
+      aidants = await getAvailableAidantsForFamily(familyId, {
+        zone: req.query.zone,
+        specialty: req.query.specialty,
+        minRating: req.query.minRating ? parseFloat(req.query.minRating) : undefined,
+      });
+    } else {
+      // Fallback d'administration : Si pas d'identifiant de foyer résolu, renvoyer tous les aidants certifiés actifs
+      const { data: aidantsData } = await supabase
+        .from('aidants')
+        .select('*')
+        .eq('status', 'approved')
+        .eq('is_verified', true);
+
+      const userIds = (aidantsData || []).map(a => a.user_id).filter(Boolean);
+      let profilesMap = {};
+      if (userIds.length > 0) {
+        const { data: profiles } = await supabase
+          .from('profiles')
+          .select('id, full_name, email, phone, avatar_url')
+          .in('id', userIds);
+        if (profiles) profilesMap = profiles.reduce((acc, p) => ({ ...acc, [p.id]: p }), {});
+      }
+
+      aidants = (aidantsData || []).map(a => ({
+        ...a,
+        user: a.user_id ? profilesMap[a.user_id] || null : null,
+      }));
+    }
 
     res.json({
       success: true,
@@ -345,9 +390,9 @@ router.get('/', async (req, res) => {
         query = query.eq('user_id', user.id);
       }
     } else if (profile.role === 'aidant') {
-      const aidantId = await getAidantIdFromUserId(user.id);
-      if (aidantId) {
-        query = query.eq('aidant_id', aidantId);
+      const entrantId = await getAidantIdFromUserId(user.id);
+      if (entrantId) {
+        query = query.eq('aidant_id', entrantId);
       } else {
         return res.json([]);
       }
@@ -582,9 +627,9 @@ router.get('/:id', async (req, res) => {
         hasAccess = !!links;
       }
     } else if (profile.role === 'aidant') {
-      const aidantId = await getAidantIdFromUserId(user.id);
-      if (aidantId) {
-        hasAccess = visit.aidant_id === aidantId;
+      const entrantId = await getAidantIdFromUserId(user.id);
+      if (entrantId) {
+        hasAccess = visit.aidant_id === entrantId;
       }
     }
 
@@ -1027,7 +1072,7 @@ router.post('/:id/refuse', async (req, res) => {
     const { data: admins } = await supabase
       .from('profiles')
       .select('id')
-      .in('role', ['admin', 'coordinator']);
+      .in('role', ['coordinator', 'admin']);
 
     if (admins) {
       for (const admin of admins) {
@@ -1123,8 +1168,8 @@ router.post('/:id/start', async (req, res) => {
     const now = new Date().toISOString();
     const { lat, lng } = req.body;
 
-    const aidantId = await getAidantIdFromUserId(user.id);
-    if (!aidantId) {
+    const entrantId = await getAidantIdFromUserId(user.id);
+    if (!entrantId) {
       return res.status(404).json({ error: 'Aidant non trouvé' });
     }
 
@@ -1136,7 +1181,7 @@ router.post('/:id/start', async (req, res) => {
 
     if (fetchError) throw fetchError;
 
-    if (visit.aidant_id !== aidantId) {
+    if (visit.aidant_id !== entrantId) {
       return res.status(403).json({ error: 'Vous n\'êtes pas assigné à cette visite' });
     }
 
@@ -1235,8 +1280,8 @@ router.post('/:id/complete', async (req, res) => {
     } = req.body;
     const now = new Date().toISOString();
 
-    const aidantId = await getAidantIdFromUserId(user.id);
-    if (!aidantId) {
+    const entrantId = await getAidantIdFromUserId(user.id);
+    if (!entrantId) {
       return res.status(404).json({ error: 'Aidant non trouvé' });
     }
 
@@ -1248,7 +1293,7 @@ router.post('/:id/complete', async (req, res) => {
 
     if (visitError) throw visitError;
 
-    if (visit.aidant_id !== aidantId) {
+    if (visit.aidant_id !== entrantId) {
       return res.status(403).json({ error: 'Vous n\'êtes pas assigné à cette visite' });
     }
 
@@ -1270,7 +1315,7 @@ router.post('/:id/complete', async (req, res) => {
         completed_by: user.id,
         completed_at: now,
         audio_url: audio_url || null,
-        photos: photos || [], // ✅ Sauvés en metadata pour contourner le blocage RLS de la table dédiée
+        photos: photos || [], 
         signature_url: signature_url || null,
         duration_minutes: calculatedDuration,
         end_location: lat && lng ? { lat, lng } : null,
@@ -1357,7 +1402,7 @@ router.post('/:id/complete', async (req, res) => {
     const { data: admins } = await supabase
       .from('profiles')
       .select('id')
-      .in('role', ['admin', 'coordinator']);
+      .in('role', ['coordinator', 'admin']);
 
     if (admins) {
       for (const admin of admins) {
@@ -1529,7 +1574,7 @@ router.post('/:id/cancel', async (req, res) => {
     if (!canCancel) {
       if (profile.role === 'family') {
         if (visit.patient_id) {
-          const { data: link } = await supabase
+          const { data: link = null } = await supabase
             .from('patient_family_links')
             .select('family_id')
             .eq('family_id', user.id)
@@ -1726,7 +1771,7 @@ router.post('/:id/convert-to-subscription', async (req, res) => {
       .from('visites')
       .update({
         status: 'planifiee',
-        is_draft: false, // ✅ CORRECTION CONTRAINTE POSTGRES
+        is_draft: false, 
         metadata: {
           ...(visit.metadata || {}),
           converted_from_draft: true,
