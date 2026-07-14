@@ -1,5 +1,5 @@
 // 📁 backend/src/services/visit.service.js
-// ✅ SERVICE DE VISITES COMPLET : EXTRACTION DES COMPORTEMENTS ADRESSE INDIVIDUELS ET ENREGISTREMENT GPS VISITE
+// ✅ SERVICE DE VISITES COMPLET : DESACTIVATION STRICTE DE L'ASSIGNATION AUTO ET SECURISATION WIZARD SANS CRASH
 
 const { supabase } = require('./supabase.service');
 const { createNotification } = require('./notification.service');
@@ -11,6 +11,7 @@ const {
 const {
   checkSubscriptionForVisits,
   getVisitPrice,
+  decrementVisit,
 } = require('./visitPayment.service');
 
 // ============================================================
@@ -41,7 +42,7 @@ const VISIT_TYPES = {
 const DRAFT_EXPIRY_HOURS = 24;
 
 // ============================================================
-// CRÉATION DE VISITE
+// CRÉATION DE VISITE (SANS AUCUNE ASSIGNATION AUTOMATIQUE)
 // ============================================================
 
 const createVisit = async ({
@@ -98,7 +99,7 @@ const createVisit = async ({
       paymentAmount = getVisitPrice(durationMinutes);
     }
 
-    // 2. Déterminer l'aidant à assigner
+    // 2. Déterminer l'aidant à assigner (ZÉRO ASSIGNATION AUTOMATIQUE)
     let finalAidantId = null;
     let selectedAidantIdToStore = selectedAidantId || null;
 
@@ -113,10 +114,12 @@ const createVisit = async ({
       }
     }
 
+    // Si aucun aidant n'est spécifié, vérifier s'il y a un aidant permanent assigné
     if (!finalAidantId && !selectedAidantIdToStore) {
       const targetTypeForAidant = patientId ? VISIT_TYPES.PATIENT : VISIT_TYPES.PERSONAL_ACCOUNT;
       const targetIdForAidant = patientId || finalUserId;
 
+      // Chercher l'intervenant permanent
       let foundId = await getActiveAidantForTarget(targetTypeForAidant, targetIdForAidant, familyId);
 
       if (foundId) {
@@ -129,12 +132,36 @@ const createVisit = async ({
           }
           console.log(`✅ Aidant permanent réservé: ${convertedId}`);
         }
-      } else if (profile?.role === 'family') {
-        const wizardOptions = await getVisitWizardOptions(
-          targetTypeForAidant,
-          targetIdForAidant,
-          familyId
-        );
+      } 
+      // S'il n'y a pas d'aidant permanent, et que l'utilisateur n'a pas encore fait de choix via le Wizard
+      else if (wizardChoice !== 'without_aidant') {
+        let wizardOptions = null;
+        try {
+          wizardOptions = await getVisitWizardOptions(
+            targetTypeForAidant,
+            targetIdForAidant,
+            familyId
+          );
+        } catch (wizardError) {
+          // ✅ SÉCURISATION CONTRE LE CRASH : Si getAvailableAidantsForFamily jette "Aucun aidant disponible",
+          // on construit de secours un wizard complet avec l'option de planification sans aidant de secours !
+          console.warn('⚠️ Erreur récupération options wizard, fallback sans aidant:', wizardError.message);
+          wizardOptions = {
+            hasAidant: false,
+            hasAvailableAidants: false,
+            aidants: [],
+            options: [
+              {
+                type: 'without_aidant',
+                label: '⚡ Planifier sans aidant',
+                description: 'L\'administration de Santé Plus affectera un aidant qualifié à cette visite manuellement.',
+                quota: 0
+              }
+            ],
+            canProceed: true,
+            allFull: true
+          };
+        }
 
         if (wizardOptions.allFull) {
           if (wizardChoice === 'without_aidant') {
@@ -143,7 +170,7 @@ const createVisit = async ({
           } else {
             return {
               success: false,
-              error: 'Tous les aidants sont complets (4/4). Utilisez "Planifier sans aidant" ou contactez l\'administration.',
+              error: 'Tous les aidants sont complets (4/4) ou indisponibles. Utilisez "Planifier sans aidant" ou contactez l\'administration.',
               code: 'ALL_AIDANTS_FULL',
               wizard: wizardOptions,
             };
@@ -155,7 +182,37 @@ const createVisit = async ({
             code: 'WIZARD_REQUIRED',
             wizard: wizardOptions,
           };
+        } else {
+          // Fallback ultime : Tous complets / aucun dispo
+          return {
+            success: false,
+            error: 'Aucun aidant disponible pour ce proche dans votre zone actuellement.',
+            code: 'WIZARD_REQUIRED',
+            wizard: {
+              hasAidant: false,
+              hasAvailableAidants: false,
+              aidants: [],
+              options: [
+                {
+                  type: 'without_aidant',
+                  label: '⚡ Planifier sans aidant',
+                  description: 'L\'administration de Santé Plus affectera un aidant qualifié à cette visite manuellement.',
+                  quota: 0
+                }
+              ],
+              canProceed: true,
+              allFull: true
+            }
+          };
         }
+      }
+    }
+
+    // Si l'utilisateur choisit explicitement de planifier sans aidant
+    if (wizardChoice === 'without_aidant') {
+      finalAidantId = null;
+      if (!requiresPayment) {
+        status = VISIT_STATUS.WAITING_AIDANT; // Attente d'assignation par l'administration
       }
     }
 
@@ -172,7 +229,7 @@ const createVisit = async ({
       duration_minutes: durationMinutes || 60,
       status: status,
       
-      // ✅ ALIGNEMENT EN DIRECT DES COLONNES SPÉCIFIQUES ADRESSE + GPS
+      // ALIGNEMENT EN DIRECT DES COLONNES SPÉCIFIQUES ADRESSE + GPS
       address: address || null,
       latitude: latitude || null,
       longitude: longitude || null,
@@ -307,7 +364,7 @@ const createVisit = async ({
       subscription_used: !!subscriptionId,
       waiting_for_aidant: status === VISIT_STATUS.WAITING_AIDANT,
     };
-  } catch (error) {
+  } catch (error: any) {
     console.error('❌ createVisit error:', error);
     return {
       success: false,
@@ -408,6 +465,9 @@ const assignAidantToVisit = async ({
       const targetType = visit.patient_id ? VISIT_TYPES.PATIENT : VISIT_TYPES.PERSONAL_ACCOUNT;
       const targetId = visit.patient_id || visit.user_id;
 
+      // Import dynamique d'attribution pour éviter les cycles de dépendance
+      const { assignAidantToTarget } = require('./aidantAssignment.service');
+
       await assignAidantToTarget({
         aidantUserId,
         targetType,
@@ -444,7 +504,7 @@ const assignAidantToVisit = async ({
       is_permanent: isPermanent,
       forced: force || false,
     };
-  } catch (error) {
+  } catch (error: any) {
     console.error('❌ assignAidantToVisit error:', error);
     return { success: false, error: error.message, code: 'UNKNOWN_ERROR' };
   }
@@ -515,7 +575,7 @@ const validateVisitWithoutAidant = async ({
     if (updateError) return { success: false, error: updateError.message, code: 'UPDATE_ERROR' };
 
     return { success: true, visit: updatedVisit, assigned: false };
-  } catch (error) {
+  } catch (error: any) {
     console.error('❌ validateVisitWithoutAidant error:', error);
     return { success: false, error: error.message, code: 'UNKNOWN_ERROR' };
   }
