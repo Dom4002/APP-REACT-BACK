@@ -476,7 +476,7 @@ router.post('/', async (req, res) => {
       address = null,                     
       latitude = null,                    
       longitude = null,                   
-      metadata = {}, // 🟢 CORRECTIF : Récupérer l'objet metadata envoyé par le Frontend
+      metadata = {},  
     } = req.body;
 
     const canCreate = ['admin', 'coordinator'].includes(profile.role) || profile.role === 'family';
@@ -556,7 +556,7 @@ router.post('/', async (req, res) => {
       address: address || null,              
       latitude: latitude || null,            
       longitude: longitude || null,          
-      metadata: metadata || {}, // 🟢 CORRECTIF : Transmettre l'objet au service
+      metadata: metadata || {},  
     });
 
     if (!result.success) {
