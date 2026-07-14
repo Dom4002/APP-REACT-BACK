@@ -83,6 +83,18 @@ const createVisit = async ({
   metadata = {},  
 }) => {
   try {
+
+   // ✅ AUTO-GÉOCODAGE : Si adresse fournie mais pas de GPS
+     if (address && (!latitude || !longitude)) {
+       console.log(`🌍 Géocodage auto pour: ${address}`);
+       const coords = await getCoordinatesFromAddress(address);
+       if (coords) {
+         latitude = coords.lat;
+         longitude = coords.lng;
+         console.log(`✅ Coordonnées trouvées: ${latitude}, ${longitude}`);
+       }
+     }
+   
     const finalTargetType = targetType || (patientId ? VISIT_TYPES.PATIENT : VISIT_TYPES.PERSONAL);
     const finalTargetName = targetName || (patientId ? null : profile?.full_name);
     const finalUserId = targetUserId || userId;
