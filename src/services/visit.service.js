@@ -1,6 +1,5 @@
 // 📁 backend/src/services/visit.service.js
-// ✅ SERVICE DE VISITES COMPLET : DESACTIVATION STRICTE DE L'ASSIGNATION AUTO ET SECURISATION WIZARD SANS CRASH
-
+ 
 const { supabase } = require('./supabase.service');
 const { createNotification } = require('./notification.service');
 const { 
@@ -41,6 +40,21 @@ const VISIT_TYPES = {
 
 const DRAFT_EXPIRY_HOURS = 24;
 
+// Spécification de la grille de prix ponctuelle unifiée
+const VISIT_PONCTUAL_PRICES = {
+  '30': 5000,
+  '45': 6000,
+  '60': 7500,
+  '90': 10000,
+  '120': 12500,
+};
+
+const getPonctualPrice = (durationMinutes = 60) => {
+  const price = VISIT_PONCTUAL_PRICES[durationMinutes.toString()];
+  if (price) return price;
+  return Math.round((durationMinutes / 60) * 7500);
+};
+
 // ============================================================
 // CRÉATION DE VISITE (SANS AUCUNE ASSIGNATION AUTOMATIQUE)
 // ============================================================
@@ -63,9 +77,9 @@ const createVisit = async ({
   selectedAidantId = null,
   profile,
   coordinatorId = null,
-  address = null,                     // ✅ DESTRUCTURATION ADRESSE
-  latitude = null,                    // ✅ DESTRUCTURATION GPS
-  longitude = null,                   // ✅ DESTRUCTURATION GPS
+  address = null,                     
+  latitude = null,                    
+  longitude = null,                   
 }) => {
   try {
     const finalTargetType = targetType || (patientId ? VISIT_TYPES.PATIENT : VISIT_TYPES.PERSONAL);
@@ -212,7 +226,7 @@ const createVisit = async ({
     if (wizardChoice === 'without_aidant') {
       finalAidantId = null;
       if (!requiresPayment) {
-        status = VISIT_STATUS.WAITING_AIDANT; // Attente d'assignation par l'administration
+        status = VISIT_STATUS.WAITING_AIDANT;  
       }
     }
 
@@ -229,7 +243,6 @@ const createVisit = async ({
       duration_minutes: durationMinutes || 60,
       status: status,
       
-      // ALIGNEMENT EN DIRECT DES COLONNES SPÉCIFIQUES ADRESSE + GPS
       address: address || null,
       latitude: latitude || null,
       longitude: longitude || null,
@@ -364,7 +377,7 @@ const createVisit = async ({
       subscription_used: !!subscriptionId,
       waiting_for_aidant: status === VISIT_STATUS.WAITING_AIDANT,
     };
-  } catch (error: any) {
+  } catch (error) {  
     console.error('❌ createVisit error:', error);
     return {
       success: false,
@@ -504,7 +517,7 @@ const assignAidantToVisit = async ({
       is_permanent: isPermanent,
       forced: force || false,
     };
-  } catch (error: any) {
+  } catch (error) {  
     console.error('❌ assignAidantToVisit error:', error);
     return { success: false, error: error.message, code: 'UNKNOWN_ERROR' };
   }
@@ -575,7 +588,7 @@ const validateVisitWithoutAidant = async ({
     if (updateError) return { success: false, error: updateError.message, code: 'UPDATE_ERROR' };
 
     return { success: true, visit: updatedVisit, assigned: false };
-  } catch (error: any) {
+  } catch (error) {  
     console.error('❌ validateVisitWithoutAidant error:', error);
     return { success: false, error: error.message, code: 'UNKNOWN_ERROR' };
   }
