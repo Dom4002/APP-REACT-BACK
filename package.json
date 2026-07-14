@@ -8,6 +8,7 @@
     "dev": "nodemon server.js"
   },
   "dependencies": {
+    "@googlemaps/google-maps-services-js": "^3.3.42",
     "@supabase/supabase-js": "^2.45.0",
     "axios": "^1.7.2",
     "bcryptjs": "^2.4.3",
