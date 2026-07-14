@@ -2,6 +2,7 @@
  
 const { supabase } = require('./supabase.service');
 const { createNotification } = require('./notification.service');
+const { getCoordinatesFromAddress } = require('./maps.service'); 
 const { 
   getActiveAidantForTarget,
   getAvailableAidantsForFamily,
