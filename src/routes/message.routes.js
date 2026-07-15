@@ -1,5 +1,6 @@
 // 📁 backend/src/routes/message.routes.js
- 
+// ✅ ROUTEUR MESSAGERIE COMPLET : SYMETRIE BILATERALE PARFAITE ENTRE LES FAMILLES ET LEURS AIDANTS ACTIFS
+
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../services/supabase.service');
@@ -11,15 +12,16 @@ const { asyncWrapper } = require('../utils/errorHandler');
 router.use(authMiddleware);
 
 // ============================================================
-// HELPER : ASSURER L'EXISTENCE DES CANAUX REQUIS (AUTO-GÉNÉRATION SANS CRASH)
+// HELPER : ASSURER L'EXISTENCE DES CANAUX REQUIS (AUTO-GÉNÉRATION COMPLÈTE ET BILATÉRALE)
 // ============================================================
 const ensureRequiredConversations = async (userId, role) => {
   try {
     const { data: admins } = await supabase.from('profiles').select('id').in('role', ['admin', 'coordinator']);
     const adminIds = (admins || []).map(a => a.id);
 
+    // 👨‍👩‍👦 CAS 1 : L'UTILISATEUR CONNECTÉ EST UNE FAMILLE
     if (role === 'family') {
-      // 1. Récupérer les aidants actifs rattachés à cette famille (via assignations actives)
+      // 1. Récupérer les aidants rattachés à cette famille (via assignations actives et visites)
       const { data: assignments } = await supabase
         .from('aidant_assignments')
         .select('aidant_user_id')
@@ -45,7 +47,9 @@ const ensureRequiredConversations = async (userId, role) => {
           .in('id', aidantIdsFromDb);
         if (aidantsData) {
           aidantsData.forEach(a => {
-            if (a.user_id) aidantUserIds.push(a.user_id);
+            if (a.user_id) {
+              aidantUserIds.push(a.user_id);
+            }
           });
         }
       }
@@ -85,7 +89,37 @@ const ensureRequiredConversations = async (userId, role) => {
         }
       }
 
-      // 3. Assurer une conversation directe avec l'équipe de coordination administrative
+      // 3. Assurer une conversation directe privée avec CHAQUE aidant actif
+      for (const aidantUserId of aidantUserIds) {
+        const directParticipants = [userId, aidantUserId];
+        const { data: existingDirect } = await supabase
+          .from('conversations')
+          .select('id')
+          .contains('participant_ids', directParticipants)
+          .eq('type', 'direct')
+          .maybeSingle();
+
+        if (!existingDirect) {
+          const { data: newDirect } = await supabase
+            .from('conversations')
+            .insert({
+              participant_ids: directParticipants,
+              type: 'direct',
+              last_message_at: new Date().toISOString(),
+              is_active: true,
+            })
+            .select()
+            .single();
+
+          if (newDirect) {
+            for (const pid of directParticipants) {
+              await supabase.from('conversation_participants').insert({ conversation_id: newDirect.id, user_id: pid });
+            }
+          }
+        }
+      }
+
+      // 4. Assurer une conversation directe avec l'équipe de coordination administrative
       if (adminIds.length > 0) {
         const directAdminParticipants = [userId, adminIds[0]];
         const { data: existingDirectAdmin } = await supabase
@@ -117,8 +151,66 @@ const ensureRequiredConversations = async (userId, role) => {
       }
     }
 
+    // 🦸 CAS 2 : L'UTILISATEUR CONNECTÉ EST UN AIDANT
     if (role === 'aidant') {
-      // Pour l'aidant, assurer la conversation directe avec l'équipe de coordination administrative
+      const { data: aidant } = await supabase
+        .from('aidants')
+        .select('id')
+        .eq('user_id', userId)
+        .maybeSingle();
+
+      if (aidant) {
+        // 1. Récupérer toutes les familles rattachées à cet aidant (via assignations actives et visites)
+        const { data: assignments } = await supabase
+          .from('aidant_assignments')
+          .select('target_id')
+          .eq('aidant_user_id', userId)
+          .eq('status', 'active');
+
+        const { data: visits } = await supabase
+          .from('visites')
+          .select('user_id')
+          .eq('aidant_id', aidant.id);
+
+        const familyIds = [
+          ...(assignments || []).map(a => a.target_id),
+          ...(visits || []).map(v => v.user_id)
+        ].filter(Boolean);
+
+        const uniqueFamilyIds = [...new Set(familyIds)];
+
+        // 2. Assurer une conversation directe privée avec CHAQUE famille rattachée
+        for (const familyId of uniqueFamilyIds) {
+          const directParticipants = [userId, familyId];
+          const { data: existingDirect } = await supabase
+            .from('conversations')
+            .select('id')
+            .contains('participant_ids', directParticipants)
+            .eq('type', 'direct')
+            .maybeSingle();
+
+          if (!existingDirect) {
+            const { data: newDirect } = await supabase
+              .from('conversations')
+              .insert({
+                participant_ids: directParticipants,
+                type: 'direct',
+                last_message_at: new Date().toISOString(),
+                is_active: true,
+              })
+              .select()
+              .single();
+
+            if (newDirect) {
+              for (const pid of directParticipants) {
+                await supabase.from('conversation_participants').insert({ conversation_id: newDirect.id, user_id: pid });
+              }
+            }
+          }
+        }
+      }
+
+      // 3. Assurer la conversation directe avec l'équipe de coordination administrative
       if (adminIds.length > 0) {
         const directAdminParticipants = [userId, adminIds[0]];
         const { data: existingDirectAdmin } = await supabase
@@ -163,7 +255,7 @@ router.get('/conversations', asyncWrapper(async (req, res) => {
     const userId = req.user.id;
     const userRole = req.profile.role;
 
-    // Assurer l'existence des conversations requises
+    // Assurer l'existence bilatérale des conversations requises
     await ensureRequiredConversations(userId, userRole);
 
     const { data, error } = await supabase
@@ -265,7 +357,6 @@ router.post('/conversations', asyncWrapper(async (req, res) => {
 
     for (const participantId of allParticipants) {
       if (participantId !== userId) {
-        // ✅ CORRECTIF DE SYNTAXE : Ajout des backticks (``) pour libérer l'envoi de la notification
         await createNotification({
           userId: participantId,
           title: '💬 Nouvelle conversation',
@@ -414,7 +505,7 @@ router.post('/', asyncWrapper(async (req, res) => {
       if (conv && conv.participant_ids) {
         const otherParticipants = conv.participant_ids.filter((id) => id !== userId);
         for (const participantId of otherParticipants) {
-          // ✅ CORRECTIF DE SYNTAXE REQUIS : Ajout des backticks (``) pour libérer l'envoi de la notification
+          // ✅ CORRECTIF DE SYNTAXE : Ajout des backticks (``) pour libérer l'envoi de la notification
           await createNotification({
             userId: participantId,
             title: `📨 ${sender?.full_name || 'Utilisateur'}`,
