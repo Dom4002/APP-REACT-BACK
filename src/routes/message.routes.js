@@ -1,5 +1,5 @@
 // 📁 backend/src/routes/message.routes.js
-// ✅ ROUTEUR MESSAGERIE COMPLET : SYMETRIE BILATERALE PARFAITE ENTRE LES FAMILLES ET LEURS AIDANTS ACTIFS
+// ✅ ROUTEUR MESSAGERIE COMPLET : CLOISONNEMENT STRICT ET FILTRAGE DYNAMIQUE DES CHATS PRIVÉS (SÉCURITÉ DE PRODUCTION)
 
 const express = require('express');
 const router = express.Router();
@@ -21,7 +21,7 @@ const ensureRequiredConversations = async (userId, role) => {
 
     // 👨‍👩‍👦 CAS 1 : L'UTILISATEUR CONNECTÉ EST UNE FAMILLE
     if (role === 'family') {
-      // 1. Récupérer les aidants rattachés à cette famille (via assignations actives et visites)
+      // 1. Récupérer les aidants rattachés à cette famille (via assignations actives, visites et commandes)
       const { data: assignments } = await supabase
         .from('aidant_assignments')
         .select('aidant_user_id')
@@ -33,9 +33,15 @@ const ensureRequiredConversations = async (userId, role) => {
         .select('aidant_id')
         .eq('user_id', userId);
 
+      const { data: orders } = await supabase
+        .from('commandes')
+        .select('aidant_id')
+        .eq('user_id', userId);
+
       const aidantIdsFromDb = [
         ...(assignments || []).map(a => a.aidant_user_id),
-        ...(visits || []).map(v => v.aidant_id)
+        ...(visits || []).map(v => v.aidant_id),
+        ...(orders || []).map(o => o.aidant_id) // ✅ AJOUT DES COMMANDES : Période ponctuelle prise en compte
       ].filter(Boolean);
 
       // Résoudre les user_ids de ces aidants
@@ -89,7 +95,7 @@ const ensureRequiredConversations = async (userId, role) => {
         }
       }
 
-      // 3. Assurer une conversation directe privée avec CHAQUE aidant actif
+      // 3. Assurer une conversation directe privée avec CHAQUE aidant actif/passé
       for (const aidantUserId of aidantUserIds) {
         const directParticipants = [userId, aidantUserId];
         const { data: existingDirect } = await supabase
@@ -160,7 +166,7 @@ const ensureRequiredConversations = async (userId, role) => {
         .maybeSingle();
 
       if (aidant) {
-        // 1. Récupérer toutes les familles rattachées à cet aidant (via assignations actives et visites)
+        // 1. Récupérer toutes les familles rattachées à cet aidant (via assignations actives, visites et commandes)
         const { data: assignments } = await supabase
           .from('aidant_assignments')
           .select('target_id')
@@ -172,9 +178,15 @@ const ensureRequiredConversations = async (userId, role) => {
           .select('user_id')
           .eq('aidant_id', aidant.id);
 
+        const { data: orders } = await supabase
+          .from('commandes')
+          .select('user_id')
+          .eq('aidant_id', aidant.id);
+
         const familyIds = [
           ...(assignments || []).map(a => a.target_id),
-          ...(visits || []).map(v => v.user_id)
+          ...(visits || []).map(v => v.user_id),
+          ...(orders || []).map(o => o.user_id) // ✅ AJOUT DES COMMANDES : Période ponctuelle prise en compte
         ].filter(Boolean);
 
         const uniqueFamilyIds = [...new Set(familyIds)];
@@ -269,7 +281,97 @@ router.get('/conversations', asyncWrapper(async (req, res) => {
       return res.json([]);
     }
 
-    const conversations = data || [];
+    let conversations = data || [];
+
+    // ============================================================
+    // 🛡️ FILTRAGE STRICT DE COHÉRENCE EN DIRECT (SÉCURITÉ DE PRODUCTION)
+    // ============================================================
+    const isAdmin = userRole === 'admin' || userRole === 'coordinator';
+    
+    // Si l'utilisateur n'est pas Admin, on applique le filtre de cloisonnement strict
+    if (!isAdmin) {
+      const allowedUserIds = new Set();
+      
+      // Récupérer tous les admins/coordonneurs (toujours autorisés pour le support)
+      const { data: admins } = await supabase.from('profiles').select('id').in('role', ['admin', 'coordinator']);
+      (admins || []).forEach(a => allowedUserIds.add(a.id));
+
+      if (userRole === 'family') {
+        // Résoudre la liste d'aidants autorisés (permanents et ponctuels)
+        const { data: assignments } = await supabase
+          .from('aidant_assignments')
+          .select('aidant_user_id')
+          .eq('target_id', userId)
+          .eq('status', 'active');
+
+        const { data: visits } = await supabase
+          .from('visites')
+          .select('aidant_id')
+          .eq('user_id', userId);
+
+        const { data: orders } = await supabase
+          .from('commandes')
+          .select('aidant_id')
+          .eq('user_id', userId);
+
+        const aidantIdsFromDb = [
+          ...(assignments || []).map(a => a.aidant_user_id),
+          ...(visits || []).map(v => v.aidant_id),
+          ...(orders || []).map(o => o.aidant_id)
+        ].filter(Boolean);
+
+        if (aidantIdsFromDb.length > 0) {
+          const { data: aidantsData } = await supabase
+            .from('aidants')
+            .select('user_id')
+            .in('id', aidantIdsFromDb);
+          (aidantsData || []).forEach(a => {
+            if (a.user_id) allowedUserIds.add(a.user_id);
+          });
+        }
+      } else if (userRole === 'aidant') {
+        // Résoudre la liste des familles autorisées (permanentes et ponctuelles)
+        const { data: aidant } = await supabase
+          .from('aidants')
+          .select('id')
+          .eq('user_id', userId)
+          .maybeSingle();
+
+        if (aidant) {
+          const { data: assignments } = await supabase
+            .from('aidant_assignments')
+            .select('target_id')
+            .eq('aidant_user_id', userId)
+            .eq('status', 'active');
+
+          const { data: visits } = await supabase
+            .from('visites')
+            .select('user_id')
+            .eq('aidant_id', aidant.id);
+
+          const { data: orders } = await supabase
+            .from('commandes')
+            .select('user_id')
+            .eq('aidant_id', aidant.id);
+
+          const familyIds = [
+            ...(assignments || []).map(a => a.target_id),
+            ...(visits || []).map(v => v.user_id),
+            ...(orders || []).map(o => o.user_id)
+          ].filter(Boolean);
+
+          const uniqueFamilyIds = [...new Set(familyIds)];
+          uniqueFamilyIds.forEach(fid => allowedUserIds.add(fid));
+        }
+      }
+
+      // Filtrer dynamiquement pour ne renvoyer que les discussions directes autorisées
+      conversations = conversations.filter(conv => {
+        if (conv.type !== 'direct') return true; // Toujours garder les groupes de coordination familiaux
+        const otherParticipantId = (conv.participant_ids || []).find(id => id !== userId);
+        return otherParticipantId && allowedUserIds.has(otherParticipantId);
+      });
+    }
 
     const conversationsWithDetails = await Promise.all(
       conversations.map(async (conv) => {
@@ -314,6 +416,94 @@ router.post('/conversations', asyncWrapper(async (req, res) => {
   try {
     const { participant_ids, name, type } = req.body;
     const userId = req.user.id;
+
+    // ✅ SÉCURITÉ DE CRÉATION : Bloquer l'ouverture de chat direct avec quelqu'un de non lié activement ou passément
+    const isFamilyUser = req.profile.role === 'family';
+    const isAidantUser = req.profile.role === 'aidant';
+
+    if (type === 'direct' && participant_ids.length === 1) {
+      const targetUserId = participant_ids[0];
+      
+      const { data: admins } = await supabase.from('profiles').select('id').in('role', ['admin', 'coordinator']);
+      const adminIds = (admins || []).map(a => a.id);
+
+      if (!adminIds.includes(targetUserId)) {
+        if (isFamilyUser) {
+          const { data: assignments } = await supabase
+            .from('aidant_assignments')
+            .select('aidant_user_id')
+            .eq('target_id', userId)
+            .eq('status', 'active');
+
+          const { data: visits } = await supabase
+            .from('visites')
+            .select('aidant_id')
+            .eq('user_id', userId);
+
+          const { data: orders } = await supabase
+            .from('commandes')
+            .select('aidant_id')
+            .eq('user_id', userId);
+
+          const aidantIdsFromDb = [
+            ...(assignments || []).map(a => a.aidant_user_id),
+            ...(visits || []).map(v => v.aidant_id),
+            ...(orders || []).map(o => o.aidant_id)
+          ].filter(Boolean);
+
+          const aidantUserIds = [];
+          if (aidantIdsFromDb.length > 0) {
+            const { data: aidantsData } = await supabase
+              .from('aidants')
+              .select('user_id')
+              .in('id', aidantIdsFromDb);
+            (aidantsData || []).forEach(a => {
+              if (a.user_id) aidantUserIds.push(a.user_id);
+            });
+          }
+
+          if (!aidantUserIds.includes(targetUserId)) {
+            return res.status(403).json({ error: "Vous ne pouvez pas ouvrir de chat privé avec cet utilisateur car vous n'êtes pas liés." });
+          }
+        } else if (isAidantUser) {
+          const { data: aidant } = await supabase
+            .from('aidants')
+            .select('id')
+            .eq('user_id', userId)
+            .maybeSingle();
+
+          if (aidant) {
+            const { data: assignments } = await supabase
+              .from('aidant_assignments')
+              .select('target_id')
+              .eq('aidant_user_id', userId)
+              .eq('status', 'active');
+
+            const { data: visits } = await supabase
+              .from('visites')
+              .select('user_id')
+              .eq('aidant_id', aidant.id);
+
+            const { data: orders } = await supabase
+              .from('commandes')
+              .select('user_id')
+              .eq('aidant_id', aidant.id);
+
+            const familyIds = [
+              ...(assignments || []).map(a => a.target_id),
+              ...(visits || []).map(v => v.user_id),
+              ...(orders || []).map(o => o.user_id)
+            ].filter(Boolean);
+
+            const uniqueFamilyIds = [...new Set(familyIds)];
+
+            if (!uniqueFamilyIds.includes(targetUserId)) {
+              return res.status(403).json({ error: "Vous ne pouvez pas ouvrir de chat privé avec cette famille car vous n'êtes pas liés." });
+            }
+          }
+        }
+      }
+    }
 
     const allParticipants = [...new Set([userId, ...(participant_ids || [])])];
 
@@ -505,7 +695,6 @@ router.post('/', asyncWrapper(async (req, res) => {
       if (conv && conv.participant_ids) {
         const otherParticipants = conv.participant_ids.filter((id) => id !== userId);
         for (const participantId of otherParticipants) {
-          // ✅ CORRECTIF DE SYNTAXE : Ajout des backticks (``) pour libérer l'envoi de la notification
           await createNotification({
             userId: participantId,
             title: `📨 ${sender?.full_name || 'Utilisateur'}`,
@@ -526,66 +715,6 @@ router.post('/', asyncWrapper(async (req, res) => {
     res.status(201).json({ success: true, message: { ...message, sender } });
   } catch (error) {
     console.error('❌ Send message error:', error);
-    res.status(500).json({ error: error.message });
-  }
-}));
-
-router.put('/:messageId/read', asyncWrapper(async (req, res) => {
-  try {
-    const { messageId } = req.params;
-    const userId = req.user.id;
-
-    const { data: message, error: checkError } = await supabase
-      .from('messages')
-      .select('conversation_id, sender_id')
-      .eq('id', messageId)
-      .single();
-
-    if (checkError || !message) {
-      return res.status(404).json({ error: 'Message non trouvé' });
-    }
-
-    if (message.sender_id === userId) {
-      return res.json({ success: true, message: 'Message déjà lu' });
-    }
-
-    const { error } = await supabase
-      .from('messages')
-      .update({ is_read: true })
-      .eq('id', messageId);
-
-    if (error) {
-      console.error('❌ Mark read error:', error);
-      return res.status(500).json({ error: error.message });
-    }
-
-    res.json({ success: true });
-  } catch (error) {
-    console.error('❌ Mark read error:', error);
-    res.status(500).json({ error: error.message });
-  }
-}));
-
-router.put('/:conversationId/read-all', asyncWrapper(async (req, res) => {
-  try {
-    const { conversationId } = req.params;
-    const userId = req.user.id;
-
-    const { error } = await supabase
-      .from('messages')
-      .update({ is_read: true })
-      .eq('conversation_id', conversationId)
-      .neq('sender_id', userId)
-      .eq('is_read', false);
-
-    if (error) {
-      console.error('❌ Mark all read error:', error);
-      return res.status(500).json({ error: error.message });
-    }
-
-    res.json({ success: true });
-  } catch (error) {
-    console.error('❌ Mark all read error:', error);
     res.status(500).json({ error: error.message });
   }
 }));
