@@ -442,37 +442,7 @@ router.post('/:id/take', async (req, res) => {
   }
 });
 
-// ✅ 3.4 CHANGEMENT DE STATUT GÉNÉRIQUE (ADMIN/COORDINATION) AVEC RECALCUL DU QUOTA
-router.post('/:id/status', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { status } = req.body;
 
-    const { data: order, error: fetchError } = await supabase.from('commandes').select('*').eq('id', id).single();
-    if (fetchError) throw fetchError;
-
-    const { data, error } = await supabase
-      .from('commandes')
-      .update({ status, updated_at: new Date().toISOString() })
-      .eq('id', id)
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    if (order.aidant_id) {
-      const { data: aidant } = await supabase.from('aidants').select('user_id').eq('id', order.aidant_id).single();
-      if (aidant) {
-        await syncAidantOrderCount(aidant.user_id);
-      }
-    }
-
-    res.json({ success: true, order: data });
-  } catch (error) {
-    console.error('❌ Update status route error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
 
 // ✅ 3.5 LIVRAISON DE LA COMMANDE
 router.post('/:id/deliver', async (req, res) => {
@@ -481,8 +451,32 @@ router.post('/:id/deliver', async (req, res) => {
     const { proof_url, location } = req.body;
     const aidantUserId = req.user.id;
 
+    // Récupérer la commande pour vérifier s'il s'agit d'un abonnement
+    const { data: order, error: orderError } = await supabase
+      .from('commandes')
+      .select('subscription_id')
+      .eq('id', id)
+      .single();
+
+    if (orderError) throw orderError;
+
     const { deliverOrder } = require('../services/order.service');
     const result = await deliverOrder(id, aidantUserId, proof_url, location);
+
+    if (!result.success) {
+      return res.status(400).json({ success: false, error: result.error });
+    }
+
+    // ✅ DÉCOMPTE IMMÉDIAT LORS DE LA LIVRAISON DE LA COMMANDE
+    if (order.subscription_id) {
+      const { decrementOrder } = require('../services/visitPayment.service');
+      const decResult = await decrementOrder(order.subscription_id);
+      if (decResult.success) {
+        console.log(`📉 [Décompte] Commande décomptée de l'abonnement ${order.subscription_id} lors de la livraison.`);
+      } else {
+        console.warn(`⚠️ [Décompte] Échec du décompte immédiat de commande:`, decResult.error);
+      }
+    }
 
     res.json({
       success: true,
@@ -495,7 +489,7 @@ router.post('/:id/deliver', async (req, res) => {
   }
 });
 
-// ✅ 3.6 ANNULER UNE COMMANDE ET LIBÉRER LE QUOTA
+// ✅ 3.6 ANNULER UNE COMMANDE ET RESTITUER LE QUOTA (+1 !)
 router.post('/:id/cancel', async (req, res) => {
   try {
     const { id } = req.params;
@@ -528,6 +522,16 @@ router.post('/:id/cancel', async (req, res) => {
 
     if (updateError) throw updateError;
 
+    // ✅ RÉCRÉDITER (+1) L'ABONNEMENT EN CAS D'ANNULATION D'UNE COMMANDE DÉJÀ LIVRÉE OU VALIDÉE
+    const wasDelivered = order.status === 'livree' || order.status === 'validee';
+    if (wasDelivered && order.subscription_id) {
+      const { incrementOrder } = require('../services/visitPayment.service');
+      const result = await incrementOrder(order.subscription_id);
+      if (result.success) {
+        console.log(`📈 [Récrédit] Forfait récrédité (+1 commande) suite à l'annulation.`);
+      }
+    }
+
     if (order.aidant_id) {
       const { data: aidant } = await supabase.from('aidants').select('user_id').eq('id', order.aidant_id).single();
       if (aidant) {
@@ -541,6 +545,50 @@ router.post('/:id/cancel', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// ✅ 3.4 CHANGEMENT DE STATUT GÉNÉRIQUE (ADMIN/COORDINATION) AVEC RECALCUL DU QUOTA ET RÉCRÉDIT
+router.post('/:id/status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    const { data: order, error: fetchError } = await supabase.from('commandes').select('*').eq('id', id).single();
+    if (fetchError) throw fetchError;
+
+    const { data, error } = await supabase
+      .from('commandes')
+      .update({ status, updated_at: new Date().toISOString() })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    // ✅ RÉCRÉDITER SI L'ADMIN UTILISE LE STATUT GÉNÉRIQUE POUR ANNULER UNE COMMANDE COMPTÉE
+    const wasDelivered = order.status === 'livree' || order.status === 'validee';
+    if (wasDelivered && status === 'annulee' && order.subscription_id) {
+      const { incrementOrder } = require('../services/visitPayment.service');
+      const result = await incrementOrder(order.subscription_id);
+      if (result.success) {
+        console.log(`📈 [Récrédit] Forfait récrédité (+1 commande) suite à l'annulation de statut.`);
+      }
+    }
+
+    if (order.aidant_id) {
+      const { data: aidant } = await supabase.from('aidants').select('user_id').eq('id', order.aidant_id).single();
+      if (aidant) {
+        await syncAidantOrderCount(aidant.user_id);
+      }
+    }
+
+    res.json({ success: true, order: data });
+  } catch (error) {
+    console.error('❌ Update status route error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+ 
 
 // ✅ 3.7 AUTO-VALIDATION ADMIN
 router.post('/:id/auto-validate', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
