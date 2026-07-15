@@ -1,5 +1,5 @@
 // 📁 backend/src/services/order.service.js
-// ✅ SERVICE DE COMMANDES COMPLET : SYNCHRONISATION DYNAMIQUE DES QUOTAS SANS LIMITE DE QUOTA MAXIMUM EN COURS
+// ✅ SERVICE DE COMMANDES COMPLET : SYNCHRONISATION DYNAMIQUE DES QUOTAS ET CHECKPOINTS GPS FIXES EN METADATA
 
 const { supabase } = require('./supabase.service');
 const { createNotification } = require('./notification.service');
@@ -301,10 +301,10 @@ const createOrder = async ({
 };
 
 // ============================================================
-// PRISE DE COMMANDE AVEC TRANSITIONS DE QUOTAS SÉCURISÉES
+// PRISE DE COMMANDE AVEC ENREGISTREMENT GPS DU DÉPART
 // ============================================================
 
-const takeOrder = async (orderId, aidantUserId) => {
+const takeOrder = async (orderId, aidantUserId, lat = null, lng = null) => {
   try {
     const { data: order, error: fetchError } = await supabase
       .from('commandes')
@@ -370,6 +370,12 @@ const takeOrder = async (orderId, aidantUserId) => {
         taken_at: new Date().toISOString(),
         taken_by: aidantUserId,
         updated_at: new Date().toISOString(),
+        // ✅ ENREGISTREMENT GPS DU CHECKPOINT DE DÉPART DE LA LIVRAISON EN METADATA
+        metadata: {
+          ...(order.metadata || {}),
+          location_start: lat && lng ? { lat, lng } : null,
+          delivery_started_at: new Date().toISOString(),
+        }
       })
       .eq('id', orderId)
       .select('*')
@@ -418,7 +424,7 @@ const takeOrder = async (orderId, aidantUserId) => {
 };
 
 // ============================================================
-// LIVRAISON DE COMMANDE AVEC RETRAIT DE QUOTA DYNAMIQUE
+// LIVRAISON DE COMMANDE AVEC ENREGISTREMENT GPS DE L'ARRIVÉE
 // ============================================================
 
 const deliverOrder = async (orderId, aidantUserId, proofUrl = null, location = null) => {
@@ -470,10 +476,11 @@ const deliverOrder = async (orderId, aidantUserId, proofUrl = null, location = n
         proof_url: proofUrl || null,
         updated_at: new Date().toISOString(),
         auto_validation_at: autoValidationAt.toISOString(),
+        // ✅ ENREGISTREMENT GPS DU CHECKPOINT DE FIN DE LA LIVRAISON EN METADATA (LOCATION REÇU EN ARGUMENT)
         metadata: {
           ...(order.metadata || {}),
-          delivered_at: new Date().toISOString(),
-          delivery_location: location || null,
+          location_end: location || null,
+          delivery_completed_at: new Date().toISOString(),
         },
       })
       .eq('id', orderId)
