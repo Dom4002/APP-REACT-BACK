@@ -1,5 +1,5 @@
 // 📁 backend/src/services/visitPayment.service.js
-
+ 
 const { supabase } = require('./supabase.service');
 const { createNotification } = require('./notification.service');
 
@@ -29,7 +29,6 @@ const VISIT_PAYMENT_STATUS = {
   REFUNDED: 'refunded',
 };
 
-// ✅ PRIX DES VISITES PONCTUELLES - SOURCE UNIQUE
 const VISIT_PONCTUAL_PRICES = {
   '30': 5000,
   '45': 6000,
@@ -41,17 +40,8 @@ const VISIT_PONCTUAL_PRICES = {
 const DEFAULT_VISIT_PRICE = 7500;
 const DRAFT_EXPIRY_HOURS = 24;
 
-// ✅ EXPORTER LES CONSTANTES
-module.exports.VISIT_PONCTUAL_PRICES = VISIT_PONCTUAL_PRICES;
-module.exports.DEFAULT_VISIT_PRICE = DEFAULT_VISIT_PRICE;
-module.exports.VISIT_STATUS = VISIT_STATUS;
-module.exports.VISIT_PAYMENT_STATUS = VISIT_PAYMENT_STATUS;
-module.exports.DRAFT_EXPIRY_HOURS = DRAFT_EXPIRY_HOURS;
-
 /**
  * Calcule le prix d'une visite ponctuelle en fonction de sa durée
- * @param {number} durationMinutes - Durée en minutes (30, 45, 60, 90, 120)
- * @returns {number} Prix en FCFA
  */
 const getVisitPrice = (durationMinutes = 60) => {
   const price = VISIT_PONCTUAL_PRICES[durationMinutes.toString()];
@@ -59,26 +49,15 @@ const getVisitPrice = (durationMinutes = 60) => {
   return Math.round((durationMinutes / 60) * DEFAULT_VISIT_PRICE);
 };
 
-module.exports.getVisitPrice = getVisitPrice;
-
-// ============================================================
-// FONCTIONS DE PRIX POUR LES COMMANDES PONCTUELLES
-// ============================================================
-
 /**
  * Calcule le prix d'une commande ponctuelle
- * @param {Array} items - Liste des articles
- * @param {string} type - Type de commande
- * @returns {number} Prix en FCFA
  */
 const getPonctualOrderPrice = (items = [], type = 'autre') => {
-  // Si des articles sont fournis, calculer le total
   if (items && items.length > 0) {
     const total = items.reduce((sum, item) => sum + (item.quantity * item.price), 0);
     if (total > 0) return total;
   }
   
-  // Sinon, prix forfaitaire selon le type
   const orderPrices = {
     medicaments: 5000,
     produits_bebe: 5000,
@@ -90,17 +69,10 @@ const getPonctualOrderPrice = (items = [], type = 'autre') => {
   return orderPrices[type] || 5000;
 };
 
-module.exports.getPonctualOrderPrice = getPonctualOrderPrice;
-
 // ============================================================
 // VÉRIFICATION DE L'ABONNEMENT
 // ============================================================
 
-/**
- * Vérifie si l'utilisateur a un abonnement actif avec des visites disponibles
- * @param {string} userId - ID de l'utilisateur
- * @returns {Promise<{hasActiveSubscription: boolean, remainingVisits: number, subscription: any}>}
- */
 const checkSubscriptionForVisits = async (userId) => {
   try {
     const { data: subscription, error } = await supabase
@@ -110,16 +82,7 @@ const checkSubscriptionForVisits = async (userId) => {
       .eq('status', 'actif')
       .maybeSingle();
 
-    if (error) {
-      console.error('❌ Erreur vérification abonnement:', error);
-      return {
-        hasActiveSubscription: false,
-        remainingVisits: 0,
-        subscription: null,
-      };
-    }
-
-    if (!subscription) {
+    if (error || !subscription) {
       return {
         hasActiveSubscription: false,
         remainingVisits: 0,
@@ -132,7 +95,6 @@ const checkSubscriptionForVisits = async (userId) => {
     const isExpired = endDate < today;
 
     if (isExpired) {
-      // Mettre à jour le statut si expiré
       await supabase
         .from('abonnements')
         .update({ status: 'expire' })
@@ -160,13 +122,6 @@ const checkSubscriptionForVisits = async (userId) => {
   }
 };
 
-module.exports.checkSubscriptionForVisits = checkSubscriptionForVisits;
-
-/**
- * Vérifie si l'utilisateur a un abonnement actif avec des commandes disponibles
- * @param {string} userId - ID de l'utilisateur
- * @returns {Promise<{hasActiveSubscription: boolean, remainingOrders: number, subscription: any}>}
- */
 const checkSubscriptionForOrders = async (userId) => {
   try {
     const { data: subscription, error } = await supabase
@@ -176,16 +131,7 @@ const checkSubscriptionForOrders = async (userId) => {
       .eq('status', 'actif')
       .maybeSingle();
 
-    if (error) {
-      console.error('❌ Erreur vérification abonnement:', error);
-      return {
-        hasActiveSubscription: false,
-        remainingOrders: 0,
-        subscription: null,
-      };
-    }
-
-    if (!subscription) {
+    if (error || !subscription) {
       return {
         hasActiveSubscription: false,
         remainingOrders: 0,
@@ -225,17 +171,10 @@ const checkSubscriptionForOrders = async (userId) => {
   }
 };
 
-module.exports.checkSubscriptionForOrders = checkSubscriptionForOrders;
-
 // ============================================================
 // DÉCOMPTE DES VISITES/COMMANDES
 // ============================================================
 
-/**
- * Décompte une visite de l'abonnement
- * @param {string} subscriptionId - ID de l'abonnement
- * @returns {Promise<Object>} Résultat du décompte
- */
 const decrementVisit = async (subscriptionId) => {
   try {
     const { data: subscription, error: fetchError } = await supabase
@@ -263,7 +202,6 @@ const decrementVisit = async (subscriptionId) => {
 
     if (error) throw error;
 
-    // Notification si plus de visites
     if (data.remaining_visits === 0) {
       await createNotification({
         userId: subscription.user_id,
@@ -281,13 +219,6 @@ const decrementVisit = async (subscriptionId) => {
   }
 };
 
-module.exports.decrementVisit = decrementVisit;
-
-/**
- * Décompte une commande de l'abonnement
- * @param {string} subscriptionId - ID de l'abonnement
- * @returns {Promise<Object>} Résultat du décompte
- */
 const decrementOrder = async (subscriptionId) => {
   try {
     const { data: subscription, error: fetchError } = await supabase
@@ -332,16 +263,88 @@ const decrementOrder = async (subscriptionId) => {
   }
 };
 
-module.exports.decrementOrder = decrementOrder;
+// ============================================================
+// ✅ NOUVEAU : INCREMENTER (RÉCRÉDITER) LES ABONNEMENTS EN CAS DE REFUS/ANNULATION
+// ============================================================
+
+/**
+ * Récrédite (+1) une visite sur l'abonnement
+ */
+const incrementVisit = async (subscriptionId) => {
+  try {
+    const { data: subscription, error: fetchError } = await supabase
+      .from('abonnements')
+      .select('remaining_visits, used_visits, total_visits, user_id')
+      .eq('id', subscriptionId)
+      .single();
+
+    if (fetchError) throw fetchError;
+
+    const maxVisits = subscription.total_visits || 999;
+    const newRemaining = Math.min(subscription.remaining_visits + 1, maxVisits);
+    const newUsed = Math.max(subscription.used_visits - 1, 0);
+
+    const { data, error } = await supabase
+      .from('abonnements')
+      .update({
+        remaining_visits: newRemaining,
+        used_visits: newUsed,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', subscriptionId)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    return { success: true, subscription: data };
+  } catch (error) {
+    console.error('❌ incrementVisit error:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+/**
+ * Récrédite (+1) une commande sur l'abonnement
+ */
+const incrementOrder = async (subscriptionId) => {
+  try {
+    const { data: subscription, error: fetchError } = await supabase
+      .from('abonnements')
+      .select('remaining_orders, used_orders, total_orders, user_id')
+      .eq('id', subscriptionId)
+      .single();
+
+    if (fetchError) throw fetchError;
+
+    const maxOrders = subscription.total_orders || 999;
+    const newRemaining = Math.min(subscription.remaining_orders + 1, maxOrders);
+    const newUsed = Math.max(subscription.used_orders - 1, 0);
+
+    const { data, error } = await supabase
+      .from('abonnements')
+      .update({
+        remaining_orders: newRemaining,
+        used_orders: newUsed,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', subscriptionId)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    return { success: true, subscription: data };
+  } catch (error) {
+    console.error('❌ incrementOrder error:', error);
+    return { success: false, error: error.message };
+  }
+};
 
 // ============================================================
 // GESTION DES BROUILLONS
 // ============================================================
 
-/**
- * Nettoie les brouillons expirés (job cron)
- * @returns {Promise<number>} Nombre de brouillons nettoyés
- */
 const cleanExpiredDrafts = async () => {
   try {
     const now = new Date().toISOString();
@@ -381,10 +384,6 @@ const cleanExpiredDrafts = async () => {
       count++;
     }
 
-    if (count > 0) {
-      console.log(`🗑️ ${count} brouillons expirés nettoyés`);
-    }
-
     return count;
   } catch (error) {
     console.error('❌ cleanExpiredDrafts error:', error);
@@ -392,24 +391,14 @@ const cleanExpiredDrafts = async () => {
   }
 };
 
-module.exports.cleanExpiredDrafts = cleanExpiredDrafts;
-
 // ============================================================
-// 🆕 NOUVELLES FONCTIONS POUR LE SYSTÈME COMPLET
+// GESTION DES RECHERCHES D'AIDANTS WIZARDS
 // ============================================================
 
-/**
- * Vérifie si un aidant est disponible pour une visite
- * @param {string} targetType - 'patient' | 'personal_account'
- * @param {string} targetId - UUID de la cible
- * @param {string} familyId - UUID de la famille
- * @returns {Promise<Object>} - { hasAidant, aidantId, availableAidants, allFull }
- */
 const checkAidantForVisit = async (targetType, targetId, familyId) => {
   try {
     const { getActiveAidantForTarget, getAvailableAidantsForFamily } = require('./aidantAssignment.service');
 
-    // 1. Vérifier si un aidant est déjà assigné
     const aidantId = await getActiveAidantForTarget(targetType, targetId, familyId);
 
     if (aidantId) {
@@ -421,7 +410,6 @@ const checkAidantForVisit = async (targetType, targetId, familyId) => {
       };
     }
 
-    // 2. Récupérer les aidants disponibles
     const availableAidants = await getAvailableAidantsForFamily(familyId);
 
     if (availableAidants.length > 0) {
@@ -433,7 +421,6 @@ const checkAidantForVisit = async (targetType, targetId, familyId) => {
       };
     }
 
-    // 3. Tous les aidants sont full
     return {
       hasAidant: false,
       aidantId: null,
@@ -452,22 +439,11 @@ const checkAidantForVisit = async (targetType, targetId, familyId) => {
   }
 };
 
-module.exports.checkAidantForVisit = checkAidantForVisit;
-
-/**
- * Récupère les options du wizard pour une visite
- * @param {string} targetType - 'patient' | 'personal_account'
- * @param {string} targetId - UUID de la cible
- * @param {string} familyId - UUID de la famille
- * @param {string} userRole - Rôle de l'utilisateur
- * @returns {Promise<Object>} - Options du wizard
- */
 const getVisitWizardOptions = async (targetType, targetId, familyId, userRole = 'family') => {
   try {
-    const { getAvailableAidantsForFamily, isAidantFull } = require('./aidantAssignment.service');
+    const { getAvailableAidantsForFamily } = require('./aidantAssignment.service');
     const isAdmin = userRole === 'admin' || userRole === 'coordinator';
 
-    // 1. Vérifier si un aidant est déjà assigné
     const { getActiveAidantForTarget } = require('./aidantAssignment.service');
     const aidantId = await getActiveAidantForTarget(targetType, targetId, familyId);
 
@@ -490,7 +466,6 @@ const getVisitWizardOptions = async (targetType, targetId, familyId, userRole = 
       };
     }
 
-    // 2. Récupérer les aidants disponibles
     const availableAidants = await getAvailableAidantsForFamily(familyId);
 
     if (availableAidants.length > 0) {
@@ -509,7 +484,6 @@ const getVisitWizardOptions = async (targetType, targetId, familyId, userRole = 
         },
       ];
 
-      // ✅ Admin a une option supplémentaire
       if (isAdmin) {
         options.push({
           type: 'force',
@@ -531,7 +505,6 @@ const getVisitWizardOptions = async (targetType, targetId, familyId, userRole = 
       };
     }
 
-    // 3. Tous les aidants sont full
     const options = [
       {
         type: 'without_aidant',
@@ -541,7 +514,6 @@ const getVisitWizardOptions = async (targetType, targetId, familyId, userRole = 
       },
     ];
 
-    // ✅ Admin peut forcer même si full
     if (isAdmin) {
       options.push({
         type: 'force',
@@ -577,16 +549,6 @@ const getVisitWizardOptions = async (targetType, targetId, familyId, userRole = 
   }
 };
 
-module.exports.getVisitWizardOptions = getVisitWizardOptions;
-
-/**
- * Valide une visite créée sans aidant
- * @param {string} visitId - UUID de la visite
- * @param {string} adminId - UUID de l'admin qui valide
- * @param {string} aidantId - UUID de l'aidant assigné (optionnel)
- * @param {string} assignmentType - 'permanente' | 'ponctuelle'
- * @returns {Promise<Object>}
- */
 const validateVisitWithoutAidant = async ({
   visitId,
   adminId,
@@ -616,7 +578,6 @@ const validateVisitWithoutAidant = async ({
       };
     }
 
-    // Si un aidant est fourni, l'assigner
     if (aidantId) {
       const { assignAidantToVisit } = require('./visit.service');
       const result = await assignAidantToVisit({
@@ -627,9 +588,7 @@ const validateVisitWithoutAidant = async ({
         force: true,
       });
 
-      if (!result.success) {
-        return result;
-      }
+      if (!result.success) return result;
 
       return {
         success: true,
@@ -639,7 +598,6 @@ const validateVisitWithoutAidant = async ({
       };
     }
 
-    // Sinon, marquer comme planifiée sans aidant
     const { data: updatedVisit, error: updateError } = await supabase
       .from('visites')
       .update({
@@ -679,21 +637,10 @@ const validateVisitWithoutAidant = async ({
   }
 };
 
-module.exports.validateVisitWithoutAidant = validateVisitWithoutAidant;
-
-/**
- * Vérifie si une visite peut être créée sans aidant
- * @param {string} targetType - 'patient' | 'personal_account'
- * @param {string} targetId - UUID de la cible
- * @param {string} familyId - UUID de la famille
- * @param {string} userRole - Rôle de l'utilisateur
- * @returns {Promise<Object>}
- */
 const canCreateVisitWithoutAidant = async (targetType, targetId, familyId, userRole = 'family') => {
   try {
     const wizardOptions = await getVisitWizardOptions(targetType, targetId, familyId, userRole);
 
-    // ✅ Si un aidant est déjà assigné → on peut créer sans problème
     if (wizardOptions.hasAidant) {
       return {
         canCreate: true,
@@ -702,7 +649,6 @@ const canCreateVisitWithoutAidant = async (targetType, targetId, familyId, userR
       };
     }
 
-    // ✅ Si des aidants sont disponibles → on peut créer (l'utilisateur choisira)
     if (wizardOptions.hasAvailableAidants) {
       return {
         canCreate: true,
@@ -711,7 +657,6 @@ const canCreateVisitWithoutAidant = async (targetType, targetId, familyId, userR
       };
     }
 
-    // ✅ Si tous les aidants sont full → on peut créer sans aidant (famille) ou forcer (admin)
     if (wizardOptions.allFull) {
       const isAdmin = userRole === 'admin' || userRole === 'coordinator';
       return {
@@ -736,36 +681,30 @@ const canCreateVisitWithoutAidant = async (targetType, targetId, familyId, userR
   }
 };
 
-module.exports.canCreateVisitWithoutAidant = canCreateVisitWithoutAidant;
-
 // ============================================================
 // EXPORTS PRINCIPAUX
 // ============================================================
 
 module.exports = {
-  // Constantes
   VISIT_STATUS,
   VISIT_PAYMENT_STATUS,
   VISIT_PONCTUAL_PRICES,
   DEFAULT_VISIT_PRICE,
   DRAFT_EXPIRY_HOURS,
   
-  // Fonctions de prix
   getVisitPrice,
   getPonctualOrderPrice,
   
-  // Vérification d'abonnement
   checkSubscriptionForVisits,
   checkSubscriptionForOrders,
   
-  // Décompte
   decrementVisit,
   decrementOrder,
+  incrementVisit, 
+  incrementOrder,  
   
-  // Nettoyage
   cleanExpiredDrafts,
 
-  // 🆕 Nouvelles fonctions
   checkAidantForVisit,
   getVisitWizardOptions,
   validateVisitWithoutAidant,
