@@ -1,5 +1,5 @@
 // 📁 backend/src/routes/message.routes.js
-// ✅ ROUTEUR MESSAGERIE COMPLET : AUTO-GÉNÉRATION DES GROUPES DE COORDINATION EN CAS D'ASSIGNATIONS ACTIVES
+// ✅ ROUTEUR MESSAGERIE COMPLET : AUTO-GÉNÉRATION AVEC ENRICHISSEMENT DIRECT ET SÉCURISATION DES PARTICIPANTS
 
 const express = require('express');
 const router = express.Router();
@@ -12,7 +12,7 @@ const { asyncWrapper } = require('../utils/errorHandler');
 router.use(authMiddleware);
 
 // ============================================================
-// HELPER : ASSURER L'EXISTENCE DES CANAUX REQUIS (AUTO-GÉNÉRATION)
+// HELPER : ASSURER L'EXISTENCE DES CANAUX REQUIS (AUTO-GÉNÉRATION SANS CRASH)
 // ============================================================
 const ensureRequiredConversations = async (userId, role) => {
   try {
@@ -27,7 +27,29 @@ const ensureRequiredConversations = async (userId, role) => {
         .eq('target_id', userId)
         .eq('status', 'active');
 
-      const aidantUserIds = [...new Set((assignments || []).map(a => a.aidant_user_id).filter(Boolean))];
+      const { data: visits } = await supabase
+        .from('visites')
+        .select('aidant_id')
+        .eq('user_id', userId);
+
+      const aidantIdsFromDb = [
+        ...(assignments || []).map(a => a.aidant_user_id),
+        ...(visits || []).map(v => v.aidant_id)
+      ].filter(Boolean);
+
+      // Résoudre les user_ids de ces aidants
+      const aidantUserIds = [];
+      if (aidantIdsFromDb.length > 0) {
+        const { data: aidantsData } = await supabase
+          .from('aidants')
+          .select('user_id')
+          .in('id', aidantIdsFromDb);
+        if (aidantsData) {
+          aidantsData.forEach(a => {
+            if (a.user_id) aidantUserIds.push(a.user_id);
+          });
+        }
+      }
 
       // 2. Créer le groupe de coordination global pour la famille s'il n'existe pas
       if (aidantUserIds.length > 0) {
@@ -64,7 +86,7 @@ const ensureRequiredConversations = async (userId, role) => {
         }
       }
 
-      // 3. Assurer une conversation directe avec l'équipe administrative de coordination
+      // 3. Assurer une conversation directe avec l'équipe de coordination administrative
       if (adminIds.length > 0) {
         const directAdminParticipants = [userId, adminIds[0]];
         const { data: existingDirectAdmin } = await supabase
@@ -412,66 +434,6 @@ router.post('/', asyncWrapper(async (req, res) => {
     res.status(201).json({ success: true, message: { ...message, sender } });
   } catch (error) {
     console.error('❌ Send message error:', error);
-    res.status(500).json({ error: error.message });
-  }
-}));
-
-router.put('/:messageId/read', asyncWrapper(async (req, res) => {
-  try {
-    const { messageId } = req.params;
-    const userId = req.user.id;
-
-    const { data: message, error: checkError } = await supabase
-      .from('messages')
-      .select('conversation_id, sender_id')
-      .eq('id', messageId)
-      .single();
-
-    if (checkError || !message) {
-      return res.status(404).json({ error: 'Message non trouvé' });
-    }
-
-    if (message.sender_id === userId) {
-      return res.json({ success: true, message: 'Message déjà lu' });
-    }
-
-    const { error } = await supabase
-      .from('messages')
-      .update({ is_read: true })
-      .eq('id', messageId);
-
-    if (error) {
-      console.error('❌ Mark read error:', error);
-      return res.status(500).json({ error: error.message });
-    }
-
-    res.json({ success: true });
-  } catch (error) {
-    console.error('❌ Mark read error:', error);
-    res.status(500).json({ error: error.message });
-  }
-}));
-
-router.put('/:conversationId/read-all', asyncWrapper(async (req, res) => {
-  try {
-    const { conversationId } = req.params;
-    const userId = req.user.id;
-
-    const { error } = await supabase
-      .from('messages')
-      .update({ is_read: true })
-      .eq('conversation_id', conversationId)
-      .neq('sender_id', userId)
-      .eq('is_read', false);
-
-    if (error) {
-      console.error('❌ Mark all read error:', error);
-      return res.status(500).json({ error: error.message });
-    }
-
-    res.json({ success: true });
-  } catch (error) {
-    console.error('❌ Mark all read error:', error);
     res.status(500).json({ error: error.message });
   }
 }));
