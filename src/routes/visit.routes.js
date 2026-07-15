@@ -81,7 +81,7 @@ const getAidantIdFromUserIdOrId = async (userIdOrId) => {
 };
 
 // =============================================
-// 1️⃣ TOUTES LES ROUTES STATIQUES  
+// 1️⃣ TOUTES LES ROUTES STATIQUES (SANS :id) 
 // =============================================
 
 // ✅ 1.1 RÉCUPÉRER LES COMPTES DISPONIBLES POUR L'ADMIN
@@ -175,7 +175,6 @@ router.get('/available-aidants', async (req, res) => {
     const isAdmin = ['admin', 'coordinator'].includes(req.profile.role);
     const isFamily = req.profile.role === 'family';
 
-    // Seuls les familles, admins et coordinateurs peuvent chercher des aidants
     if (!isFamily && !isAdmin) {
       return res.status(403).json({
         success: false,
@@ -183,10 +182,8 @@ router.get('/available-aidants', async (req, res) => {
       });
     }
 
-    // Déterminer le familyId cible (l'identité du foyer à proximité)
     let familyId = isFamily ? req.user.id : (req.query.familyId || null);
 
-    // Si admin et qu'aucun familyId n'est fourni, essayer de le trouver depuis la visite ou le patient s'ils sont passés en paramètre
     if (isAdmin && !familyId && req.query.targetId) {
       if (req.query.targetType === 'patient') {
         const { data: link = null } = await supabase
@@ -196,13 +193,12 @@ router.get('/available-aidants', async (req, res) => {
           .maybeSingle();
         if (link) familyId = link.family_id;
       } else {
-        familyId = req.query.targetId; // C'est directement le compte personnel
+        familyId = req.query.targetId; 
       }
     }
 
     let aidants = [];
 
-    // Si on a identifié un foyer, requêter les aidants disponibles de confiance
     if (familyId) {
       aidants = await getAvailableAidantsForFamily(familyId, {
         zone: req.query.zone,
@@ -210,7 +206,6 @@ router.get('/available-aidants', async (req, res) => {
         minRating: req.query.minRating ? parseFloat(req.query.minRating) : undefined,
       });
     } else {
-      // Fallback d'administration : Si pas d'identifiant de foyer résolu, renvoyer tous les aidants certifiés actifs
       const { data: aidantsData } = await supabase
         .from('aidants')
         .select('*')
@@ -692,7 +687,6 @@ router.get('/:id', async (req, res) => {
       .select('*')
       .eq('visite_id', id);
 
-    // ✅ ENRICHISSEMENT AUDIO : Récupère les mémos vocaux liés à la visite depuis la base
     const { data: audios } = await supabase
       .from('visite_audios')
       .select('*')
@@ -1654,9 +1648,7 @@ router.post('/:id/cancel', async (req, res) => {
   }
 });
 
-
-
-
+ 
 
 
 // ✅ 3.12 PHOTOS & PIÈCES JOINTES
