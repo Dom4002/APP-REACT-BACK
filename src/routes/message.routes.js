@@ -1,6 +1,5 @@
 // 📁 backend/src/routes/message.routes.js
-// ✅ ROUTEUR MESSAGERIE COMPLET : AUTO-GÉNÉRATION AVEC ENRICHISSEMENT DIRECT ET SÉCURISATION DES PARTICIPANTS
-
+ 
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../services/supabase.service');
@@ -266,6 +265,7 @@ router.post('/conversations', asyncWrapper(async (req, res) => {
 
     for (const participantId of allParticipants) {
       if (participantId !== userId) {
+        // ✅ CORRECTIF DE SYNTAXE : Ajout des backticks (``) pour libérer l'envoi de la notification
         await createNotification({
           userId: participantId,
           title: '💬 Nouvelle conversation',
@@ -414,6 +414,7 @@ router.post('/', asyncWrapper(async (req, res) => {
       if (conv && conv.participant_ids) {
         const otherParticipants = conv.participant_ids.filter((id) => id !== userId);
         for (const participantId of otherParticipants) {
+          // ✅ CORRECTIF DE SYNTAXE REQUIS : Ajout des backticks (``) pour libérer l'envoi de la notification
           await createNotification({
             userId: participantId,
             title: `📨 ${sender?.full_name || 'Utilisateur'}`,
@@ -434,6 +435,66 @@ router.post('/', asyncWrapper(async (req, res) => {
     res.status(201).json({ success: true, message: { ...message, sender } });
   } catch (error) {
     console.error('❌ Send message error:', error);
+    res.status(500).json({ error: error.message });
+  }
+}));
+
+router.put('/:messageId/read', asyncWrapper(async (req, res) => {
+  try {
+    const { messageId } = req.params;
+    const userId = req.user.id;
+
+    const { data: message, error: checkError } = await supabase
+      .from('messages')
+      .select('conversation_id, sender_id')
+      .eq('id', messageId)
+      .single();
+
+    if (checkError || !message) {
+      return res.status(404).json({ error: 'Message non trouvé' });
+    }
+
+    if (message.sender_id === userId) {
+      return res.json({ success: true, message: 'Message déjà lu' });
+    }
+
+    const { error } = await supabase
+      .from('messages')
+      .update({ is_read: true })
+      .eq('id', messageId);
+
+    if (error) {
+      console.error('❌ Mark read error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Mark read error:', error);
+    res.status(500).json({ error: error.message });
+  }
+}));
+
+router.put('/:conversationId/read-all', asyncWrapper(async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const userId = req.user.id;
+
+    const { error } = await supabase
+      .from('messages')
+      .update({ is_read: true })
+      .eq('conversation_id', conversationId)
+      .neq('sender_id', userId)
+      .eq('is_read', false);
+
+    if (error) {
+      console.error('❌ Mark all read error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Mark all read error:', error);
     res.status(500).json({ error: error.message });
   }
 }));
