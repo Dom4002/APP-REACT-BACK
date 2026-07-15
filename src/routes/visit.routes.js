@@ -18,7 +18,7 @@ const {
   getVisitPrice,
   checkSubscriptionForVisits,
   decrementVisit,
-  incrementVisit, // 🟢 Importé pour le remboursement d'annulation
+  incrementVisit,  
 } = require('../services/visitPayment.service');
 
 router.use(authMiddleware);
@@ -81,7 +81,7 @@ const getAidantIdFromUserIdOrId = async (userIdOrId) => {
 };
 
 // =============================================
-// 1️⃣ TOUTES LES ROUTES STATIQUES (SANS :id) - PLACÉES TOUT EN HAUT 🚀
+// 1️⃣ TOUTES LES ROUTES STATIQUES  
 // =============================================
 
 // ✅ 1.1 RÉCUPÉRER LES COMPTES DISPONIBLES POUR L'ADMIN
@@ -1098,7 +1098,7 @@ router.post('/:id/reassign', roleMiddleware(['admin', 'coordinator']), async (re
   }
 });
 
-// ✅ 3.8 DÉMARRER UNE VISITE
+// ✅ 3.8 DÉMARRER UNE VISITE (AVEC CHECKPOINT GPS DE DÉPART)
 router.post('/:id/start', async (req, res) => {
   try {
     const { id } = req.params;
@@ -1133,6 +1133,7 @@ router.post('/:id/start', async (req, res) => {
     };
 
     if (lat && lng) {
+      // ✅ CORRECTIF : Sauvegarder dans la colonne racine location_start de la visite
       updateData.location_start = { lat, lng };
     }
 
@@ -1202,7 +1203,7 @@ router.post('/:id/start', async (req, res) => {
 });
 
 
-// ✅ 3.9 TERMINER UNE VISITE
+// ✅ 3.9 TERMINER UNE VISITE (AVEC CHECKPOINT GPS D'ARRIVÉE SUR LA COLONNE RACINE)
 router.post('/:id/complete', async (req, res) => {
   try {
     const { id } = req.params;
@@ -1249,6 +1250,8 @@ router.post('/:id/complete', async (req, res) => {
       actions: actions || [],
       notes: notes || '',
       report: notes || '',
+      // ✅ CORRECTIF : Sauvegarder dans la colonne racine location_end de la visite
+      location_end: lat && lng ? { lat, lng } : null,
       metadata: {
         ...(visit.metadata || {}),
         completed_by: user.id,
@@ -1650,6 +1653,8 @@ router.post('/:id/cancel', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+
 
 
 
