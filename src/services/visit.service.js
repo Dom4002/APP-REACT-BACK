@@ -1,5 +1,6 @@
 // 📁 backend/src/services/visit.service.js
- 
+// ✅ SERVICE DE VISITES COMPLET : DESACTIVATION STRICTE DE L'ASSIGNATION AUTO ET GESTION DES CHECKPOINTS GPS SÉCURISÉS
+
 const { supabase } = require('./supabase.service');
 const { createNotification } = require('./notification.service');
 const { getCoordinatesFromAddress } = require('./maps.service'); 
@@ -85,16 +86,16 @@ const createVisit = async ({
 }) => {
   try {
 
-   // ✅ AUTO-GÉOCODAGE : Si adresse fournie mais pas de GPS
-     if (address && (!latitude || !longitude)) {
-       console.log(`🌍 Géocodage auto pour: ${address}`);
-       const coords = await getCoordinatesFromAddress(address);
-       if (coords) {
-         latitude = coords.lat;
-         longitude = coords.lng;
-         console.log(`✅ Coordonnées trouvées: ${latitude}, ${longitude}`);
-       }
-     }
+    // ✅ AUTO-GÉOCODAGE : Si adresse fournie mais pas de GPS
+    if (address && (!latitude || !longitude)) {
+      console.log(`🌍 Géocodage auto pour: ${address}`);
+      const coords = await getCoordinatesFromAddress(address);
+      if (coords) {
+        latitude = coords.lat;
+        longitude = coords.lng;
+        console.log(`✅ Coordonnées trouvées: ${latitude}, ${longitude}`);
+      }
+    }
    
     const finalTargetType = targetType || (patientId ? VISIT_TYPES.PATIENT : VISIT_TYPES.PERSONAL);
     const finalTargetName = targetName || (patientId ? null : profile?.full_name);
@@ -171,8 +172,6 @@ const createVisit = async ({
             familyId
           );
         } catch (wizardError) {
-          // ✅ SÉCURISATION CONTRE LE CRASH : Si getAvailableAidantsForFamily jette "Aucun aidant disponible",
-          // on construit de secours un wizard complet avec l'option de planification sans aidant de secours !
           console.warn('⚠️ Erreur récupération options wizard, fallback sans aidant:', wizardError.message);
           wizardOptions = {
             hasAidant: false,
@@ -243,7 +242,6 @@ const createVisit = async ({
         status = VISIT_STATUS.WAITING_AIDANT; // Attente d'assignation par l'administration
       }
     }
-
 
     // 3. Créer la visite en base de données
     const visitData = {
@@ -325,7 +323,6 @@ const createVisit = async ({
       `)
       .single();
 
- 
     if (error) {
       console.error('❌ createVisit error:', error);
       return {
@@ -395,7 +392,7 @@ const createVisit = async ({
       subscription_used: !!subscriptionId,
       waiting_for_aidant: status === VISIT_STATUS.WAITING_AIDANT,
     };
-  } catch (error) { // 🟢 CORRECTIF : Plus de token :any ici
+  } catch (error) { 
     console.error('❌ createVisit error:', error);
     return {
       success: false,
@@ -535,7 +532,7 @@ const assignAidantToVisit = async ({
       is_permanent: isPermanent,
       forced: force || false,
     };
-  } catch (error) { // 🟢 CORRECTIF : Plus de token :any ici
+  } catch (error) { 
     console.error('❌ assignAidantToVisit error:', error);
     return { success: false, error: error.message, code: 'UNKNOWN_ERROR' };
   }
@@ -606,7 +603,7 @@ const validateVisitWithoutAidant = async ({
     if (updateError) return { success: false, error: updateError.message, code: 'UPDATE_ERROR' };
 
     return { success: true, visit: updatedVisit, assigned: false };
-  } catch (error) { // 🟢 CORRECTIF : Plus de token :any ici
+  } catch (error) { 
     console.error('❌ validateVisitWithoutAidant error:', error);
     return { success: false, error: error.message, code: 'UNKNOWN_ERROR' };
   }
