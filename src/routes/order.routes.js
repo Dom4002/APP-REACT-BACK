@@ -254,7 +254,7 @@ router.post('/', async (req, res) => {
 // 3️⃣ ROUTES DYNAMIQUES (AVEC PARAMÈTRE :id)
 // =============================================
 
-// ✅ 3.1 DÉTAILS D'UNE COMMANDE PAR ID (AVEC ENRICHISSEMENT)
+// ✅ 3.1 DÉTAILS D'UNE COMMANDE PAR ID (VÉRIFICATION SÉCURISÉE DES ACCÈS COMPLÈTE)
 router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -287,7 +287,10 @@ router.get('/:id', async (req, res) => {
         .single();
       
       if (aidant) {
-        hasAccess = order.aidant_id === aidant.id || order.status === 'disponible';
+        // ✅ CORRECTIF DE SÉCURITÉ : Permettre à l'aidant d'ouvrir la commande s'il est assigné ou si elle est disponible dans son catalogue
+        const isAssignedToMe = order.aidant_id === aidant.id || order.current_aidant_id === aidant.id || order.taken_by === user.id;
+        const isAvailableToAll = !order.aidant_id && ['creee', 'en_attente', 'disponible'].includes(order.status);
+        hasAccess = isAssignedToMe || isAvailableToAll;
       }
     }
 
@@ -461,12 +464,13 @@ router.post('/:id/status', async (req, res) => {
 
     if (error) throw error;
 
+    // ✅ RÉCRÉDITER SI L'ADMIN UTILISE LE STATUT GÉNÉRIQUE POUR ANNULER UNE COMMANDE COMPTÉE
     const wasDelivered = order.status === 'livree' || order.status === 'validee';
     if (wasDelivered && status === 'annulee' && order.subscription_id) {
       const { incrementOrder } = require('../services/visitPayment.service');
       const result = await incrementOrder(order.subscription_id);
       if (result.success) {
-        console.log(`📈 [Récrédit] Forfait récrédité (+1 commande) suite à l'annulation.`);
+        console.log(`📈 [Récrédit] Forfait récrédité (+1 commande) suite à l'annulation de statut.`);
       }
     }
 
@@ -604,6 +608,7 @@ router.post('/:id/cancel', async (req, res) => {
 
     if (updateError) throw updateError;
 
+    // ✅ RÉCRÉDITER (+1) L'ABONNEMENT EN CAS D'ANNULATION D'UNE COMMANDE DÉJÀ LIVRÉE OU VALIDÉE
     const wasDelivered = order.status === 'livree' || order.status === 'validee';
     if (wasDelivered && order.subscription_id) {
       const { incrementOrder } = require('../services/visitPayment.service');
@@ -615,7 +620,8 @@ router.post('/:id/cancel', async (req, res) => {
 
     if (order.aidant_id) {
       const { data: aidant } = await supabase.from('aidants').select('user_id').eq('id', order.aidant_id).single();
-      if (ant) {
+      // ✅ CORRIGÉ : Remplacement de "ant" par "aidant" pour prévenir tout plantage serveur
+      if (aidant) {
         await syncAidantOrderCount(aidant.user_id);
       }
     }
