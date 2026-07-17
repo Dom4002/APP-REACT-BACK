@@ -130,21 +130,21 @@ router.get('/active', getActiveAidant);
 
 // ============================================================
 // ✅ GET /api/aidants/my-assignments
-// Récupère les assignations de la famille connectée
+// Récupère les assignations de la famille connectée (Lecture seule)
 // ============================================================
 router.get('/my-assignments', roleMiddleware(['family']), getMyAssignments);
 
 // ============================================================
-// ✅ POST /api/aidants/assign
-// Assigner un aidant à un patient ou à un compte personnel (famille uniquement)
+// ✅ POST /api/aidants/assign (ADMIN & COORDINATOR UNIQUEMENT)
+// Assigner un aidant à un patient ou à un compte personnel
 // ============================================================
-router.post('/assign', roleMiddleware(['family']), assignAidant);
+router.post('/assign', roleMiddleware(['admin', 'coordinator']), assignAidant);
 
 // ============================================================
-// ✅ DELETE /api/aidants/assignments/:id
-// Révoquer une assignation (famille uniquement)
+// ✅ DELETE /api/aidants/assignments/:id (ADMIN & COORDINATOR UNIQUEMENT)
+// Révoquer une assignation
 // ============================================================
-router.delete('/assignments/:id', roleMiddleware(['family']), revokeAssignmentController);
+router.delete('/assignments/:id', roleMiddleware(['admin', 'coordinator']), revokeAssignmentController);
 
 // ============================================================
 // ✅ GET /api/aidants/:id
@@ -222,7 +222,7 @@ router.get('/:id', async (req, res) => {
 
 // ============================================================
 // ✅ GET /api/aidants/catalog/available-for-family
-// Récupère les aidants disponibles pour une famille
+// Récupère les aidants disponibles pour une famille (Lecture seule)
 // ============================================================
 router.get('/catalog/available-for-family', roleMiddleware(['family']), async (req, res) => {
   try {
@@ -278,7 +278,7 @@ router.get('/with-quota', roleMiddleware(['admin', 'coordinator']), async (req, 
 
 // ============================================================
 // ✅ GET /api/aidants/catalog/full
-// Récupère les aidants complets (ceux qui ont atteint leur quota)
+// Récupère les aidants complets (ceux qui ont atteint leur quota) - admin uniquement
 // ============================================================
 router.get('/catalog/full', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
   try {
@@ -433,7 +433,7 @@ router.get('/catalog/by-zone/:zone', async (req, res) => {
 
 // ============================================================
 // ✅ GET /api/aidants/stats
-// Statistiques des aidants
+// Statistiques des aidants (admin uniquement)
 // ============================================================
 router.get('/stats', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
   try {
