@@ -201,7 +201,7 @@ router.post('/', async (req, res) => {
       latitude = null,
       longitude = null,
       purchase_amount = 0,         
-      withdrawal_operator = null, 
+      withdrawal_operator = null,  
       prescription_url,
       order_type,
       is_ponctual = false,
@@ -224,7 +224,7 @@ router.post('/', async (req, res) => {
       latitude,
       longitude,
       purchaseAmount: Number(purchase_amount || 0),       
-      withdrawalOperator: withdrawal_operator,              
+      withdrawalOperator: withdrawal_operator,             
       prescriptionUrl: prescription_url || null,
       isPonctual: is_ponctual || order_type === 'ponctual',
       wizardChoice: wizard_choice,
@@ -287,7 +287,6 @@ router.get('/:id', async (req, res) => {
         .single();
       
       if (aidant) {
-        // ✅ CORRECTIF DE SÉCURITÉ : Permettre à l'aidant d'ouvrir la commande s'il est assigné ou si elle est disponible dans son catalogue
         const isAssignedToMe = order.aidant_id === aidant.id || order.current_aidant_id === aidant.id || order.taken_by === user.id;
         const isAvailableToAll = !order.aidant_id && ['creee', 'en_attente', 'disponible'].includes(order.status);
         hasAccess = isAssignedToMe || isAvailableToAll;
@@ -464,7 +463,7 @@ router.post('/:id/status', async (req, res) => {
 
     if (error) throw error;
 
-    // ✅ RÉCRÉDITER SI L'ADMIN UTILISE LE STATUT GÉNÉRIQUE POUR ANNULER UNE COMMANDE COMPTÉE
+    // ✅ RÉCRÉDITER (+1) L'ABONNEMENT EN CAS D'ANNULATION D'UNE COMMANDE DÉJÀ LIVRÉE OU VALIDÉE
     const wasDelivered = order.status === 'livree' || order.status === 'validee';
     if (wasDelivered && status === 'annulee' && order.subscription_id) {
       const { incrementOrder } = require('../services/visitPayment.service');
@@ -620,8 +619,7 @@ router.post('/:id/cancel', async (req, res) => {
 
     if (order.aidant_id) {
       const { data: aidant } = await supabase.from('aidants').select('user_id').eq('id', order.aidant_id).single();
-      // ✅ CORRIGÉ : Remplacement de "ant" par "aidant" pour prévenir tout plantage serveur
-      if (aidant) {
+       if (aidant) {
         await syncAidantOrderCount(aidant.user_id);
       }
     }
@@ -633,7 +631,76 @@ router.post('/:id/cancel', async (req, res) => {
   }
 });
 
-// ✅ 3.8 AUTO-VALIDATION ADMIN
+// ============================================================
+// ✅ 3.8 NOUVEAU - ADMIN : ASSIGNATION D'UN AIDANT SÉLECTIONNÉ À UNE COMMANDE ACTIVE
+// ============================================================
+router.post('/:id/assign', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { aidantUserId } = req.body; // L'user_id de l'aidant choisi
+
+    if (!aidantUserId) {
+      return res.status(400).json({ success: false, error: 'aidantUserId est requis par l’administration' });
+    }
+
+    const { data: aidant, error: aidantError } = await supabase
+      .from('aidants')
+      .select('id, user_id')
+      .eq('user_id', aidantUserId)
+      .single();
+
+    if (aidantError || !aidant) {
+      return res.status(404).json({ success: false, error: 'Intervenant rattaché non trouvé' });
+    }
+
+    const { data: order, error: orderError } = await supabase
+      .from('commandes')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (orderError || !order) {
+      return res.status(404).json({ success: false, error: 'Commande non trouvée' });
+    }
+
+    // Assigner directement la commande et la forcer à l'état "en_cours" de livraison
+    const { data: updatedOrder, error: updateError } = await supabase
+      .from('commandes')
+      .update({
+        aidant_id: aidant.id,
+        current_aidant_id: aidant.id,
+        status: 'en_cours', // Déclenchement direct
+        taken_at: new Date().toISOString(),
+        taken_by: aidantUserId,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
+
+    // Notifier immédiatement le livreur désigné par l'admin
+    await createNotification({
+      userId: aidantUserId,
+      title: '🛒 Commande assignée d\'office',
+      body: `L'administration vous a assigné la livraison de la commande : ${order.description}`,
+      type: 'commande',
+      data: { order_id: id, status: 'en_cours' },
+    });
+
+    res.json({
+      success: true,
+      message: 'Intervenant rattaché avec succès à la commande par l’administration',
+      order: updatedOrder,
+    });
+  } catch (error) {
+    console.error('❌ Admin assign order error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ✅ 3.9 AUTO-VALIDATION ADMIN
 router.post('/:id/auto-validate', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
   try {
     const { id } = req.params;
