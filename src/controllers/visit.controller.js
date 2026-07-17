@@ -3,6 +3,7 @@
 const { supabase } = require('../services/supabase.service');
 const { 
   createVisit,
+  startAdHocVisit, // ✅ Récupération du service d'ad-hoc
   assignAidantToVisit,
   getPendingAidantVisits,
   validateVisitWithoutAidant,
@@ -15,7 +16,7 @@ const { createNotification } = require('../services/notification.service');
 const { asyncWrapper } = require('../utils/errorHandler');
 
 // ============================================================
-// CRÉER UNE VISITE (AVEC WIZARD)
+// CRÉER UNE VISITE (ADMINISTRATION)
 // ============================================================
 const createVisitController = asyncWrapper(async (req, res) => {
   try {
@@ -33,19 +34,16 @@ const createVisitController = asyncWrapper(async (req, res) => {
       is_ponctual = false,
       assignment_type = 'ponctuelle',
       aidant_id = null,
-      wizard_choice = null,
-      selected_aidant_id = null,
     } = req.body;
 
-    const canCreate = ['admin', 'coordinator'].includes(profile.role) || profile.role === 'family';
+    const canCreate = ['admin', 'coordinator'].includes(profile.role);
     if (!canCreate) {
       return res.status(403).json({
         success: false,
-        error: 'Non autorisé à créer une visite',
+        error: 'La planification des visites est réservée à l’administration Santé Plus.',
       });
     }
 
-    // ✅ DÉTERMINER LA CIBLE DE MANIÈRE FLUIDE SANS BLOCAGE "HAS_PATIENT"
     let finalPatientId = patient_id || null;
     let finalTargetType = target_type || (patient_id ? 'patient' : 'personal');
     let finalTargetName = target_name || null;
@@ -81,24 +79,6 @@ const createVisitController = asyncWrapper(async (req, res) => {
       finalUserId = targetUid;
     }
 
-    // ✅ Si famille, vérifier les permissions sur le patient associé
-    if (profile.role === 'family' && finalPatientId) {
-      const { data: link } = await supabase
-        .from('patient_family_links')
-        .select('patient_id')
-        .eq('family_id', user.id)
-        .eq('patient_id', finalPatientId)
-        .maybeSingle();
-
-      if (!link) {
-        return res.status(403).json({
-          success: false,
-          error: 'Vous n\'êtes pas lié à ce patient',
-        });
-      }
-    }
-
-    // ✅ Créer la visite via le service unifié
     const result = await createVisit({
       userId: user.id,
       patientId: finalPatientId,
@@ -113,22 +93,11 @@ const createVisitController = asyncWrapper(async (req, res) => {
       isPonctual: is_ponctual || false,
       assignmentType: assignment_type || 'ponctuelle',
       aidantId: aidant_id || null,
-      wizardChoice: wizard_choice || null,
-      selectedAidantId: selected_aidant_id || null,
       profile: profile,
-      coordinatorId: ['admin', 'coordinator'].includes(profile.role) ? user.id : null,
+      coordinatorId: user.id,
     });
 
     if (!result.success) {
-      // ✅ Si c'est une erreur de wizard, retourner les options de sélection
-      if (result.code === 'WIZARD_REQUIRED' || result.code === 'ALL_AIDANTS_FULL') {
-        return res.status(400).json({
-          success: false,
-          error: result.error,
-          code: result.code,
-          wizard: result.wizard,
-        });
-      }
       return res.status(400).json({
         success: false,
         error: result.error,
@@ -139,15 +108,7 @@ const createVisitController = asyncWrapper(async (req, res) => {
     res.status(201).json({
       success: true,
       visit: result.visit,
-      requires_payment: result.requires_payment,
-      payment_amount: result.payment_amount,
-      subscription_used: result.subscription_used,
-      waiting_for_aidant: result.waiting_for_aidant,
-      message: result.waiting_for_aidant 
-        ? 'Visite créée en attente d\'aidant. L\'administration a été notifiée.'
-        : result.requires_payment
-          ? 'Visite créée en brouillon. Paiement requis pour la planifier.'
-          : 'Visite planifiée avec succès',
+      message: 'Visite planifiée avec succès',
     });
   } catch (error) {
     console.error('❌ createVisitController error:', error);
@@ -352,7 +313,7 @@ const getPendingAidantVisitsController = asyncWrapper(async (req, res) => {
 });
 
 // ============================================================
-// RÉCUPÉRER LES AIDANTS DISPONIBLES POUR UNE FAMILLE
+// RÉCUPÉRER LES AIDANTS DISPONIBLES POUR UNE FAMILLE (LECTURE SEULE)
 // ============================================================
 const getAvailableAidants = asyncWrapper(async (req, res) => {
   try {
