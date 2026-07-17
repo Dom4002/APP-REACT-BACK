@@ -1,5 +1,5 @@
 // 📁 backend/src/services/order.service.js
-// ✅ SERVICE DE COMMANDES COMPLET : CORRECTION DE LA DECLARATION DE CONTROL DU MODE DE PAIEMENT
+// ✅ SERVICE DE COMMANDES COMPLET : CORRECTION DES RÉFÉRENCES DE VARIABLES CAMELCASE DANS LES MÉTADONNÉES
 
 const { supabase } = require('./supabase.service');
 const { createNotification } = require('./notification.service');
@@ -135,7 +135,7 @@ const checkAidantOrderQuota = async (aidantUserId) => {
         current: 0,
         max: 999,
         available: 999,
-        canTake: true, // ✅ Toujours autorisé
+        canTake: true, 
       };
     }
 
@@ -191,8 +191,8 @@ const createOrder = async ({
   address,
   latitude = null,   
   longitude = null,  
-  purchaseAmount = 0,        // ✅ Saisie d'achats d'avance
-  withdrawalOperator = null,  // ✅ 'mtn_moov' ou 'celtiis'
+  purchaseAmount = 0,        
+  withdrawalOperator = null,  
   prescriptionUrl,
   isPonctual = false,
   wizardChoice = null,
@@ -215,7 +215,7 @@ const createOrder = async ({
     const requiresAdvancePayment = purchaseAmount > 0;
 
     let status = ORDER_STATUS.CREATED;
-    let requiresPayment = false; // ✅ DÉCLARATION CORRIGÉE : Évite l'exception ReferenceError !
+    let requiresPayment = false;  
     let paymentAmount = 0;
     let subscriptionId = null;
 
@@ -295,9 +295,9 @@ const createOrder = async ({
 
       metadata: {
         requires_payment: requiresAdvancePayment,
-        purchase_amount,
-        withdrawal_operator,
-        withdrawal_fee,
+        purchase_amount: purchaseAmount,  
+        withdrawal_operator: withdrawalOperator,  
+        withdrawal_fee: withdrawalFee,
         created_by: userId,
         created_at: new Date().toISOString(),
         auto_assigned_aidant: false,
@@ -497,9 +497,9 @@ const deliverOrder = async (
   aidantUserId, 
   proofUrl = null, 
   location = null,
-  deliveryFee = 0,             // Saisi par le livreur
-  paymentMethod = 'online',    // 'online' ou 'cash'
-  cashAmountReceived = 0       // Reçu en main propre
+  deliveryFee = 0,            
+  paymentMethod = 'online',    
+  cashAmountReceived = 0        
 ) => {
   try {
     const { data: order, error: fetchError } = await supabase
