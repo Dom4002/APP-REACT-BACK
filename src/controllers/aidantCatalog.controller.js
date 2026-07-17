@@ -1,4 +1,5 @@
 // 📁 backend/src/controllers/aidantCatalog.controller.js
+
 const { supabase } = require('../services/supabase.service');
 
 const {
@@ -103,16 +104,23 @@ const getMyAssignments = asyncWrapper(async (req, res) => {
 });
 
 // ============================================================
-// ASSIGNER UN AIDANT - AVEC patientId OPTIONNEL
+// ASSIGNER UN AIDANT - AVEC patientId OPTIONNEL (ADMIN UNIQUEMENT)
 // ============================================================
 const assignAidant = asyncWrapper(async (req, res) => {
   try {
     const { aidantId, patientId, assignmentType = 'permanente' } = req.body;
-    const familyId = req.user.id;
+    const adminId = req.user.id;
+    const userRole = req.profile?.role;
 
-    console.log('📤 Assignation aidant - Payload reçu:', { aidantId, patientId, assignmentType, familyId });
+    // 🔒 Sécurité : Bloquer les comptes famille
+    if (userRole !== 'admin' && userRole !== 'coordinator') {
+      return res.status(403).json({
+        success: false,
+        error: "Non autorisé. Seule l'administration de Santé Plus peut modifier les attributions d'aidants.",
+        code: 'FORBIDDEN_ACTION'
+      });
+    }
 
-    // ✅ Validation : aidantId est obligatoire
     if (!aidantId) {
       return res.status(400).json({
         success: false,
@@ -120,19 +128,16 @@ const assignAidant = asyncWrapper(async (req, res) => {
       });
     }
 
-    // ✅ patientId est optionnel - peut être null ou undefined
     const result = await assignAidantToPatient(
       aidantId,
-      familyId,
-      patientId || null,   // ✅ null autorisé
+      adminId,
+      patientId || null,
       assignmentType
     );
 
-    console.log('✅ Aidant assigné avec succès:', result);
-
     res.status(201).json({
       success: true,
-      message: 'Aidant assigné avec succès',
+      message: 'Aidant assigné avec succès par l’administration',
       data: result,
     });
   } catch (error) {
@@ -145,16 +150,24 @@ const assignAidant = asyncWrapper(async (req, res) => {
 });
 
 // ============================================================
-// RÉVOQUER UNE ASSIGNATION - AVEC NOTIFICATIONS COMPLÈTES
+// RÉVOQUER UNE ASSIGNATION - AVEC NOTIFICATIONS COMPLÈTES (ADMIN UNIQUEMENT)
 // ============================================================
 const revokeAssignmentController = asyncWrapper(async (req, res) => {
   try {
     const { id } = req.params;
-    const familyId = req.user.id;
+    const adminId = req.user.id;
+    const userRole = req.profile?.role;
 
-    console.log('📤 Révocation assignation:', id, 'pour la famille:', familyId);
+    // 🔒 Sécurité : Bloquer les comptes famille
+    if (userRole !== 'admin' && userRole !== 'coordinator') {
+      return res.status(403).json({
+        success: false,
+        error: "Non autorisé. Seule l'administration de Santé Plus peut révoquer des attributions.",
+        code: 'FORBIDDEN_ACTION'
+      });
+    }
 
-    const result = await revokeAssignment(id, familyId);
+    const result = await revokeAssignment(id, adminId);
 
     res.json({
       success: true,
@@ -171,7 +184,7 @@ const revokeAssignmentController = asyncWrapper(async (req, res) => {
 });
 
 // ============================================================
-// ✅ NOUVEAU : RÉCUPÉRER L'AIDANT ACTIF POUR UNE CIBLE
+// ✅ RÉCUPÉRER L'AIDANT ACTIF POUR UNE CIBLE
 // ============================================================
 const getActiveAidant = asyncWrapper(async (req, res) => {
   try {
@@ -257,5 +270,5 @@ module.exports = {
   assignAidant,
   getMyAssignments,
   revokeAssignmentController,
-  getActiveAidant,          // ✅ NOUVEAU
+  getActiveAidant,
 };
