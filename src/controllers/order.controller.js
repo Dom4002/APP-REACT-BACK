@@ -5,6 +5,7 @@ const {
   createOrder,
   takeOrder,
   deliverOrder,
+  confirmCashPayment,  
   autoValidateOrder,
   ORDER_STATUS,
 } = require('../services/order.service');
@@ -24,11 +25,9 @@ const createOrderController = asyncWrapper(async (req, res) => {
       type,
       description,
       address,
-      estimated_amount,
-      items,
+      purchase_amount = 0,         // ✅ Montant estimé des achats
+      withdrawal_operator = null,  // ✅ Opérateur GSM ('mtn_moov' ou 'celtiis')
       prescription_url,
-      order_type,
-      is_paid,
       is_ponctual = false,
       wizard_choice = null,
       selected_aidant_id = null,
@@ -57,8 +56,8 @@ const createOrderController = asyncWrapper(async (req, res) => {
       type,
       description,
       address,
-      estimatedAmount: estimated_amount || 0,
-      items: items || [],
+      purchaseAmount: Number(purchase_amount || 0),
+      withdrawalOperator: withdrawal_operator,
       prescriptionUrl: prescription_url || null,
       isPonctual: is_ponctual || false,
       wizardChoice: wizard_choice || null,
@@ -98,8 +97,9 @@ const takeOrderController = asyncWrapper(async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.id;
+    const { lat, lng } = req.body; // Récupère le checkpoint GPS de départ
 
-    const result = await takeOrder(id, userId);
+    const result = await takeOrder(id, userId, lat, lng);
 
     if (!result.success) {
       return res.status(400).json({
@@ -127,15 +127,39 @@ const takeOrderController = asyncWrapper(async (req, res) => {
 });
 
 // ============================================================
-// LIVRER UNE COMMANDE
+// LIVRER UNE COMMANDE (AVEC DOUBLE MODALITÉ SÉCURISÉE)
 // ============================================================
 const deliverOrderController = asyncWrapper(async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.id;
-    const { proof_url, location } = req.body;
+    const { 
+      proof_url, 
+      lat, 
+      lng, 
+      delivery_fee, 
+      payment_method, 
+      cash_amount_received 
+    } = req.body;
 
-    const result = await deliverOrder(id, userId, proof_url, location);
+    if (!payment_method) {
+      return res.status(400).json({
+        success: false,
+        error: 'Le moyen de paiement est obligatoire (online ou cash)',
+      });
+    }
+
+    const location = lat && lng ? { lat, lng } : null;
+
+    const result = await deliverOrder(
+      id, 
+      userId, 
+      proof_url, 
+      location,
+      Number(delivery_fee || 0),
+      payment_method,
+      Number(cash_amount_received || 0)
+    );
 
     if (!result.success) {
       return res.status(400).json({
@@ -147,7 +171,7 @@ const deliverOrderController = asyncWrapper(async (req, res) => {
 
     res.json({
       success: true,
-      message: 'Commande livrée avec succès',
+      message: 'Livraison de la commande enregistrée avec succès',
       order: result.order,
       auto_validation_at: result.auto_validation_at,
     });
@@ -156,6 +180,45 @@ const deliverOrderController = asyncWrapper(async (req, res) => {
     res.status(500).json({
       success: false,
       error: error.message || 'Erreur lors de la livraison',
+    });
+  }
+});
+
+// ============================================================
+// ✅ NOUVEAU : CONFIRMER OU CONTESTER LE PAIEMENT CASH (FAMILLE)
+// ============================================================
+const confirmCashPaymentController = asyncWrapper(async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { is_confirmed } = req.body;
+    const userId = req.user.id;
+
+    if (is_confirmed === undefined) {
+      return res.status(400).json({
+        success: false,
+        error: 'Le paramètre is_confirmed (booléen) est requis',
+      });
+    }
+
+    const result = await confirmCashPayment(id, userId, is_confirmed);
+
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        error: result.error,
+      });
+    }
+
+    res.json({
+      success: true,
+      message: is_confirmed ? 'Paiement en espèces validé' : 'Litige de paiement espèces enregistré',
+      order: result.order,
+    });
+  } catch (error) {
+    console.error('❌ confirmCashPaymentController error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Erreur lors de la validation du paiement espèces',
     });
   }
 });
@@ -355,6 +418,7 @@ module.exports = {
   createOrderController,
   takeOrderController,
   deliverOrderController,
+  confirmCashPaymentController,  
   autoValidateOrderController,
   getAvailableOrders,
   updateOrderStatus,
