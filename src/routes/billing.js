@@ -1,6 +1,5 @@
 // 📁 backend/src/routes/billing.js
-// ✅ BILLET ET PAIEMENTS : ALIGNEMENT DES DURÉES D'ABONNEMENTS (2, 3, 4, 5 SEMAINES) SUR LA GRILLE TARIFAIRE
-
+ 
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 const { FedaPay, Transaction } = require('fedapay');
@@ -35,6 +34,9 @@ const supabase = createClient(
 
 const FEDAPAY_SECRET_KEY = process.env.FEDAPAY_SECRET_KEY?.trim();
 const FEDAPAY_ENV = (process.env.FEDAPAY_ENV || 'live').trim().toLowerCase();
+
+// ✅ IMPORTATION DU TRAITEMENT DOUBLE-FLUX COMMANDES
+const { processOrderPaymentFromWebhook } = require('../services/order.service');
 
 if (!FEDAPAY_SECRET_KEY) {
   console.error('❌ FEDAPAY_SECRET_KEY manquant dans les variables d\'environnement');
@@ -216,130 +218,6 @@ async function createPendingSubscription(userId, offerId, offer, patientId = nul
   }
 }
 
-async function createPonctualOrder(paymentRecord, transactionId, orderData) {
-  try {
-    const { data: existingOrders, error: checkError } = await supabase
-      .from('commandes')
-      .select('id')
-      .eq('user_id', paymentRecord.user_id)
-      .eq('order_type', 'ponctual')
-      .eq('is_paid', true)
-      .eq('metadata->>transaction_id', transactionId)
-      .limit(1);
-
-    if (checkError) {
-      console.error('❌ Erreur vérification commande existante:', checkError.message);
-      return null;
-    }
-
-    if (existingOrders && existingOrders.length > 0) {
-      console.log('ℹ️ Commande déjà créée pour cette transaction:', transactionId);
-      return existingOrders[0];
-    }
-
-    const orderDataToInsert = orderData || {};
-
-    const targetType = orderDataToInsert.target_type || 'personal';
-    const targetName = orderDataToInsert.target_name || 'Commande personnelle';
-
-    if (!orderDataToInsert.description) {
-      orderDataToInsert.description = 'Commande ponctuelle';
-    }
-    if (!orderDataToInsert.address) {
-      orderDataToInsert.address = 'Adresse non spécifiée';
-    }
-    if (!orderDataToInsert.type) {
-      orderDataToInsert.type = 'autre';
-    }
-
-    const { data: newOrder, error: orderError } = await supabase
-      .from('commandes')
-      .insert({
-        user_id: paymentRecord.user_id,
-        patient_id: orderDataToInsert.patient_id || null,
-        target_type: targetType,
-        target_name: targetName,
-        family_id: paymentRecord.user_id,
-        type: orderDataToInsert.type,
-        description: orderDataToInsert.description,
-        address: orderDataToInsert.address,
-        latitude: orderDataToInsert.latitude || null,
-        longitude: orderDataToInsert.longitude || null,
-        status: 'creee',
-        estimated_amount: paymentRecord.amount || 0,
-        final_amount: paymentRecord.amount || 0,
-        items: orderDataToInsert.items || [],
-        prescription_url: orderDataToInsert.prescription_url || null,
-        order_type: 'ponctual',
-        is_paid: true,
-        metadata: {
-          payment_id: paymentRecord.id,
-          transaction_id: transactionId,
-          is_ponctual: true,
-        },
-      })
-      .select()
-      .single();
-
-    if (orderError) {
-      console.error('❌ Erreur création commande:', orderError.message);
-      return null;
-    }
-
-    console.log('✅ Commande ponctuelle créée:', newOrder.id);
-
-    await supabase.from('notifications').insert({
-      user_id: paymentRecord.user_id,
-      title: '✅ Commande confirmée !',
-      body: `Votre commande "${orderDataToInsert.description}" pour ${targetName} a été enregistrée avec succès.`,
-      type: 'commande',
-      data: {
-        order_id: newOrder.id,
-        status: 'creee',
-        target_type: targetType,
-        target_name: targetName,
-      },
-    });
-
-    const { data: aidants } = await supabase
-      .from('aidants')
-      .select('user_id, current_orders, max_orders')
-      .eq('available', true)
-      .eq('is_verified', true)
-      .eq('status', 'approved');
-
-    if (aidants && aidants.length > 0) {
-      const availableAidants = aidants.filter(
-        a => (a.current_orders || 0) < (a.max_orders || 2)
-      );
-
-      if (availableAidants.length > 0) {
-        for (const aidant of availableAidants) {
-          await supabase.from('notifications').insert({
-            user_id: aidant.user_id, 
-            title: '🛒 Nouvelle commande disponible',
-            body: `Commande de ${targetName} — ${orderDataToInsert.description}`,
-            type: 'commande',
-            data: { 
-              order_id: newOrder.id, 
-              action: 'take' 
-            },
-          });
-        }
-        console.log(`📡 [Webhook] ${availableAidants.length} aidants disponibles notifiés pour la commande ${newOrder.id}`);
-      } else {
-        console.log('ℹ️ Aucun aidant disponible (quotas maximum atteints)');
-      }
-    }
-
-    return newOrder;
-
-  } catch (error) {
-    console.error('❌ Erreur createPonctualOrder:', error.message);
-    return null;
-  }
-}
-
 async function processPonctualVisit(paymentRecord, transactionId, visitId, metadata) {
   try {
     console.log('🔄 Traitement d\'une visite ponctuelle en arrière-plan:', visitId);
@@ -365,7 +243,7 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
     const targetId = visit.patient_id || visit.user_id;
 
     let aidantId = visit.aidant_id || visit.metadata?.selected_aidant || null;
-    if (!aidantId) {
+    if (!antId) {
       aidantId = await getActiveAidantForTarget(targetType, targetId, familyId);
       console.log(`✅ Aidant trouvé après paiement: ${aidantId}`);
     }
@@ -648,6 +526,7 @@ router.post('/generate-payment', async (req, res) => {
       target_name = null,
       visit_id = null,
       is_visit = false,
+      type = null, // ✅ Ajouté pour support du type de commande explicite
     } = req.body;
 
     const finalAmount = Number(montant || amount || 0);
@@ -688,7 +567,7 @@ router.post('/generate-payment', async (req, res) => {
     let actualAbonnementId = null;
 
     if (!is_ponctual && (abonnement_id || plan_id)) {
-      const targetOfferId = abonnement_id || plan_id;
+      const targetOfferId = displayName || plan_id;
       const { data: offer, error: offerError } = await supabase
         .from('offres')
         .select('id, name, type, price, total_visits, total_orders')
@@ -736,7 +615,7 @@ router.post('/generate-payment', async (req, res) => {
       target_name: target_name || finalName,
       is_visit: is_visit || false,
       visit_id: visit_id || null,
-      type: is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription'),
+      type: type || (is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription')), // ✅ Aiguillage explicite
     };
 
     console.log('📦 Métadonnées envoyées à FedaPay:', metadata);
@@ -781,22 +660,7 @@ router.post('/generate-payment', async (req, res) => {
       reference: String(transaction.id),
       status: 'en_attente',
       abonnement_id: actualAbonnementId || null,
-      metadata: {
-        description: description || 'Paiement Santé Plus',
-        plan_id: plan_id || null,
-        abonnement_id: actualAbonnementId || null,
-        order_id: order_id || null,
-        is_ponctual: is_ponctual || false,
-        transaction_id: String(transaction.id),
-        payment_url: paymentUrl,
-        order_data: is_ponctual && order_data ? JSON.stringify(order_data) : null,
-        patient_id: patient_id || null,
-        target_type: target_type || 'personal',
-        target_name: target_name || finalName,
-        is_visit: is_visit || false,
-        visit_id: visit_id || null,
-        type: is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription'),
-      },
+      metadata: metadata, // ✅ Métadonnées unifiées
     };
 
     const { data: payment, error: dbError } = await supabase
@@ -919,7 +783,7 @@ router.get('/verify-payment', async (req, res) => {
 });
 
 // ============================================================
-// 🔔 WEBHOOK FEDAPAY
+// 🔔 WEBHOOK FEDAPAY (TRAITEMENT DE LA COMMANDE DOUBLE-COURRIER)
 // ============================================================
 router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const startTime = Date.now();
@@ -975,11 +839,13 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     const subscriptionId = metadata.abonnement_id || payment.abonnement_id || null;
     const orderData = metadata.order_data ? (typeof metadata.order_data === 'string' ? JSON.parse(metadata.order_data) : metadata.order_data) : null;
     const visitId = metadata.visit_id || payment.visit_id || null;
+    const orderId = metadata.order_id || null; // ID de commande existante pour frais de livraison
 
     console.log('📦 Métadonnées extraites:', {
       type,
       isPonctual,
       visitId,
+      orderId,
       subscriptionId,
       hasOrderData: !!orderData,
     });
@@ -1005,8 +871,33 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     if (type === 'visit' && visitId) {
       result = await processPonctualVisit(paymentRecord, transactionId, visitId, metadata);
     } 
+    // ✅ CLOTURE WEBHOOK : Gestion des frais de livraison ou de l'avance pour commande existante
+    else if (type === 'order' && orderId) {
+      result = await processOrderPaymentFromWebhook(orderId, transactionId);
+    }
     else if (type === 'order' || isPonctual) {
-      result = await createPonctualOrder(paymentRecord, transactionId, orderData);
+      if (orderData) {
+        // Création initiale d'une commande d'avance classique
+        const { data: newOrder } = await supabase.from('commandes').insert({
+          user_id: paymentRecord.user_id,
+          patient_id: orderData.patient_id || null,
+          target_type: orderData.target_type || 'personal',
+          target_name: orderData.target_name || 'Commande',
+          family_id: paymentRecord.user_id,
+          type: orderData.type || 'autre',
+          description: orderData.description,
+          address: orderData.address,
+          status: 'creee',
+          estimated_amount: paymentRecord.amount,
+          order_type: 'ponctual',
+          is_paid: true,
+          purchase_amount: orderData.purchase_amount || 0,
+          withdrawal_operator: orderData.withdrawal_operator || null,
+          withdrawal_fee: orderData.withdrawal_fee || 0,
+          metadata: { transaction_id: transactionId }
+        }).select().single();
+        result = newOrder;
+      }
     } 
     else if (type === 'subscription' && subscriptionId) {
       result = await activateSubscription(paymentRecord, subscriptionId);
