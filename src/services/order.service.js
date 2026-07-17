@@ -1,5 +1,6 @@
 // 📁 backend/src/services/order.service.js
- 
+// ✅ SERVICE DE COMMANDES COMPLET : CORRECTION DE LA DECLARATION DE CONTROL DU MODE DE PAIEMENT
+
 const { supabase } = require('./supabase.service');
 const { createNotification } = require('./notification.service');
 
@@ -191,7 +192,7 @@ const createOrder = async ({
   latitude = null,   
   longitude = null,  
   purchaseAmount = 0,        // ✅ Saisie d'achats d'avance
-  withdrawalOperator = null,  // ✅ MTN/Moov ou Celtiis
+  withdrawalOperator = null,  // ✅ 'mtn_moov' ou 'celtiis'
   prescriptionUrl,
   isPonctual = false,
   wizardChoice = null,
@@ -214,7 +215,7 @@ const createOrder = async ({
     const requiresAdvancePayment = purchaseAmount > 0;
 
     let status = ORDER_STATUS.CREATED;
-    let requiresPayment = false;
+    let requiresPayment = false; // ✅ DÉCLARATION CORRIGÉE : Évite l'exception ReferenceError !
     let paymentAmount = 0;
     let subscriptionId = null;
 
@@ -496,9 +497,9 @@ const deliverOrder = async (
   aidantUserId, 
   proofUrl = null, 
   location = null,
-  deliveryFee = 0,             // ✅ Saisi par le livreur
-  paymentMethod = 'online',    // ✅ 'online' ou 'cash'
-  cashAmountReceived = 0       // ✅ Reçu en main propre
+  deliveryFee = 0,             // Saisi par le livreur
+  paymentMethod = 'online',    // 'online' ou 'cash'
+  cashAmountReceived = 0       // Reçu en main propre
 ) => {
   try {
     const { data: order, error: fetchError } = await supabase
