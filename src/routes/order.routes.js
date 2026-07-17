@@ -22,6 +22,7 @@ const {
   createOrder,
   takeOrder,
   deliverOrder,
+  confirmCashPayment, // ✅ Importé pour la confirmation espèces
   autoValidateOrder,
   enrichOrderWithRelations,
   syncAidantOrderCount,
@@ -129,7 +130,7 @@ router.get('/available', async (req, res) => {
   }
 });
 
-// ✅ 1.2 OBTENIR TOUTES LES COMMANDES CHRONOLOGIQUES (AVEC FILTRE JAVASCRIPT ROBUSTE)
+// ✅ 1.2 OBTENIR TOUTES LES COMMANDES CHRONOLOGIQUES
 router.get('/', async (req, res) => {
   try {
     const { user, profile } = req;
@@ -199,8 +200,8 @@ router.post('/', async (req, res) => {
       address,
       latitude = null,
       longitude = null,
-      estimated_amount,
-      items,
+      purchase_amount = 0,         
+      withdrawal_operator = null, 
       prescription_url,
       order_type,
       is_ponctual = false,
@@ -222,8 +223,8 @@ router.post('/', async (req, res) => {
       address,
       latitude,
       longitude,
-      estimatedAmount: estimated_amount || 0,
-      items: items || [],
+      purchaseAmount: Number(purchase_amount || 0),       
+      withdrawalOperator: withdrawal_operator,              
       prescriptionUrl: prescription_url || null,
       isPonctual: is_ponctual || order_type === 'ponctual',
       wizardChoice: wizard_choice,
@@ -319,7 +320,7 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// ✅ 3.2 CONFIRMER LE PAIEMENT D'UNE COMMANDE PONCTUELLE
+// ✅ 3.2 CONFIRMER LE PAIEMENT D'UNE COMMANDE PONCTUELLE (PROVISION INITIALE)
 router.post('/:id/confirm-payment', async (req, res) => {
   try {
     const { id } = req.params;
@@ -329,7 +330,7 @@ router.post('/:id/confirm-payment', async (req, res) => {
     if (orderError) throw orderError;
 
     if (order.status !== 'attente_paiement') {
-      return res.status(400).json({ error: 'Cette commande n\'est pas en attente de paiement' });
+      return res.status(400).json({ error: 'Cette commande n\'est pas en attente de paiement de provision' });
     }
 
     let aidantId = order.aidant_id || null;
@@ -385,7 +386,6 @@ router.post('/:id/confirm-payment', async (req, res) => {
       }
     } else {
       const { data: aidantProfile } = await supabase.from('aidants').select('user_id').eq('id', aidantId).maybeSingle();
-      // ✅ CORRECTIF SYNTAXIQUE : Remplacement de antProfile par aidantProfile
       if (aidantProfile?.user_id) {
         await createNotification({
           userId: aidantProfile.user_id,
@@ -400,8 +400,8 @@ router.post('/:id/confirm-payment', async (req, res) => {
     if (order.family_id) {
       await createNotification({
         userId: order.family_id,
-        title: '✅ Paiement confirmé',
-        body: `Votre paiement pour la commande "${order.description}" a été confirmé.`,
+        title: '✅ Paiement de provision validé',
+        body: `Votre provision d'achats pour la commande "${order.description}" a été validée.`,
         type: 'commande',
         data: { order_id: id, status: 'creee' },
       });
@@ -419,11 +419,10 @@ router.post('/:id/take', async (req, res) => {
   try {
     const { id } = req.params;
     const aidantUserId = req.user.id;
-    // 🟢 CORRECTIF : Extraction sécurisée de lat et lng envoyées par le mobile
     const { lat, lng } = req.body; 
 
     const { takeOrder } = require('../services/order.service');
-    const result = await takeOrder(id, aidantUserId, lat, lng); // 🟢 Transmission des coordonnées GPS au service
+    const result = await takeOrder(id, aidantUserId, lat, lng); 
 
     if (!result.success) {
       return res.status(400).json({
@@ -462,13 +461,12 @@ router.post('/:id/status', async (req, res) => {
 
     if (error) throw error;
 
-    // ✅ RÉCRÉDITER SI L'ADMIN UTILISE LE STATUT GÉNÉRIQUE POUR ANNULER UNE COMMANDE COMPTÉE
     const wasDelivered = order.status === 'livree' || order.status === 'validee';
     if (wasDelivered && status === 'annulee' && order.subscription_id) {
       const { incrementOrder } = require('../services/visitPayment.service');
       const result = await incrementOrder(order.subscription_id);
       if (result.success) {
-        console.log(`📈 [Récrédit] Forfait récrédité (+1 commande) suite à l'annulation de statut.`);
+        console.log(`📈 [Récrédit] Forfait récrédité (+1 commande) suite à l'annulation.`);
       }
     }
 
@@ -486,14 +484,19 @@ router.post('/:id/status', async (req, res) => {
   }
 });
 
-// ✅ 3.5 LIVRAISON DE LA COMMANDE (AVEC DÉCOMPTE FORFAIT IMMÉDIAT ET LOCATION DU DÉPÔT)
+// ✅ 3.5 LIVRAISON DE LA COMMANDE (AVEC DÉCOMPTE FORFAIT IMMÉDIAT, TRANSPORT ET SÉCURISATION CASH)
 router.post('/:id/deliver', async (req, res) => {
   try {
     const { id } = req.params;
-    const { proof_url, location } = req.body;
+    const { 
+      proof_url, 
+      location, 
+      delivery_fee, 
+      payment_method, 
+      cash_amount_received 
+    } = req.body;
     const aidantUserId = req.user.id;
 
-    // Récupérer la commande pour vérifier s'il s'agit d'un abonnement actif
     const { data: order, error: orderError } = await supabase
       .from('commandes')
       .select('subscription_id')
@@ -503,13 +506,21 @@ router.post('/:id/deliver', async (req, res) => {
     if (orderError) throw orderError;
 
     const { deliverOrder } = require('../services/order.service');
-    const result = await deliverOrder(id, aidantUserId, proof_url, location);
+    const result = await deliverOrder(
+      id, 
+      aidantUserId, 
+      proof_url, 
+      location, 
+      Number(delivery_fee || 0), 
+      payment_method, 
+      Number(cash_amount_received || 0)
+    );
 
     if (!result.success) {
       return res.status(400).json({ success: false, error: result.error });
     }
 
-    // ✅ DÉCOMPTE IMMÉDIAT LORS DE LA LIVRAISON DE LA COMMANDE SANS ATTENDRE LA VALIDATION ADMIN
+    // Décompte de forfait d'abonnement immédiat s'il y a lieu
     if (order.subscription_id) {
       const { decrementOrder } = require('../services/visitPayment.service');
       const decResult = await decrementOrder(order.subscription_id);
@@ -531,7 +542,36 @@ router.post('/:id/deliver', async (req, res) => {
   }
 });
 
-// ✅ 3.6 ANNULER UNE COMMANDE ET RESTITUER LE QUOTA ET CRÉDIT (+1 !)
+// ✅ 3.6 SÉCURITÉ CASH : ENREGISTRER LA SÉLECTION CLIENT (OUI/NON) SUR LA COHERENCE DES ESPÈCES
+router.post('/:id/confirm-cash', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { is_confirmed } = req.body;
+    const userId = req.user.id;
+
+    if (is_confirmed === undefined) {
+      return res.status(400).json({ success: false, error: 'Paramètre is_confirmed requis' });
+    }
+
+    const { confirmCashPayment } = require('../services/order.service');
+    const result = await confirmCashPayment(id, userId, is_confirmed);
+
+    if (!result.success) {
+      return res.status(400).json({ success: false, error: result.error });
+    }
+
+    res.json({
+      success: true,
+      message: is_confirmed ? 'Paiement espèces validé' : 'Litige de paiement espèces enregistré',
+      order: result.order,
+    });
+  } catch (error) {
+    console.error('❌ Confirm cash route error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ✅ 3.7 ANNULER UNE COMMANDE ET RESTITUER LE QUOTA ET CRÉDIT (+1 !)
 router.post('/:id/cancel', async (req, res) => {
   try {
     const { id } = req.params;
@@ -564,7 +604,6 @@ router.post('/:id/cancel', async (req, res) => {
 
     if (updateError) throw updateError;
 
-    // ✅ RÉCRÉDITER (+1) L'ABONNEMENT EN CAS D'ANNULATION D'UNE COMMANDE DÉJÀ LIVRÉE OU VALIDÉE
     const wasDelivered = order.status === 'livree' || order.status === 'validee';
     if (wasDelivered && order.subscription_id) {
       const { incrementOrder } = require('../services/visitPayment.service');
@@ -576,7 +615,7 @@ router.post('/:id/cancel', async (req, res) => {
 
     if (order.aidant_id) {
       const { data: aidant } = await supabase.from('aidants').select('user_id').eq('id', order.aidant_id).single();
-      if (aidant) {
+      if (ant) {
         await syncAidantOrderCount(aidant.user_id);
       }
     }
@@ -588,7 +627,7 @@ router.post('/:id/cancel', async (req, res) => {
   }
 });
 
-// ✅ 3.7 AUTO-VALIDATION ADMIN (PLUS DE DECOMPTE REDONDANT ICI !)
+// ✅ 3.8 AUTO-VALIDATION ADMIN
 router.post('/:id/auto-validate', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
   try {
     const { id } = req.params;
