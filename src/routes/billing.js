@@ -243,7 +243,7 @@ async function processPonctualVisit(paymentRecord, transactionId, visitId, metad
     const targetId = visit.patient_id || visit.user_id;
 
     let aidantId = visit.aidant_id || visit.metadata?.selected_aidant || null;
-    if (!antId) {
+    if (!aidantId) {
       aidantId = await getActiveAidantForTarget(targetType, targetId, familyId);
       console.log(`✅ Aidant trouvé après paiement: ${aidantId}`);
     }
@@ -526,7 +526,7 @@ router.post('/generate-payment', async (req, res) => {
       target_name = null,
       visit_id = null,
       is_visit = false,
-      type = null, // ✅ Ajouté pour support du type de commande explicite
+      type = null,
     } = req.body;
 
     const finalAmount = Number(montant || amount || 0);
@@ -567,7 +567,7 @@ router.post('/generate-payment', async (req, res) => {
     let actualAbonnementId = null;
 
     if (!is_ponctual && (abonnement_id || plan_id)) {
-      const targetOfferId = displayName || plan_id;
+      const targetOfferId = abonnement_id || plan_id; // ✅ CORRIGÉ : Remplacement de "displayName" par "abonnement_id"
       const { data: offer, error: offerError } = await supabase
         .from('offres')
         .select('id, name, type, price, total_visits, total_orders')
@@ -615,7 +615,7 @@ router.post('/generate-payment', async (req, res) => {
       target_name: target_name || finalName,
       is_visit: is_visit || false,
       visit_id: visit_id || null,
-      type: type || (is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription')), // ✅ Aiguillage explicite
+      type: type || (is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription')), // ✅ Aiguillage explicite unifié
     };
 
     console.log('📦 Métadonnées envoyées à FedaPay:', metadata);
@@ -783,7 +783,7 @@ router.get('/verify-payment', async (req, res) => {
 });
 
 // ============================================================
-// 🔔 WEBHOOK FEDAPAY (TRAITEMENT DE LA COMMANDE DOUBLE-COURRIER)
+// 🔔 WEBHOOK FEDAPAY (TRAITEMENT DU DOUBLE ENCAISSEMENT)
 // ============================================================
 router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const startTime = Date.now();
@@ -835,7 +835,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     const metadata = payment.metadata || {};
     
     const type = metadata.type || payment.type || 'subscription';
-    const isPonctual = metadata.is_ponctual === true || metadata.is_ponctual === 'true' || payment.is_ponctual;
+    const isMainPropre = metadata.is_ponctual === true || metadata.is_ponctual === 'true' || payment.is_ponctual;
     const subscriptionId = metadata.abonnement_id || payment.abonnement_id || null;
     const orderData = metadata.order_data ? (typeof metadata.order_data === 'string' ? JSON.parse(metadata.order_data) : metadata.order_data) : null;
     const visitId = metadata.visit_id || payment.visit_id || null;
@@ -843,7 +843,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
 
     console.log('📦 Métadonnées extraites:', {
       type,
-      isPonctual,
+      isMainPropre,
       visitId,
       orderId,
       subscriptionId,
@@ -875,7 +875,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     else if (type === 'order' && orderId) {
       result = await processOrderPaymentFromWebhook(orderId, transactionId);
     }
-    else if (type === 'order' || isPonctual) {
+    else if (type === 'order' || isMainPropre) {
       if (orderData) {
         // Création initiale d'une commande d'avance classique
         const { data: newOrder } = await supabase.from('commandes').insert({
@@ -896,6 +896,14 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
           withdrawal_fee: orderData.withdrawal_fee || 0,
           metadata: { transaction_id: transactionId }
         }).select().single();
+        
+        // ✅ ENVOYER LA NOTIFICATION AUX AIDANTS IMMÉDIATEMENT APRÈS LA CRÉATION !
+        const { notifyAvailableAidantsForOrder } = require('../services/order.service');
+        await notifyAvailableAidantsForOrder(newOrder.id, {
+          targetDisplay: newOrder.target_name || 'un proche',
+          description: newOrder.description,
+        });
+
         result = newOrder;
       }
     } 
