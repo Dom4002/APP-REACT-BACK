@@ -1,6 +1,5 @@
 // 📁 backend/src/routes/aidantAssignments.routes.js
-// Corrigé et complet pour la synchronisation multi-appareil et multi-type
-
+ 
 const express = require('express');
 const router = express.Router();
 const authMiddleware = require('../middleware/auth.middleware');
@@ -351,112 +350,15 @@ router.get(
 );
 
 // ============================================================
-// ROUTE FAMILY ASSIGN
+// ROUTE FAMILY ASSIGN (DÉSACTIVÉE / SÉCURISÉE)
 // ============================================================
 router.post('/family/assign', authMiddleware, async (req, res) => {
-  try {
-    const { aidantUserId, targetType, targetId, assignmentType, patientId } = req.body;
-    const userId = req.user.id;
-    const userRole = req.profile?.role;
-
-    if (userRole !== 'family') {
-      return res.status(403).json({
-        success: false,
-        error: 'Seules les familles peuvent effectuer cette action'
-      });
-    }
-
-    let finalTargetType = targetType || 'personal_account';
-    let finalTargetId = targetId || userId;
-    let finalFamilyId = userId;
-
-    if (targetType === 'patient' && patientId) {
-      const { data: link, error: linkError } = await supabase
-        .from('patient_family_links')
-        .select('id')
-        .eq('family_id', userId)
-        .eq('patient_id', patientId)
-        .maybeSingle();
-
-      if (linkError || !link) {
-        return res.status(403).json({
-          success: false,
-          error: 'Ce patient ne vous appartient pas'
-        });
-      }
-      finalTargetId = patientId;
-    }
-
-    const { data: aidant, error: aidantError } = await supabase
-      .from('aidants')
-      .select('id, user_id, is_verified, status, available')
-      .eq('id', aidantUserId)
-      .single();
-
-    if (aidantError || !aidant) {
-      return res.status(404).json({
-        success: false,
-        error: 'Aidant non trouvé'
-      });
-    }
-
-    if (!aidant.is_verified || aidant.status !== 'approved') {
-      return res.status(400).json({
-        success: false,
-        error: 'Cet aidant n\'est pas disponible'
-      });
-    }
-
-    const { count: currentAssignments, error: countError } = await supabase
-      .from('aidant_assignments')
-      .select('id', { count: 'exact', head: true })
-      .eq('aidant_user_id', aidant.user_id)
-      .eq('status', 'active');
-
-    if (countError) {
-      console.error('❌ Erreur comptage assignations:', countError);
-    }
-
-    const maxAssignments = aidant.max_assignments || 4;
-    if ((currentAssignments || 0) >= maxAssignments) {
-      return res.status(400).json({
-        success: false,
-        error: `Cet aidant a déjà ${currentAssignments} assignations (maximum ${maxAssignments})`,
-        code: 'AIDANT_FULL',
-      });
-    }
-
-    const result = await assignAidantToTarget({
-      aidantUserId: aidant.user_id,
-      targetType: finalTargetType,
-      targetId: finalTargetId,
-      familyId: finalFamilyId,
-      assignmentType: assignmentType || 'primary',
-      createdBy: userId,
-      reason: `Assigné par la famille ${userId}`,
-      expiresAt: null,
-    });
-
-    if (!result.success) {
-      return res.status(400).json({
-        success: false,
-        error: result.error,
-        code: result.code,
-      });
-    }
-
-    res.status(201).json({
-      success: true,
-      message: 'Aidant assigné avec succès',
-      data: result,
-    });
-  } catch (error) {
-    console.error('❌ Family assign error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message || 'Erreur lors de l\'assignation',
-    });
-  }
+  // 🔒 RESTRICTION STRICTE : Les familles ne peuvent plus s'assigner d'aidant
+  return res.status(403).json({
+    success: false,
+    error: "L'attribution et la modification d'un aidant est désormais gérée exclusivement par l'administration de Santé Plus.",
+    code: 'FORBIDDEN_ACTION'
+  });
 });
 
 // ============================================================
@@ -766,7 +668,7 @@ router.get(
 );
 
 // ============================================================
-// ✅ ROUTE : RÉCUPÉRER LES AIDANTS DISPONIBLES POUR UNE FAMILLE
+// ✅ ROUTE : RÉCUPÉRER LES AIDANTS DISPONIBLES POUR UNE FAMILLE (LECTURE SEULE POUR FAMILLE)
 // ============================================================
 router.get(
   '/available-for-family',
@@ -776,10 +678,10 @@ router.get(
       const userId = req.user.id;
       const userRole = req.profile?.role;
 
-      if (userRole !== 'family') {
+      if (userRole !== 'family' && userRole !== 'admin' && userRole !== 'coordinator') {
         return res.status(403).json({
           success: false,
-          error: 'Accès réservé aux familles',
+          error: 'Accès non autorisé',
         });
       }
 
@@ -893,7 +795,7 @@ router.get(
 );
 
 // ============================================================
-// ✅ ROUTE POUR LES FAMILLES
+// ✅ ROUTE POUR LES FAMILLES (MES ASSIGNATIONS - LECTURE SEULE)
 // ============================================================
 router.get(
   '/my',
@@ -1041,4 +943,3 @@ router.delete(
 );
 
 module.exports = router;
- 
