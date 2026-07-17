@@ -1,6 +1,5 @@
 // 📁 backend/src/services/visit.service.js
-// ✅ SERVICE DE VISITES COMPLET : DESACTIVATION STRICTE DE L'ASSIGNATION AUTO ET GESTION DES CHECKPOINTS GPS SÉCURISÉS
-
+ 
 const { supabase } = require('./supabase.service');
 const { createNotification } = require('./notification.service');
 const { getCoordinatesFromAddress } = require('./maps.service'); 
@@ -85,6 +84,15 @@ const createVisit = async ({
   metadata = {},  
 }) => {
   try {
+    // 🔒 SÉCURITÉ : Seuls les admins et coordinateurs peuvent planifier désormais
+    const isAdmin = ['admin', 'coordinator'].includes(profile?.role);
+    if (!isAdmin) {
+      return {
+        success: false,
+        error: 'Seul le personnel administratif de Santé Plus peut planifier des interventions.',
+        code: 'UNAUTHORIZED_ROLE'
+      };
+    }
 
     // ✅ AUTO-GÉOCODAGE : Si adresse fournie mais pas de GPS
     if (address && (!latitude || !longitude)) {
@@ -100,150 +108,16 @@ const createVisit = async ({
     const finalTargetType = targetType || (patientId ? VISIT_TYPES.PATIENT : VISIT_TYPES.PERSONAL);
     const finalTargetName = targetName || (patientId ? null : profile?.full_name);
     const finalUserId = targetUserId || userId;
-    const familyId = finalUserId;
 
-    // 1. Vérifier si un abonnement actif existe
-    const subscriptionCheck = await checkSubscriptionForVisits(finalUserId);
-    
-    let status = VISIT_STATUS.PLANNED;
-    let requiresPayment = false;
-    let paymentAmount = 0;
-    let subscriptionId = null;
+    let status = VISIT_STATUS.PLANNED; 
 
-    if (isPonctual) {
-      requiresPayment = true;
-      status = VISIT_STATUS.DRAFT; 
-      paymentAmount = getVisitPrice(durationMinutes);
-    } else if (subscriptionCheck.hasActiveSubscription && subscriptionCheck.remainingVisits > 0) {
-      status = VISIT_STATUS.PLANNED; 
-      requiresPayment = false;
-      subscriptionId = subscriptionCheck.subscription?.id || null;
-    } else if (subscriptionCheck.hasActiveSubscription && subscriptionCheck.remainingVisits === 0) {
-      requiresPayment = true;
-      status = VISIT_STATUS.DRAFT;
-      paymentAmount = getVisitPrice(durationMinutes);
-    } else {
-      requiresPayment = true;
-      status = VISIT_STATUS.DRAFT;
-      paymentAmount = getVisitPrice(durationMinutes);
-    }
-
-    // 2. Déterminer l'aidant à assigner (ZÉRO ASSIGNATION AUTOMATIQUE)
+    // Déterminer l'aidant à assigner
     let finalAidantId = null;
-    let selectedAidantIdToStore = selectedAidantId || null;
-
-    if (selectedAidantId) {
-      const convertedId = await getAidantIdFromUserIdOrId(selectedAidantId);
-      if (convertedId) {
-        selectedAidantIdToStore = convertedId;
-        if (status !== VISIT_STATUS.DRAFT) {
-          finalAidantId = convertedId;
-        }
-        console.log(`✅ Aidant choisi via wizard mis en attente pour le brouillon: ${convertedId}`);
-      }
+    if (aidantId) {
+      finalAidantId = await getAidantIdFromUserIdOrId(aidantId);
     }
 
-    // Si aucun aidant n'est spécifié, vérifier s'il y a un aidant permanent assigné
-    if (!finalAidantId && !selectedAidantIdToStore) {
-      const targetTypeForAidant = patientId ? VISIT_TYPES.PATIENT : VISIT_TYPES.PERSONAL_ACCOUNT;
-      const targetIdForAidant = patientId || finalUserId;
-
-      // Chercher l'intervenant permanent
-      let foundId = await getActiveAidantForTarget(targetTypeForAidant, targetIdForAidant, familyId);
-
-      if (foundId) {
-        const convertedId = await getAidantIdFromUserIdOrId(foundId);
-        if (convertedId) {
-          if (status !== VISIT_STATUS.DRAFT) {
-            finalAidantId = convertedId;
-          } else {
-            selectedAidantIdToStore = convertedId;
-          }
-          console.log(`✅ Aidant permanent réservé: ${convertedId}`);
-        }
-      } 
-      // S'il n'y a pas d'aidant permanent, et que l'utilisateur n'a pas encore fait de choix via le Wizard
-      else if (wizardChoice !== 'without_aidant') {
-        let wizardOptions = null;
-        try {
-          wizardOptions = await getVisitWizardOptions(
-            targetTypeForAidant,
-            targetIdForAidant,
-            familyId
-          );
-        } catch (wizardError) {
-          console.warn('⚠️ Erreur récupération options wizard, fallback sans aidant:', wizardError.message);
-          wizardOptions = {
-            hasAidant: false,
-            hasAvailableAidants: false,
-            aidants: [],
-            options: [
-              {
-                type: 'without_aidant',
-                label: '⚡ Planifier sans aidant',
-                description: 'L\'administration de Santé Plus affectera un aidant qualifié à cette visite manuellement.',
-                quota: 0
-              }
-            ],
-            canProceed: true,
-            allFull: true
-          };
-        }
-
-        if (wizardOptions.allFull) {
-          if (wizardChoice === 'without_aidant') {
-            status = VISIT_STATUS.WAITING_AIDANT;
-            finalAidantId = null;
-          } else {
-            return {
-              success: false,
-              error: 'Tous les aidants sont complets (4/4) ou indisponibles. Utilisez "Planifier sans aidant" ou contactez l\'administration.',
-              code: 'ALL_AIDANTS_FULL',
-              wizard: wizardOptions,
-            };
-          }
-        } else if (wizardOptions.hasAvailableAidants) {
-          return {
-            success: false,
-            error: 'Veuillez sélectionner un aidant et un type d\'assignation',
-            code: 'WIZARD_REQUIRED',
-            wizard: wizardOptions,
-          };
-        } else {
-          // Fallback ultime : Tous complets / aucun dispo
-          return {
-            success: false,
-            error: 'Aucun aidant disponible pour ce proche dans votre zone actuellement.',
-            code: 'WIZARD_REQUIRED',
-            wizard: {
-              hasAidant: false,
-              hasAvailableAidants: false,
-              aidants: [],
-              options: [
-                {
-                  type: 'without_aidant',
-                  label: '⚡ Planifier sans aidant',
-                  description: 'L\'administration de Santé Plus affectera un aidant qualifié à cette visite manuellement.',
-                  quota: 0
-                }
-              ],
-              canProceed: true,
-              allFull: true
-            }
-          };
-        }
-      }
-    }
-
-    // Si l'utilisateur choisit explicitement de planifier sans aidant
-    if (wizardChoice === 'without_aidant') {
-      finalAidantId = null;
-      if (!requiresPayment) {
-        status = VISIT_STATUS.WAITING_AIDANT; // Attente d'assignation par l'administration
-      }
-    }
-
-    // 3. Créer la visite en base de données
+    // Créer la visite en base de données
     const visitData = {
       user_id: finalUserId,
       patient_id: patientId || null,
@@ -255,45 +129,31 @@ const createVisit = async ({
       scheduled_time: scheduledTime,
       duration_minutes: durationMinutes || 60,
       status: status,
-      
       address: address || null,
       latitude: latitude || null,
       longitude: longitude || null,
-
-      is_draft: requiresPayment,                         
-      requires_payment: requiresPayment,                 
-      is_ponctual: isPonctual || requiresPayment,         
-      payment_status: requiresPayment ? 'pending' : null, 
-      payment_amount: requiresPayment ? paymentAmount : null,
-      
+      is_draft: false,                         
+      requires_payment: false,                 
+      is_ponctual: isPonctual,         
+      payment_status: null, 
+      payment_amount: null,
       actions: [],
       notes: notes || null,
       is_urgent: isUrgent || false,
-      visit_type: isPonctual || requiresPayment ? 'ponctuelle' : 'permanente',
-      assignment_type: assignmentType || 'ponctuelle',
+      visit_type: 'permanente',
+      assignment_type: assignmentType || 'permanente',
       requested_by: userId,
-      draft_expires_at: requiresPayment ? new Date(Date.now() + DRAFT_EXPIRY_HOURS * 60 * 60 * 1000).toISOString() : null,
-      subscription_id: subscriptionId,
-      is_permanent: wizardChoice === 'permanente',
-      assigned_by_admin: ['admin', 'coordinator'].includes(profile?.role),
-      admin_assigned_at: ['admin', 'coordinator'].includes(profile?.role) ? new Date().toISOString() : null,
-      waiting_for_aidant_since: status === VISIT_STATUS.WAITING_AIDANT ? new Date().toISOString() : null,
-      
-       metadata: {
+      draft_expires_at: null,
+      subscription_id: null,
+      is_permanent: true,
+      assigned_by_admin: true,
+      admin_assigned_at: new Date().toISOString(),
+      waiting_for_aidant_since: null,
+      metadata: {
         ...metadata,  
         created_by: userId,
         created_at: new Date().toISOString(),
-        is_ponctual: isPonctual || requiresPayment,
-        requires_payment: requiresPayment,
-        is_draft: requiresPayment,
-        payment_amount: requiresPayment ? paymentAmount : null,
-        target_user_id: finalUserId,
-        auto_assigned_aidant: !!finalAidantId && !aidantId && !selectedAidantId,
-        subscription_used: subscriptionId ? true : false,
-        ponctual_mode: requiresPayment ? true : false,
-        wizard_choice: wizardChoice || null,
-        waiting_for_aidant: status === VISIT_STATUS.WAITING_AIDANT,
-        selected_aidant: selectedAidantIdToStore || null, 
+        manual_admin_planning: true,
       },
     };
 
@@ -334,63 +194,31 @@ const createVisit = async ({
 
     const targetDisplay = finalTargetName || 'Patient';
 
-    if (requiresPayment) {
-      await createNotification({
-        userId: finalUserId,
-        title: '💳 Paiement requis pour planifier la visite',
-        body: `Un paiement de ${paymentAmount} FCFA est requis pour planifier la visite de ${targetDisplay}.`,
-        type: 'visite',
-        data: {
-          visit_id: visit.id,
-          status: VISIT_STATUS.DRAFT,
-          action: 'pay',
-          amount: paymentAmount,
-        },
-      });
-    } else if (status === VISIT_STATUS.WAITING_AIDANT) {
-      await notifyAdminsForPendingAidant(visit.id, {
-        targetName: targetDisplay,
-        scheduledDate,
-        scheduledTime,
-      });
+    await createNotification({
+      userId: finalUserId,
+      title: '📅 Nouvelle visite planifiée',
+      body: `Une visite pour ${targetDisplay} a été planifiée le ${scheduledDate} à ${scheduledTime} par Santé Plus.`,
+      type: 'visite',
+      data: { visit_id: visit.id, status: VISIT_STATUS.PLANNED },
+    });
 
+    if (finalAidantId && visit.aidant?.user?.id) {
       await createNotification({
-        userId: finalUserId,
-        title: '⏳ Visite en attente d\'aidant',
-        body: `Votre visite pour ${targetDisplay} est en attente d'assignation. L'administration a été notifiée.`,
+        userId: visit.aidant.user.id,
+        title: '📅 Nouvelle intervention planifiée',
+        body: `Une intervention pour ${targetDisplay} vous a été assignée le ${scheduledDate} à ${scheduledTime}.`,
         type: 'visite',
-        data: {
-          visit_id: visit.id,
-          status: VISIT_STATUS.WAITING_AIDANT,
-        },
-      });
-    } else if (finalAidantId) {
-      if (visit.aidant?.user?.id) {
-        await createNotification({
-          userId: visit.aidant.user.id,
-          title: '📅 Nouvelle visite à valider',
-          body: `Visite pour ${targetDisplay} le ${scheduledDate} à ${scheduledTime}`,
-          type: 'visite',
-          data: { visit_id: visit.id, action: 'approve' },
-        });
-      }
-
-      await createNotification({
-        userId: finalUserId,
-        title: '📅 Nouvelle visite planifiée',
-        body: `Une visite pour ${targetDisplay} a été planifiée le ${scheduledDate} à ${scheduledTime}.`,
-        type: 'visite',
-        data: { visit_id: visit.id, status: VISIT_STATUS.PLANNED },
+        data: { visit_id: visit.id },
       });
     }
 
     return {
       success: true,
       visit,
-      requires_payment: requiresPayment,
-      payment_amount: requiresPayment ? paymentAmount : null,
-      subscription_used: !!subscriptionId,
-      waiting_for_aidant: status === VISIT_STATUS.WAITING_AIDANT,
+      requires_payment: false,
+      payment_amount: null,
+      subscription_used: false,
+      waiting_for_aidant: false,
     };
   } catch (error) { 
     console.error('❌ createVisit error:', error);
@@ -399,6 +227,139 @@ const createVisit = async ({
       error: error.message,
       code: 'UNKNOWN_ERROR',
     };
+  }
+};
+
+// ============================================================
+// ✅ NOUVEAU : DÉMARRER UNE INTERVENTION À LA VOLÉE (AD-HOC)
+// ============================================================
+
+const startAdHocVisit = async ({
+  aidantUserId,
+  targetType, // 'patient' ou 'personal_account' / 'personal'
+  targetId,   // patientId ou profileId
+  startLat = null,
+  startLng = null,
+}) => {
+  try {
+    // 1. Récupérer le profil de l'aidant
+    const { data: aidant, error: aidantError } = await supabase
+      .from('aidants')
+      .select('id, user_id')
+      .eq('user_id', aidantUserId)
+      .single();
+
+    if (aidantError || !aidant) {
+      return { success: false, error: 'Profil Aidant non trouvé', code: 'AIDANT_NOT_FOUND' };
+    }
+
+    let userId = null;
+    let patientId = null;
+    let targetName = '';
+    let address = '';
+    let latitude = startLat;
+    let longitude = startLng;
+
+    // 2. Résoudre les liens familiaux et récupérer les coordonnées par défaut si existantes
+    if (targetType === 'patient') {
+      patientId = targetId;
+      const { data: link } = await supabase
+        .from('patient_family_links')
+        .select('family_id')
+        .eq('patient_id', patientId)
+        .eq('is_primary', true)
+        .maybeSingle();
+
+      userId = link?.family_id || aidantUserId;
+
+      const { data: patient } = await supabase
+        .from('patients')
+        .select('first_name, last_name, address, latitude, longitude')
+        .eq('id', patientId)
+        .single();
+
+      if (patient) {
+        targetName = `${patient.first_name} ${patient.last_name}`;
+        address = patient.address || '';
+        latitude = startLat || patient.latitude;
+        longitude = startLng || patient.longitude;
+      }
+    } else {
+      userId = targetId;
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('full_name, address, last_latitude, last_longitude')
+        .eq('id', userId)
+        .single();
+
+      if (profile) {
+        targetName = profile.full_name || 'Compte personnel';
+        address = profile.address || '';
+        latitude = startLat || profile.last_latitude;
+        longitude = startLng || profile.last_longitude;
+      }
+    }
+
+    const now = new Date();
+    const scheduledDate = now.toISOString().split('T')[0];
+    const scheduledTime = now.toTimeString().slice(0, 5);
+    const reference = `VIS-ADHOC-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
+
+    // 3. Insérer directement la visite avec le statut 'en_cours'
+    const visitData = {
+      reference,
+      user_id: userId,
+      patient_id: patientId,
+      aidant_id: aidant.id,
+      scheduled_date: scheduledDate,
+      scheduled_time: scheduledTime,
+      duration_minutes: 60, // Durée indicative par défaut
+      status: VISIT_STATUS.IN_PROGRESS,
+      start_time: now.toISOString(),
+      target_type: targetType === 'patient' ? 'patient' : 'personal',
+      target_name: targetName,
+      address,
+      latitude,
+      longitude,
+      location_start: startLat && startLng ? { lat: startLat, lng: startLng } : null,
+      location_track: startLat && startLng ? [{ lat: startLat, lng: startLng, timestamp: now.toISOString() }] : [],
+      metadata: {
+        ad_hoc: true,
+        started_by_aidant: aidantUserId,
+        created_at: now.toISOString(),
+        location_start: startLat && startLng ? { lat: startLat, lng: startLng } : null,
+      }
+    };
+
+    const { data: visit, error: insertError } = await supabase
+      .from('visites')
+      .insert(visitData)
+      .select(`
+        *,
+        patient:patients(*),
+        aidant:aidants!visites_aidant_id_fkey (
+          id,
+          user_id,
+          user:profiles!aidants_user_id_fkey (id, full_name, avatar_url)
+        )
+      `)
+      .single();
+
+    if (insertError) throw insertError;
+
+    // 4. Notifier la famille en direct
+    await createNotification({
+      userId: userId,
+      title: '🔄 Visite commencée en direct',
+      body: `Votre intervenant a démarré une visite d'accompagnement pour ${targetName}.`,
+      type: 'visite',
+      data: { visit_id: visit.id, status: VISIT_STATUS.IN_PROGRESS },
+    });
+
+    return { success: true, visit };
+  } catch (error) {
+    console.error('❌ startAdHocVisit error:', error);
+    return { success: false, error: error.message, code: 'UNKNOWN_ERROR' };
   }
 };
 
@@ -650,6 +611,7 @@ module.exports = {
   VISIT_TYPES,
   DRAFT_EXPIRY_HOURS,
   createVisit,
+  startAdHocVisit, // ✅ EXPORT DE LA VISITE À LA VOLÉE
   assignAidantToVisit,
   getPendingAidantVisits,
   validateVisitWithoutAidant,
