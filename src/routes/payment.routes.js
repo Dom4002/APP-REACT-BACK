@@ -8,7 +8,7 @@ const { createNotification } = require('../services/notification.service');
 const authMiddleware = require('../middleware/auth.middleware');
 
 // Importation de la fonction d'aiguillage des commandes du service
-const { processOrderPaymentFromWebhook } = require('../services/order.service');
+const { processOrderPaymentFromWebhook, notifyAvailableAidantsForOrder } = require('../services/order.service');
 
 // Toutes les routes protégées (sauf webhook)
 router.use(authMiddleware);
@@ -298,34 +298,11 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
       },
     });
 
-    // 2️⃣ NOTIFIER TOUS LES AIDANTS DISPONIBLES EN DIRECT APRES REUSSITE PAIEMENT
-    const { data: aidants } = await supabase
-      .from('aidants')
-      .select('user_id, current_orders, max_orders')
-      .eq('available', true)
-      .eq('is_verified', true)
-      .eq('status', 'approved');
-
-    if (aidants && aidants.length > 0) {
-      const availableAidants = aidants.filter(
-        a => (a.current_orders || 0) < (a.max_orders || 2)
-      );
-
-      if (availableAidants.length > 0) {
-        for (const aidant of availableAidants) {
-          await createNotification({
-            userId: aidant.user_id,
-            title: '🛒 Nouvelle commande disponible',
-            body: `Commande de ${targetName} — ${orderDataToInsert.description}`,
-            type: 'commande',
-            data: { 
-              order_id: newOrder.id, 
-              action: 'take' 
-            },
-          });
-        }
-      }
-    }
+    // 2️⃣ ✅ APPEL DU NOTIFICATEUR DIRECT : Notifier tous les aidants disponibles en direct
+    await notifyAvailableAidantsForOrder(newOrder.id, {
+      targetDisplay: targetName,
+      description: orderDataToInsert.description,
+    });
 
     return newOrder;
   } catch (error) {
