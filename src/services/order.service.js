@@ -23,7 +23,7 @@ const ORDER_TYPES = {
   PONCTUAL: 'ponctual',
 };
 
-const AUTO_VALIDATION_HOURS = 48; // Clôture automatique du cash après 48 heures
+const AUTO_VALIDATION_HOURS = 48; // Clôture automatique du cash après 48 heures d'inactivité
 
 // ============================================================
 // 📊 ALGORITHME DE CALCUL DES FRAIS DE RETRAIT MOBILE MONEY (BÉNIN)
@@ -134,7 +134,7 @@ const checkAidantOrderQuota = async (aidantUserId) => {
         current: 0,
         max: 999,
         available: 999,
-        canTake: true,  
+        canTake: true, // ✅ Toujours autorisé
       };
     }
 
@@ -177,7 +177,7 @@ const decrementAidantOrders = async (aidantUserId) => {
 };
 
 // ============================================================
-// CRÉATION DE COMMANDE (DOUBLE SCÉNARIO INTÉGRÉ)
+// CRÉATION DE COMMANDE
 // ============================================================
 
 const createOrder = async ({
@@ -190,8 +190,8 @@ const createOrder = async ({
   address,
   latitude = null,   
   longitude = null,  
-  purchaseAmount = 0,        // ✅ Montant estimé des achats
-  withdrawalOperator = null,  // ✅ 'mtn_moov' ou 'celtiis'
+  purchaseAmount = 0,        // ✅ Saisie d'achats d'avance
+  withdrawalOperator = null,  // ✅ MTN/Moov ou Celtiis
   prescriptionUrl,
   isPonctual = false,
   wizardChoice = null,
@@ -206,31 +206,35 @@ const createOrder = async ({
     const { hasActiveSubscription, remainingOrders, subscription } = 
       await checkSubscriptionForOrders(userId);
 
-    // Calcul des frais de retrait Mobile Money s'il y a des achats prévus
+    // Calcul automatique des frais de retrait Mobile Money s'il y a achat
     const withdrawalFee = purchaseAmount > 0 && withdrawalOperator 
       ? calculateWithdrawalFee(purchaseAmount, withdrawalOperator)
       : 0;
 
-    // Déterminer s'il y a un paiement de provision d'achats à la création (exigé dans tous les cas si achat)
     const requiresAdvancePayment = purchaseAmount > 0;
 
     let status = ORDER_STATUS.CREATED;
-    let subscriptionId = null;
+    let requiresPayment = false;
     let paymentAmount = 0;
+    let subscriptionId = null;
 
     if (requiresAdvancePayment) {
-      // S'il y a achat, la commande est bloquée en attente de paiement d'avance pour provision
-      status = ORDER_STATUS.WAITING_PAYMENT;
+      requiresPayment = true;
+      status = ORDER_STATUS.WAITING_PAYMENT; // Bloqué en attente du paiement de l'avance (achats + retrait)
       paymentAmount = purchaseAmount + withdrawalFee;
+    } else if (isPonctual) {
+      requiresPayment = false; // Pas d'avance requise s'il n'y a pas d'achat physique
+      status = ORDER_STATUS.CREATED;
+    } else if (hasActiveSubscription && remainingOrders > 0) {
+      status = ORDER_STATUS.CREATED;
+      requiresPayment = false;
+      subscriptionId = subscription?.id || null;
+    } else if (hasActiveSubscription && remainingOrders === 0) {
+      requiresPayment = false;
+      status = ORDER_STATUS.CREATED;
     } else {
-      // Simple course de récupération (sans achat)
-      if (hasActiveSubscription && remainingOrders > 0) {
-        status = ORDER_STATUS.CREATED;
-        subscriptionId = subscription?.id || null;
-      } else {
-        // Mode ponctuel de récupération simple (pas de frais d'avance, mais transport à l'arrivée)
-        status = ORDER_STATUS.CREATED;
-      }
+      requiresPayment = false;
+      status = ORDER_STATUS.CREATED;
     }
 
     let finalAidantId = null;
@@ -274,15 +278,16 @@ const createOrder = async ({
       address: address,
       latitude: latitude,     
       longitude: longitude,   
-      estimated_amount: requiresAdvancePayment ? paymentAmount : 0, // Avance requise à la création
+      estimated_amount: requiresAdvancePayment ? paymentAmount : 0,
+      items: [],
       prescription_url: prescriptionUrl || null,
       status: status,
       order_type: requiresAdvancePayment || isPonctual ? ORDER_TYPES.PONCTUAL : ORDER_TYPES.SUBSCRIPTION,
-      is_paid: !requiresAdvancePayment, // Faux si provision d'achat attendue
+      is_paid: !requiresAdvancePayment,
       aidant_id: finalAidantId,
       subscription_id: subscriptionId,
       
-      // Nouvelles colonnes de provision
+      // Stockage de la provision MM
       purchase_amount: purchaseAmount,
       withdrawal_operator: withdrawalOperator,
       withdrawal_fee: withdrawalFee,
@@ -324,7 +329,7 @@ const createOrder = async ({
       await createNotification({
         userId: userId,
         title: '💳 Provision d\'achats requise',
-        body: `Un paiement de ${paymentAmount} FCFA (achats + retrait) est requis pour valider votre commande.`,
+        body: `Un paiement d'avance de ${paymentAmount} FCFA est requis pour valider votre commande "${description}".`,
         type: 'commande',
         data: {
           order_id: order.id,
@@ -430,7 +435,6 @@ const takeOrder = async (orderId, aidantUserId, lat = null, lng = null) => {
         taken_at: new Date().toISOString(),
         taken_by: aidantUserId,
         updated_at: new Date().toISOString(),
-        // ✅ ENREGISTREMENT GPS DU CHECKPOINT DE DÉPART DE LA LIVRAISON EN METADATA
         metadata: {
           ...(order.metadata || {}),
           location_start: lat && lng ? { lat, lng } : null,
@@ -484,15 +488,15 @@ const takeOrder = async (orderId, aidantUserId, lat = null, lng = null) => {
 };
 
 // ============================================================
-// LIVRAISON DE COMMANDE (DOUBLE MODALITÉ SÉCURISÉE INTÉGRÉE)
+// LIVRAISON DE COMMANDE (DOUBLE MODALITÉ ESPÈCES VS EN LIGNE)
 // ============================================================
 
 const deliverOrder = async (
   orderId, 
   aidantUserId, 
   proofUrl = null, 
-  location = null, 
-  deliveryFee = 0,             // ✅ Frais de transport saisis par l'aidant
+  location = null,
+  deliveryFee = 0,             // ✅ Saisi par le livreur
   paymentMethod = 'online',    // ✅ 'online' ou 'cash'
   cashAmountReceived = 0       // ✅ Reçu en main propre
 ) => {
@@ -537,11 +541,11 @@ const deliverOrder = async (
 
     const isSubscriptionUsed = !!order.subscription_id;
 
-    // Si abonnement utilisé : livraison gratuite (0 F) et validation immédiate sans attente
+    // Si abonnement utilisé : livraison gratuite et validation immédiate sans attente
     const isCompletedImmediately = isSubscriptionUsed;
     const status = isCompletedImmediately ? ORDER_STATUS.VALIDATED : ORDER_STATUS.DELIVERED;
 
-    const autoValidationAt = new Date(Date.now() + 48 * 60 * 60 * 1000); // 48h de délai de dispute cash
+    const autoValidationAt = new Date(Date.now() + AUTO_VALIDATION_HOURS * 60 * 60 * 1000);
 
     const { data: updatedOrder, error: updateError } = await supabase
       .from('commandes')
@@ -556,7 +560,6 @@ const deliverOrder = async (
         cash_confirmation_expires_at: paymentMethod === 'cash' ? autoValidationAt.toISOString() : null,
         is_paid: isCompletedImmediately, // Payé d'avance uniquement si abonnement
         updated_at: new Date().toISOString(),
-        
         metadata: {
           ...(order.metadata || {}),
           location_end: location || null,
@@ -586,7 +589,7 @@ const deliverOrder = async (
         await createNotification({
           userId: order.family_id,
           title: '📦 Commande livrée et validée !',
-          body: `Votre commande pour ${targetDisplay} a été livrée et validée (couverte par votre abonnement).`,
+          body: `Votre commande pour ${targetDisplay} a été livrée avec succès (frais couverts par votre abonnement).`,
           type: 'commande',
           data: { order_id: orderId, status: ORDER_STATUS.VALIDATED },
         });
@@ -602,8 +605,8 @@ const deliverOrder = async (
         // Règlement en ligne en attente
         await createNotification({
           userId: order.family_id,
-          title: '📦 Commande déposée — Frais en attente',
-          body: `Votre commande a été déposée. Veuillez régler les frais de transport de ${deliveryFee} FCFA en ligne.`,
+          title: '📦 Commande livrée — Frais de livraison en attente',
+          body: `Votre commande pour ${targetDisplay} a été déposée. Veuillez régler les frais de transport de ${deliveryFee} FCFA en ligne.`,
           type: 'commande',
           data: { order_id: orderId, action: 'pay_delivery_fee', amount: deliveryFee },
         });
@@ -628,7 +631,7 @@ const deliverOrder = async (
 };
 
 // ============================================================
-// SÉCURITÉ CASH : ACCEPTER OU CONTESTER LA REMISE EN MAINS PROPRES
+// ✅ SÉCURITÉ CASH : CLIENT VALIDE OU LITIGE LA REMISE EN MAINS PROPRES
 // ============================================================
 
 const confirmCashPayment = async (orderId, userId, isConfirmed) => {
@@ -691,7 +694,7 @@ const confirmCashPayment = async (orderId, userId, isConfirmed) => {
 };
 
 // ============================================================
-// AUTO-VALIDATION (LIBÉRATION DU QUOTA ET RÉSOLUTION EXPIRATION 48H)
+// AUTO-VALIDATION (LIBÉRATION DU QUOTA)
 // ============================================================
 
 const autoValidateOrder = async (orderId) => {
@@ -763,7 +766,7 @@ const autoValidateOrder = async (orderId) => {
 };
 
 // ============================================================
-// CRON ROUTINE : AUTO-VALIDER LES DÉPOTS CASH EXPIRÉS APRÈS 48H
+// AUTO-VALIDATION DU CASH APRÈS EXPIRATION DE 48H
 // ============================================================
 
 const autoValidateExpiredCashOrders = async () => {
@@ -801,6 +804,94 @@ const autoValidateExpiredCashOrders = async () => {
   } catch (error) {
     console.error('❌ autoValidateExpiredCashOrders error:', error);
     return 0;
+  }
+};
+
+// ============================================================
+// ✅ TRAITEMENT WEBHOOK : REDIRECTION ET MISE À JOUR COMMANDE AVANCE OU FINALE
+// ============================================================
+
+const processOrderPaymentFromWebhook = async (orderId, transactionId) => {
+  try {
+    const { data: order, error } = await supabase
+      .from('commandes')
+      .select('*')
+      .eq('id', orderId)
+      .single();
+
+    if (error || !order) {
+      console.error('❌ Commande introuvable pour traitement paiement:', orderId);
+      return null;
+    }
+
+    if (order.status === ORDER_STATUS.WAITING_PAYMENT) {
+      // Cas 1 : Paiement d'avance pour achats validé
+      const { data: updatedOrder } = await supabase
+        .from('commandes')
+        .update({
+          status: ORDER_STATUS.CREATED,
+          is_paid: true,
+          updated_at: new Date().toISOString(),
+          metadata: {
+            ...(order.metadata || {}),
+            payment_confirmed_at: new Date().toISOString(),
+            transaction_id: transactionId,
+            paid_at: new Date().toISOString(),
+          }
+        })
+        .eq('id', orderId)
+        .select()
+        .single();
+
+      // Diffuser la commande approuvée aux aidants disponibles
+      const targetDisplay = order.target_name || 'un client';
+      await notifyAvailableAidantsForOrder(orderId, {
+        targetDisplay,
+        description: order.description,
+      });
+
+      return updatedOrder;
+
+    } else if (order.status === ORDER_STATUS.DELIVERED) {
+      // Cas 2 : Paiement en ligne de fin de livraison validé
+      const { data: updatedOrder } = await supabase
+        .from('commandes')
+        .update({
+          status: ORDER_STATUS.VALIDATED,
+          is_paid: true,
+          updated_at: new Date().toISOString(),
+          metadata: {
+            ...(order.metadata || {}),
+            delivery_fee_paid: true,
+            delivery_fee_payment_confirmed_at: new Date().toISOString(),
+            delivery_fee_transaction_id: transactionId,
+          }
+        })
+        .eq('id', orderId)
+        .select()
+        .single();
+
+      // Notifier le livreur
+      if (order.aidant_id) {
+        const { data: aidant } = await supabase.from('aidants').select('user_id').eq('id', order.aidant_id).single();
+        if (aidant) {
+          await createNotification({
+            userId: aidant.user_id,
+            title: '✅ Frais de livraison réglés',
+            body: `Le client a réglé les frais de livraison de ${order.delivery_fee} FCFA en ligne.`,
+            type: 'system',
+            data: { order_id: orderId },
+          });
+        }
+      }
+
+      return updatedOrder;
+    }
+
+    return order;
+  } catch (err) {
+    console.error('❌ Erreur processOrderPaymentFromWebhook:', err.message);
+    return null;
   }
 };
 
@@ -963,8 +1054,9 @@ module.exports = {
   ORDER_STATUS,
   ORDER_TYPES,
   AUTO_VALIDATION_HOURS,
-  calculateWithdrawalFee,       
-  autoValidateExpiredCashOrders, 
+  calculateWithdrawalFee,
+  autoValidateExpiredCashOrders,
+  processOrderPaymentFromWebhook, 
   syncAidantOrderCount,  
   checkAidantOrderQuota,
   incrementAidantOrders,
@@ -972,7 +1064,7 @@ module.exports = {
   createOrder,
   takeOrder,
   deliverOrder,
-  confirmCashPayment,             
+  confirmCashPayment,
   autoValidateOrder,
   notifyAvailableAidantsForOrder,
   enrichOrderWithRelations,
