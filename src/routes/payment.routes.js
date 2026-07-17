@@ -7,6 +7,9 @@ const { createTransaction, getTransaction } = require('../services/payment.servi
 const { createNotification } = require('../services/notification.service');
 const authMiddleware = require('../middleware/auth.middleware');
 
+// Importation de la fonction d'aiguillage des commandes du service
+const { processOrderPaymentFromWebhook } = require('../services/order.service');
+
 // Toutes les routes protégées (sauf webhook)
 router.use(authMiddleware);
 
@@ -262,6 +265,9 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
         prescription_url: orderDataToInsert.prescription_url || null,
         order_type: 'ponctual',
         is_paid: true,
+        purchase_amount: orderDataToInsert.purchase_amount || 0,
+        withdrawal_operator: orderDataToInsert.withdrawal_operator || null,
+        withdrawal_fee: orderDataToInsert.withdrawal_fee || 0,
         metadata: {
           payment_id: paymentRecord.id,
           transaction_id: transactionId,
@@ -292,7 +298,7 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
       },
     });
 
-    // 2️⃣ ✅ CORRECTIF : NOTIFIER TOUS LES AIDANTS DISPONIBLES EN DIRECT APRES REUSSITE PAIEMENT !
+    // 2️⃣ NOTIFIER TOUS LES AIDANTS DISPONIBLES EN DIRECT APRES REUSSITE PAIEMENT
     const { data: aidants } = await supabase
       .from('aidants')
       .select('user_id, current_orders, max_orders')
@@ -301,7 +307,6 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
       .eq('status', 'approved');
 
     if (aidants && aidants.length > 0) {
-      // Filtrer les aidants qui ont de la place
       const availableAidants = aidants.filter(
         a => (a.current_orders || 0) < (a.max_orders || 2)
       );
@@ -309,7 +314,7 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
       if (availableAidants.length > 0) {
         for (const aidant of availableAidants) {
           await createNotification({
-            userId: aidant.user_id, // ✅ Profiles.id au lieu de aidant_id (cohérent avec FK)
+            userId: aidant.user_id,
             title: '🛒 Nouvelle commande disponible',
             body: `Commande de ${targetName} — ${orderDataToInsert.description}`,
             type: 'commande',
@@ -319,9 +324,6 @@ async function createPonctualOrder(paymentRecord, transactionId, orderData) {
             },
           });
         }
-        console.log(`🚀 [Payment API] ${availableAidants.length} aidants disponibles notifiés pour la commande ${newOrder.id}`);
-      } else {
-        console.log('ℹ️ Aucun aidant disponible pour prendre la commande');
       }
     }
 
@@ -413,6 +415,7 @@ router.post('/', async (req, res) => {
       patient_id = null,
       target_type = 'personal',
       target_name = null,
+      type = null,  
       metadata = {},
     } = req.body;
     
@@ -448,7 +451,7 @@ router.post('/', async (req, res) => {
       patient_id,
       target_type,
       target_name,
-      type: is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription'),
+      type: type || (is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription')),
     });
 
     const paymentData = {
@@ -470,7 +473,7 @@ router.post('/', async (req, res) => {
         patient_id: patient_id || null,
         target_type: target_type || 'personal',
         target_name: target_name || profile.full_name || 'Client',
-        type: is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription'),
+        type: type || (is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription')),
         ...metadata,
       },
     };
@@ -555,16 +558,26 @@ const handleWebhook = async (req, res) => {
 
       const type = metadata.type || payment.type;
       const isPonctual = metadata.is_ponctual === 'true' || payment.is_ponctual;
+      const orderId = metadata.order_id || null; // ID de commande existante pour frais de livraison
 
       console.log('📦 Métadonnées extraites:', {
         type,
         isPonctual,
+        orderId,
         visitId: metadata.visit_id || payment.visit_id,
         subscriptionId: metadata.abonnement_id || payment.abonnement_id,
       });
 
-      if (type === 'order' || isPonctual) {
-        console.log('📦 Traitement commande ponctuelle...');
+      // ✅ CLOTURE WEBHOOK : Gestion des frais de livraison ou de l'avance pour commande existante
+      if (type === 'order' && orderId) {
+        console.log('📦 Traitement paiement des frais de livraison/avance pour commande existante:', orderId);
+        const updatedOrder = await processOrderPaymentFromWebhook(orderId, transactionId);
+        if (updatedOrder) {
+          console.log('✅ Commande existante mise à jour avec succès après webhook paiement');
+        }
+      } 
+      else if (type === 'order' || isPonctual) {
+        console.log('📦 Traitement création commande ponctuelle d\'avance classique...');
         const orderData = metadata.order_data ? JSON.parse(metadata.order_data) : null;
         
         const newOrder = await createPonctualOrder(payment, transactionId, orderData);
