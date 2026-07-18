@@ -1,6 +1,5 @@
 // 📁 backend/src/routes/patient.routes.js
-// ✅ ROUTEUR PATIENTS : RÉSOLUTION DYNAMIQUE ET FUSION DES DOSSIERS CLINIQUES RÉELS DES COMPTES PERSONNELS
-
+ 
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../services/supabase.service');
@@ -90,11 +89,11 @@ router.get('/', async (req, res) => {
         if (!dbProfilesError && dbProfiles) {
           const mappedPersonalProfiles = await Promise.all(dbProfiles.map(async (p) => {
             
-            // ✅ COHÉRENCE TOTALE : Rechercher si l'abonné possède un dossier clinique réel rempli dans la table 'patients' [23, 24]
+            // ✅ COHÉRENCE TOTALE : Rechercher si l'abonné possède un dossier clinique réel (Virgule stricte sans espace dans le .or pour PostgREST) [23, 24]
             const { data: realPatient } = await supabase
               .from('patients')
               .select('*')
-              .or(`id.eq.${p.id}, created_by.eq.${p.id}`)
+              .or(`id.eq.${p.id},created_by.eq.${p.id}`)
               .order('created_at', { ascending: true })
               .limit(1)
               .maybeSingle();
@@ -102,10 +101,10 @@ router.get('/', async (req, res) => {
             return {
               id: p.id,
               first_name: p.full_name,
-              last_name: '(Compte Personnel)', // Indication visuelle claire de l'abonné [23]
-              age: realPatient ? realPatient.age : null, // ✅ Vrai âge [23, 24]
-              gender: realPatient ? realPatient.gender : null, // ✅ Vrai genre [23, 24]
-              address: realPatient?.address || p.address || 'Adresse du compte de l\'abonné', // ✅ Vraie adresse [23, 24]
+              last_name: '(Compte Personnel)',  
+              age: realPatient ? realPatient.age : null,  
+              gender: realPatient ? realPatient.gender : null,  
+              address: realPatient?.address || p.address || 'Adresse du compte de l\'abonné',  
               latitude: realPatient ? realPatient.latitude : null,
               longitude: realPatient ? realPatient.longitude : null,
               phone: realPatient?.phone || p.phone || null,
@@ -113,10 +112,10 @@ router.get('/', async (req, res) => {
               emergency_contact_name: realPatient ? realPatient.emergency_contact_name : null,
               category: p.patient_category || 'senior', // Type de profil
               status: 'active',
-              notes: realPatient?.notes || 'Abonné suivi en direct sur son compte personnel', // ✅ Vraies notes [23, 24]
-              allergies: realPatient ? realPatient.allergies : null, // ✅ Vraies allergies [23, 24]
-              treatments: realPatient ? realPatient.treatments : null, // ✅ Vrais traitements [23, 24]
-              conditions: realPatient ? realPatient.conditions : null, // ✅ Vraies pathologies [23, 24]
+              notes: realPatient?.notes || 'Abonné suivi en direct sur son compte personnel',  
+              allergies: realPatient ? realPatient.allergies : null,  
+              treatments: realPatient ? realPatient.treatments : null,  
+              conditions: realPatient ? realPatient.conditions : null,  
               medical_history: realPatient ? realPatient.medical_history : null,
               preferred_language: 'fr',
               special_requirements: realPatient ? realPatient.special_requirements : null,
@@ -169,11 +168,11 @@ router.get('/:id', async (req, res) => {
 
         if (!profileErr && userProfile) {
           
-          // ✅ COHÉRENCE TOTALE : Rechercher si l'abonné possède un dossier clinique réel rempli dans la table 'patients' [23, 24]
+          //  Rechercher si l'abonné possède un dossier clinique réel (Filtre or strict sans espace) [23, 24]
           const { data: realPatient } = await supabase
             .from('patients')
             .select('*')
-            .or(`id.eq.${id}, created_by.eq.${id}`)
+            .or(`id.eq.${id},created_by.eq.${id}`)
             .order('created_at', { ascending: true })
             .limit(1)
             .maybeSingle();
@@ -182,18 +181,18 @@ router.get('/:id', async (req, res) => {
             id: userProfile.id,
             first_name: userProfile.full_name,
             last_name: '(Compte Personnel)',
-            age: realPatient ? realPatient.age : null, // ✅ Vrai âge [23, 24]
-            gender: realPatient ? realPatient.gender : null, // ✅ Vrai genre [23, 24]
-            address: realPatient?.address || userProfile.address || 'Adresse personnelle', // ✅ Vraie adresse [23, 24]
+            age: realPatient ? realPatient.age : null,  
+            gender: realPatient ? realPatient.gender : null, 
+            address: realPatient?.address || userProfile.address || 'Adresse personnelle',  
             latitude: realPatient ? realPatient.latitude : null,
             longitude: realPatient ? realPatient.longitude : null,
             phone: realPatient?.phone || userProfile.phone || null,
             category: userProfile.patient_category || 'senior',
             status: 'active',
-            notes: realPatient?.notes || 'Suivi direct du compte personnel', // ✅ Vraies notes [23, 24]
-            allergies: realPatient ? realPatient.allergies : null, // ✅ Vraies allergies [23, 24]
-            treatments: realPatient ? realPatient.treatments : null, // ✅ Vrais traitements [23, 24]
-            conditions: realPatient ? realPatient.conditions : null, // ✅ Vraies pathologies [23, 24]
+            notes: realPatient?.notes || 'Suivi direct du compte personnel',  
+            allergies: realPatient ? realPatient.allergies : null, 
+            treatments: realPatient ? realPatient.treatments : null, 
+            conditions: realPatient ? realPatient.conditions : null,  
             medical_history: realPatient ? realPatient.medical_history : null,
             preferred_language: 'fr',
             created_at: userProfile.created_at,
@@ -381,6 +380,126 @@ router.get('/:id/visits', async (req, res) => {
     res.json(data);
   } catch (error) {
     console.error('❌ Get patient visits error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =============================================
+// ✅ ASSIGNER UN AIDANT À UN PATIENT (ADMIN SEULEMENT)
+// =============================================
+router.post('/:id/assign-aidant', roleMiddleware(['admin', 'coordinator']), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { aidantId, assignmentType = 'permanente', expiresAt = null } = req.body;
+
+    const { data: patient, error: patientError } = await supabase
+      .from('patients')
+      .select('id')
+      .eq('id', id)
+      .single();
+
+    if (patientError) {
+      return res.status(404).json({ error: 'Patient non trouvé' });
+    }
+
+    const { data: aidant, error: aidantError } = await supabase
+      .from('aidants')
+      .select('id, user_id, is_verified, status')
+      .eq('id', aidantId)
+      .single();
+
+    if (aidantError || !aidant) {
+      return res.status(404).json({ error: 'Aidant non trouvé' });
+    }
+
+    if (!aidant.is_verified || aidant.status !== 'approved') {
+      return res.status(400).json({ error: 'Cet aidant n\'est pas approuvé' });
+    }
+
+    const { data: assignment, error: assignError } = await supabase
+      .from('patient_aidant_assignments')
+      .insert({
+        patient_id: id,
+        aidant_id: aidantId,
+        assigned_by: req.user.id,
+        assignment_type: assignmentType || 'permanente',
+        expires_at: expiresAt || null,
+      })
+      .select()
+      .single();
+
+    if (assignError) {
+      console.warn('⚠️ Table patient_aidant_assignments non disponible, utilisation de patient_family_links');
+      
+      const { data: existingLink } = await supabase
+        .from('patient_family_links')
+        .select('id')
+        .eq('patient_id', id)
+        .eq('family_id', aidant.user_id)
+        .maybeSingle();
+
+      if (!existingLink) {
+        await supabase
+          .from('patient_family_links')
+          .insert({
+            patient_id: id,
+            family_id: aidant.user_id,
+            is_primary: false,
+            can_manage_visits: true,
+            can_manage_orders: true,
+            can_receive_notifications: true,
+          });
+      }
+    }
+
+    await supabase.from('notifications').insert({
+      user_id: aidant.user_id,
+      title: '📋 Nouveau patient assigné',
+      body: `Vous avez été assigné au patient ${patient.first_name} ${patient.last_name}. Type: ${assignmentType || 'permanente'}`,
+      type: 'system',
+      data: { patient_id: id, assignment_type: assignmentType },
+    });
+
+    res.json({ 
+      success: true, 
+      message: 'Aidant assigné avec succès',
+      assignment: assignment || { patient_id: id, aidant_id: aidantId }
+    });
+  } catch (error) {
+    console.error('❌ Assign aidant error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// =============================================
+// ✅ RÉCUPÉRER LES AIDANTS D'UN PATIENT
+// =============================================
+router.get('/:id/aidants', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { profile } = req;
+
+    if (profile.role !== 'admin' && profile.role !== 'coordinator') {
+      return res.status(403).json({ error: 'Accès non autorisé' });
+    }
+
+    const { data: links, error: linksError } = await supabase
+      .from('patient_family_links')
+      .select(`
+        family_id,
+        profiles!inner(id, full_name, email, phone)
+      `)
+      .eq('patient_id', id);
+
+    if (linksError) throw linksError;
+
+    const aidants = links
+      ?.filter(l => l.profiles?.role === 'aidant')
+      .map(l => l.profiles) || [];
+
+    res.json(aidants);
+  } catch (error) {
+    console.error('❌ Get patient aidants error:', error);
     res.status(500).json({ error: error.message });
   }
 });
