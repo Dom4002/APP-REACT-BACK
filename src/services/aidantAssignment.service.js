@@ -1,6 +1,5 @@
 // 📁 backend/src/services/aidantAssignment.service.js
-// ✅ SERVICE ASSIGNATION : NOTIFICATIONS ENRICHIES EN DIRECT EN TRADUISANT LES UUID EN NOMS RÉELS
-
+ 
 const { supabase } = require('./supabase.service');
 
 // ============================================================
@@ -186,11 +185,19 @@ const assignAidantToTarget = async ({
       };
     }
 
-    // 2. Vérifier le quota (seulement si force est désactivé)
-    const currentAssignments = aidant.current_assignments || 0;
+    // ✅ RECALCUL DYNAMIQUE SECURISE : Uniquement les assignations permanentes ('primary') comptent dans le quota ! [30]
+    const { count: dbActiveAssignments } = await supabase
+      .from('aidant_assignments')
+      .select('id', { count: 'exact', head: true })
+      .eq('aidant_user_id', aidantUserId)
+      .eq('status', 'active')
+      .eq('assignment_type', 'primary'); // ✅ Filtre strict "Permanente" [30]
+
+    const currentAssignments = dbActiveAssignments || 0;
     const maxAssignments = aidant.max_assignments || 4;
     
-    if (!force && currentAssignments >= maxAssignments) {
+    // Uniquement bloquer si l'admin essaie d'ajouter un NOUVEAU contrat permanent (primary) alors que l'aidant est complet
+    if (!force && assignmentType === 'primary' && currentAssignments >= maxAssignments) {
       return {
         success: false,
         error: `Cet aidant a déjà ${currentAssignments} assignations (maximum ${maxAssignments})`,
@@ -288,15 +295,18 @@ const assignAidantToTarget = async ({
       console.error('❌ Erreur récupération assignation:', fetchError);
     }
 
-    // 6. Mettre à jour current_assignments de l'aidant
-    await supabase
-      .from('aidants')
-      .update({
-        current_assignments: currentAssignments + 1,
-        available: (currentAssignments + 1) < maxAssignments,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', aidant.id);
+    // 6. Mettre à jour la colonne de quota statique uniquement s'il s'agit d'un raccordement permanent ! [30]
+    if (assignmentType === 'primary') {
+      const finalAssignmentsCount = currentAssignments + 1;
+      await supabase
+        .from('aidants')
+        .update({
+          current_assignments: finalAssignmentsCount,
+          available: finalAssignmentsCount < maxAssignments,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', aidant.id);
+    }
 
     // 7. Créer les notifications enrichies
     await createAssignmentNotifications({
@@ -376,11 +386,13 @@ const revokeAssignment = async (assignmentId, revokedBy = null, reason = null) =
       };
     }
 
+    // ✅ RECALCUL DYNAMIQUE DES ASSIGNATIONS ACTIVES UNIQUEMENT DE TYPE PERMANENTE [30]
     const { count: currentAssignments, error: countError } = await supabase
       .from('aidant_assignments')
       .select('id', { count: 'exact', head: true })
       .eq('aidant_user_id', assignment.aidant_user_id)
-      .eq('status', ASSIGNMENT_STATUS.ACTIVE);
+      .eq('status', ASSIGNMENT_STATUS.ACTIVE)
+      .eq('assignment_type', 'primary'); // ✅ Filtre permanent actif [30]
 
     if (!countError) {
       const { data: aidant, error: aidantError } = await supabase
@@ -668,19 +680,30 @@ const getAvailableAidantsForFamily = async (familyId, filters = {}) => {
       return [];
     }
 
-    const availableAidants = (aidants || []).filter((aidant) => {
-      const current = aidant.current_assignments || 0;
-      const max = aidant.max_assignments || 4;
-      return current < max;
-    });
+    const enrichedAidants = await Promise.all((aidants || []).map(async (aidant) => {
+      
+      // ✅ CALCUL DYNAMIQUE SECURISE EN DIRECT : Pour eviter tout decalage d'IHM de quotas (Uniquement type 'primary') 
+      const { count: dbActiveAssignments } = await supabase
+        .from('aidant_assignments')
+        .select('id', { count: 'exact', head: true })
+        .eq('aidant_user_id', aidant.user_id)
+        .eq('status', 'active')
+        .eq('assignment_type', 'primary'); 
 
-    return availableAidants.map((aidant) => ({
-      ...aidant,
-      current_assignments: aidant.current_assignments || 0,
-      max_assignments: aidant.max_assignments || 4,
-      available_slots: Math.max(0, (aidant.max_assignments || 4) - (aidant.current_assignments || 0)),
-      is_available: (aidant.current_assignments || 0) < (aidant.max_assignments || 4),
+      const current = dbActiveAssignments || 0;
+      const max = aidant.max_assignments || 4;
+
+      return {
+        ...aidant,
+        current_assignments: current,
+        max_assignments: max,
+        available_slots: Math.max(0, max - current),
+        is_available: current < max,
+      };
     }));
+
+    // Filtrer les disponibles
+    return enrichedAidants.filter(a => a.is_available);
   } catch (error) {
     console.error('❌ getAvailableAidantsForFamily error:', error);
     return [];
@@ -714,12 +737,25 @@ const getAidantsWithQuota = async (filters = {}) => {
       return [];
     }
 
-    return (aidants || []).map((aidant) => ({
-      ...aidant,
-      current_assignments: aidant.current_assignments || 0,
-      max_assignments: aidant.max_assignments || 4,
-      available_slots: Math.max(0, (aidant.max_assignments || 4) - (aidant.current_assignments || 0)),
-      is_available: (aidant.current_assignments || 0) < (aidant.max_assignments || 4),
+    // ✅ CALCUL DYNAMIQUE EN DIRECT POUR TOUTES LES VUES ADMINS (Uniquement de type 'primary') [3, 30]
+    return await Promise.all((aidants || []).map(async (aidant) => {
+      const { count: dbActiveAssignments } = await supabase
+        .from('aidant_assignments')
+        .select('id', { count: 'exact', head: true })
+        .eq('aidant_user_id', aidant.user_id)
+        .eq('status', 'active')
+        .eq('assignment_type', 'primary'); 
+
+      const current = dbActiveAssignments || 0;
+      const max = aidant.max_assignments || 4;
+
+      return {
+        ...aidant,
+        current_assignments: current,
+        max_assignments: max,
+        available_slots: Math.max(0, max - current),
+        is_available: current < max,
+      };
     }));
   } catch (error) {
     console.error('❌ getAidantsWithQuota error:', error);
@@ -775,7 +811,15 @@ const adminAssignAidantToVisit = async ({
       };
     }
 
-    const currentAssignments = aidant.current_assignments || 0;
+    // ✅ RECALCUL DYNAMIQUE SECURISE (Uniquement de type 'primary')  
+    const { count: dbActiveAssignments } = await supabase
+      .from('aidant_assignments')
+      .select('id', { count: 'exact', head: true })
+      .eq('aidant_user_id', aidantUserId)
+      .eq('status', 'active')
+      .eq('assignment_type', 'primary');  
+
+    const currentAssignments = dbActiveAssignments || 0;
     const maxAssignments = aidant.max_assignments || 4;
 
     if (!force && currentAssignments >= maxAssignments) {
@@ -789,6 +833,7 @@ const adminAssignAidantToVisit = async ({
     }
 
     const isPermanent = assignmentType === 'permanente';
+    const assignmentTypeValue = isPermanent ? ASSIGNMENT_TYPES.PRIMARY : ASSIGNMENT_TYPES.TEMPORARY;
 
     const updateData = {
       aidant_id: aidant.id,
@@ -834,7 +879,7 @@ const adminAssignAidantToVisit = async ({
         createdBy: adminId,
         reason: reason || `Assignation forcée par admin pour la visite ${visitId}`,
         expiresAt: null,
-        force: force, // ✅ Transmission de 'force'
+        force: force, 
       });
 
       if (!assignmentResult.success) {
@@ -898,7 +943,7 @@ const createAidantAssignmentNotifications = async ({
     if (aidantUserId) {
       const { data: aidantProfile } = await supabase.from('profiles').select('full_name').eq('id', aidantUserId).maybeSingle();
       if (aidantProfile?.full_name) {
-        aidantName = aidantProfile.full_name;
+        audantName = aidantProfile.full_name;
       }
     }
 
@@ -1173,6 +1218,7 @@ const createAssignmentNotifications = async ({
           target_id: targetId,
           assignment_type: assignmentType,
           priority: priority,
+          aidant_name: aidantName,  
         },
       });
     }
