@@ -1,5 +1,6 @@
 // 📁 backend/src/services/aidantAssignment.service.js
- 
+// ✅ SERVICE ASSIGNATION : NOTIFICATIONS ENRICHIES EN DIRECT EN TRADUISANT LES UUID EN NOMS RÉELS
+
 const { supabase } = require('./supabase.service');
 
 // ============================================================
@@ -13,7 +14,7 @@ const TARGET_TYPES = {
   FAMILY: 'family',
 };
 
-// ✅ Mapping pour normaliser les types venant du frontend
+// Mapping pour normaliser les types venant du frontend
 const mapTargetType = (type) => {
   if (!type) return type;
   const normalized = type.toLowerCase();
@@ -26,7 +27,7 @@ const mapTargetType = (type) => {
   return type;
 };
 
-// ✅ Mapping inverse pour les réponses
+// Mapping inverse pour les réponses
 const mapTargetTypeForResponse = (type) => {
   if (!type) return type;
   if (type === TARGET_TYPES.PERSONAL_ACCOUNT) return 'personal';
@@ -48,9 +49,9 @@ const ASSIGNMENT_STATUS = {
 };
 
 const PRIORITY = {
-  PATIENT: 1,           // ✅ Priorité la plus haute
-  PERSONAL_ACCOUNT: 2,  // ✅ Priorité intermédiaire (fallback)
-  FAMILY: 3,            // ✅ Priorité la plus basse (dernier fallback)
+  PATIENT: 1,           
+  PERSONAL_ACCOUNT: 2,  
+  FAMILY: 3,            
 };
 
 // ============================================================
@@ -89,7 +90,6 @@ const getActiveAidantForTarget = async (targetType, targetId, familyId = null) =
       .maybeSingle();
 
     if (!errorById && aidantById) {
-      console.log(`✅ getActiveAidantForTarget: data est un aidant_id: ${data}`);
       return data;
     }
 
@@ -100,22 +100,19 @@ const getActiveAidantForTarget = async (targetType, targetId, familyId = null) =
       .maybeSingle();
 
     if (!errorByUser && aidantByUser) {
-      console.log(`🔄 Conversion user_id ${data} → aidant_id ${aidantByUser.id}`);
       return aidantByUser.id;
     }
 
     const { data: aidantByAny, error: errorAny } = await supabase
       .from('aidants')
       .select('id')
-      .or(`id.eq.${data}, user_id.eq.${data}`)
+      .or(`id.eq.${data},user_id.eq.${data}`)
       .maybeSingle();
 
     if (!errorAny && aidantByAny) {
-      console.log(`🔄 Fallback: ${data} → aidant_id ${aidantByAny.id}`);
       return aidantByAny.id;
     }
 
-    console.warn(`⚠️ Aucun aidant trouvé pour ${data}`);
     return null;
   } catch (error) {
     console.error('❌ getActiveAidantForTarget error:', error);
@@ -142,7 +139,6 @@ const getAllAidantsForTarget = async (targetType, targetId, familyId = null) => 
     }
 
     const sortedData = (data || []).sort((a, b) => (a.priority || 99) - (b.priority || 99));
-    
     return sortedData;
   } catch (error) {
     console.error('❌ getAllAidantsForTarget error:', error);
@@ -151,7 +147,7 @@ const getAllAidantsForTarget = async (targetType, targetId, familyId = null) => 
 };
 
 /**
- * Assigne un aidant à une cible (Avec paramètre force intégré)
+ * Assigne un aidant à une cible
  */
 const assignAidantToTarget = async ({
   aidantUserId,
@@ -162,7 +158,7 @@ const assignAidantToTarget = async ({
   createdBy = null,
   reason = null,
   expiresAt = null,
-  force = false, // ✅ CORRECTIF : Ajout du paramètre force pour ignorer les quotas
+  force = false, 
 }) => {
   try {
     const dbTargetType = mapTargetType(targetType);
@@ -302,7 +298,7 @@ const assignAidantToTarget = async ({
       })
       .eq('id', aidant.id);
 
-    // 7. Créer les notifications
+    // 7. Créer les notifications enrichies
     await createAssignmentNotifications({
       assignmentId,
       aidantUserId,
@@ -406,10 +402,19 @@ const revokeAssignment = async (assignmentId, revokedBy = null, reason = null) =
       }
     }
 
+    // Récupérer le vrai nom de l'admin pour la révocation
+    let adminName = 'L\'administration';
+    if (revokedBy) {
+      const { data: adminProfile } = await supabase.from('profiles').select('full_name').eq('id', revokedBy).maybeSingle();
+      if (adminProfile?.full_name) {
+        adminName = adminProfile.full_name;
+      }
+    }
+
     await supabase.from('notifications').insert({
       user_id: assignment.aidant_user_id,
       title: '🔄 Assignation révoquée',
-      body: `Votre assignation a été révoquée${reason ? ` : ${reason}` : ''}`,
+      body: `Votre assignation a été révoquée par ${adminName}${reason ? ` : ${reason}` : ''}`,
       type: 'system',
       data: {
         assignment_id: assignmentId,
@@ -784,7 +789,6 @@ const adminAssignAidantToVisit = async ({
     }
 
     const isPermanent = assignmentType === 'permanente';
-    const assignmentTypeValue = isPermanent ? ASSIGNMENT_TYPES.PRIMARY : ASSIGNMENT_TYPES.TEMPORARY;
 
     const updateData = {
       aidant_id: aidant.id,
@@ -868,7 +872,7 @@ const adminAssignAidantToVisit = async ({
 };
 
 /**
- * Crée les notifications pour une assignation admin
+ * Crée les notifications pour une assignation admin (Visite)
  */
 const createAidantAssignmentNotifications = async ({
   visitId,
@@ -880,6 +884,24 @@ const createAidantAssignmentNotifications = async ({
   force,
 }) => {
   try {
+    // ✅ 1. RESOLUTION DU NOM DE L'ADMIN
+    let adminName = 'L\'administration';
+    if (adminId) {
+      const { data: adminProfile } = await supabase.from('profiles').select('full_name').eq('id', adminId).maybeSingle();
+      if (adminProfile?.full_name) {
+        adminName = adminProfile.full_name;
+      }
+    }
+
+    // ✅ 2. RESOLUTION DU NOM DE L'AIDANT
+    let aidantName = 'Un aidant';
+    if (aidantUserId) {
+      const { data: aidantProfile } = await supabase.from('profiles').select('full_name').eq('id', aidantUserId).maybeSingle();
+      if (aidantProfile?.full_name) {
+        aidantName = aidantProfile.full_name;
+      }
+    }
+
     const aidantMessage = isPermanent
       ? `Vous avez été assigné en tant qu'aidant permanent pour ${targetName}${force ? ' (forcé)' : ''}`
       : `Vous avez été assigné pour la visite de ${targetName}${force ? ' (forcé)' : ''}`;
@@ -908,7 +930,7 @@ const createAidantAssignmentNotifications = async ({
       await supabase.from('notifications').insert({
         user_id: visit.user_id,
         title: '✅ Un aidant a été assigné à votre visite',
-        body: `Un aidant a été assigné pour la visite de ${targetName}`,
+        body: `${aidantName} a été assigné pour la visite de ${targetName}`, // ✅ CORRIGÉ : Affichage du vrai nom de l'aidant
         type: 'visite',
         data: {
           visit_id: visitId,
@@ -928,7 +950,7 @@ const createAidantAssignmentNotifications = async ({
         const adminNotifications = admins.map((admin) => ({
           user_id: admin.id,
           title: '👔 Assignation forcée effectuée',
-          body: `${adminId ? 'Un admin' : 'Le système'} a forcé l'assignation de ${targetName}`,
+          body: `${adminName} a forcé l'assignation de ${targetName} à ${aidantName}`, // ✅ CORRIGÉ : Affichage des vrais noms
           type: 'alert',
           data: {
             visit_id: visitId,
@@ -939,37 +961,6 @@ const createAidantAssignmentNotifications = async ({
         }));
 
         await supabase.from('notifications').insert(adminNotifications);
-      }
-    }
-
-    if (force && isPermanent) {
-      const { data: aidant } = await supabase
-        .from('aidants')
-        .select('current_assignments, max_assignments')
-        .eq('user_id', aidantUserId)
-        .single();
-
-      if (aidant && aidant.current_assignments > aidant.max_assignments) {
-        const { data: admins } = await supabase
-          .from('profiles')
-          .select('id')
-          .in('role', ['admin', 'coordinator']);
-
-        if (admins && admins.length > 0) {
-          const adminNotifications = admins.map((admin) => ({
-            user_id: admin.id,
-            title: '⚠️ Quota d\'assignations dépassé',
-            body: `L'aidant ${aidantUserId} a maintenant ${aidant.current_assignments}/${aidant.max_assignments} assignations`,
-            type: 'alert',
-            data: {
-              aidant_user_id: aidantUserId,
-              current: aidant.current_assignments,
-              max: aidant.max_assignments,
-            },
-          }));
-
-          await supabase.from('notifications').insert(adminNotifications);
-        }
       }
     }
   } catch (error) {
@@ -1087,7 +1078,7 @@ const getVisitWizardOptions = async (targetType, targetId, familyId) => {
 };
 
 /**
- * Crée les notifications pour une assignation
+ * Crée les notifications pour une assignation générale
  */
 const createAssignmentNotifications = async ({
   assignmentId,
@@ -1102,10 +1093,45 @@ const createAssignmentNotifications = async ({
   try {
     const priorityLabel = priority === 1 ? 'prioritaire' : priority === 2 ? 'standard' : 'fallback';
     
+    // ✅ 1. RESOLUTION DU NOM DE L'ADMIN / CRÉATEUR
+    let creatorName = 'L\'administration';
+    if (createdBy) {
+      const { data: creatorProfile } = await supabase.from('profiles').select('full_name').eq('id', createdBy).maybeSingle();
+      if (creatorProfile?.full_name) {
+        creatorName = creatorProfile.full_name;
+      }
+    }
+
+    // ✅ 2. RESOLUTION DU NOM DE L'AIDANT
+    let aidantName = 'Un aidant';
+    if (aidantUserId) {
+      const { data: aidantProfile } = await supabase.from('profiles').select('full_name').eq('id', aidantUserId).maybeSingle();
+      if (aidantProfile?.full_name) {
+        aidantName = aidantProfile.full_name;
+      }
+    }
+
+    // ✅ 3. SÉCURISATION DU NOM DE LA CIBLE
+    let finalTargetName = targetName || 'une cible';
+    if (!finalTargetName || finalTargetName === 'une cible') {
+      if (targetType === 'patient') {
+        const { data: patient } = await supabase.from('patients').select('first_name, last_name').eq('id', targetId).maybeSingle();
+        if (patient) {
+          finalTargetName = `${patient.first_name} ${patient.last_name}`;
+        }
+      } else {
+        const { data: profile } = await supabase.from('profiles').select('full_name').eq('id', targetId).maybeSingle();
+        if (profile) {
+          finalTargetName = profile.full_name;
+        }
+      }
+    }
+
+    // Notification pour l'aidant
     await supabase.from('notifications').insert({
       user_id: aidantUserId,
       title: '📋 Nouvelle assignation',
-      body: `Vous avez été assigné à ${targetName} (${assignmentType}) - ${priorityLabel}`,
+      body: `Vous avez été assigné à ${finalTargetName} (${assignmentType === 'primary' ? 'Permanente' : 'Ponctuelle'}) - ${priorityLabel}`,
       type: 'system',
       data: {
         assignment_id: assignmentId,
@@ -1129,17 +1155,16 @@ const createAssignmentNotifications = async ({
       if (!linksError && links) {
         ownerId = links.family_id;
       }
-    } else if (targetType === TARGET_TYPES.PERSONAL_ACCOUNT) {
-      ownerId = targetId;
-    } else if (targetType === TARGET_TYPES.FAMILY) {
+    } else {
       ownerId = targetId;
     }
 
+    // Notification pour la famille / le compte personnel
     if (ownerId) {
       await supabase.from('notifications').insert({
         user_id: ownerId,
         title: '✅ Aidant assigné',
-        body: `Un aidant a été assigné à ${targetName} (${assignmentType})`,
+        body: `${aidantName} a été assigné à ${finalTargetName} (${assignmentType === 'primary' ? 'Permanente' : 'Ponctuelle'})`,
         type: 'system',
         data: {
           assignment_id: assignmentId,
@@ -1152,6 +1177,7 @@ const createAssignmentNotifications = async ({
       });
     }
 
+    // Notification pour les administrateurs
     const { data: admins } = await supabase
       .from('profiles')
       .select('id')
@@ -1161,7 +1187,7 @@ const createAssignmentNotifications = async ({
       const adminNotifications = admins.map((admin) => ({
         user_id: admin.id,
         title: '📋 Nouvelle assignation créée',
-        body: `Un aidant a été assigné à ${targetName} par ${createdBy || 'le système'} (${priorityLabel})`,
+        body: `${aidantName} a été assigné à ${finalTargetName} par ${creatorName} (${priorityLabel})`, // ✅ CORRIGÉ : Affichage des vrais noms au lieu d'ID !
         type: 'alert',
         data: {
           assignment_id: assignmentId,
@@ -1199,7 +1225,7 @@ module.exports = {
   getAssignmentsByTarget,
   isAidantAssignedToTarget,
 
-  // 🆕 Nouvelles fonctions
+  // Nouvelles fonctions
   isAidantFull,
   getAvailableAidantsForFamily,
   getAidantsWithQuota,
