@@ -1,5 +1,6 @@
 // 📁 backend/src/services/aidantAssignment.service.js
- 
+// ✅ SERVICE ASSIGNATION : SÉCURISÉ AVEC CORRESPONDANCE EXACTE DES TYPES DE PRIORITÉS (PRIMARY, SECONDARY, TEMPORARY) ET DU QUOTA
+
 const { supabase } = require('./supabase.service');
 
 // ============================================================
@@ -33,6 +34,31 @@ const mapTargetTypeForResponse = (type) => {
   if (type === TARGET_TYPES.PATIENT) return 'patient';
   if (type === TARGET_TYPES.FAMILY) return 'family';
   return type;
+};
+
+// ✅ TRADUCTEUR STRATÉGIQUE DES TYPES D'ASSIGNATION DE LA BASE DE DONNÉES  
+const mapAssignmentTypeLocal = (type, targetType) => {
+  if (!type) return 'temporary';  
+  
+  const norm = type.toLowerCase();
+  const dbTargetType = mapTargetType(targetType);
+
+  // ⚡ PONCTUELLE / UNITAIRE / DEPANAGE ->  
+  if (norm === 'ponctuelle' || norm === 'ponctuel' || norm === 'secondary' || norm === 'temporary') {
+    return 'temporary';
+  }
+
+  // 📌 PERMANENTE / CONTRACTUELLE -> Mappe vers 'primary' ou 'secondary' selon le niveau de priorité [30]
+  if (norm === 'permanente' || norm === 'permanent' || norm === 'primary') {
+    // Si c'est pour un patient (un proche) -> C'est le soignant permanent principal (P1 - primary) [30]
+    if (dbTargetType === TARGET_TYPES.PATIENT) {
+      return 'primary';
+    }
+    // Si c'est pour le compte familial/personnel -> C'est le soignant permanent de relais (P2 - secondary) [30]
+    return 'secondary';
+  }
+
+  return 'temporary';
 };
 
 const ASSIGNMENT_TYPES = {
@@ -162,6 +188,9 @@ const assignAidantToTarget = async ({
   try {
     const dbTargetType = mapTargetType(targetType);
     
+    // ✅ TRADUCTION DE SECURITE DU TYPE D'ASSIGNATION : Résout de manière définitive le crash 23514 [23]
+    const dbAssignmentType = mapAssignmentTypeLocal(assignmentType, targetType);
+
     // 1. Vérifier que l'aidant existe et est disponible
     const { data: aidant, error: aidantError } = await supabase
       .from('aidants')
@@ -185,19 +214,19 @@ const assignAidantToTarget = async ({
       };
     }
 
-    // ✅ RECALCUL DYNAMIQUE SECURISE : Uniquement les assignations permanentes ('primary') comptent dans le quota ! [30]
+    // ✅ RECALCUL DYNAMIQUE SÉCURISÉ DES CONTRATS ACTIFS : Seuls les types primary et secondary (Permanent) comptent [30]
     const { count: dbActiveAssignments } = await supabase
       .from('aidant_assignments')
       .select('id', { count: 'exact', head: true })
       .eq('aidant_user_id', aidantUserId)
       .eq('status', 'active')
-      .eq('assignment_type', 'primary'); // ✅ Filtre strict "Permanente" [30]
+      .in('assignment_type', ['primary', 'secondary']); // ✅ P1 & P2 comptent, temporary non [30]
 
     const currentAssignments = dbActiveAssignments || 0;
     const maxAssignments = aidant.max_assignments || 4;
     
-    // Uniquement bloquer si l'admin essaie d'ajouter un NOUVEAU contrat permanent (primary) alors que l'aidant est complet
-    if (!force && assignmentType === 'primary' && currentAssignments >= maxAssignments) {
+    // Bloquer uniquement si l'on tente d'ajouter un raccordement permanent alors que l'aidant est complet (4/4)
+    if (!force && dbAssignmentType !== 'temporary' && currentAssignments >= maxAssignments) {
       return {
         success: false,
         error: `Cet aidant a déjà ${currentAssignments} assignations (maximum ${maxAssignments})`,
@@ -269,7 +298,7 @@ const assignAidantToTarget = async ({
       p_target_type: dbTargetType,
       p_target_id: targetId,
       p_family_id: familyId,
-      p_assignment_type: assignmentType,
+      p_assignment_type: dbAssignmentType, // ✅ Type traduit ('primary', 'secondary', 'temporary') [23]
       p_priority: priority,
       p_created_by: createdBy,
       p_reason: reason,
@@ -296,7 +325,7 @@ const assignAidantToTarget = async ({
     }
 
     // 6. Mettre à jour la colonne de quota statique uniquement s'il s'agit d'un raccordement permanent ! [30]
-    if (assignmentType === 'primary') {
+    if (dbAssignmentType !== 'temporary') {
       const finalAssignmentsCount = currentAssignments + 1;
       await supabase
         .from('aidants')
@@ -315,7 +344,7 @@ const assignAidantToTarget = async ({
       targetType: dbTargetType,
       targetId,
       targetName,
-      assignmentType,
+      assignmentType: dbAssignmentType,
       createdBy,
       priority,
     });
@@ -386,13 +415,13 @@ const revokeAssignment = async (assignmentId, revokedBy = null, reason = null) =
       };
     }
 
-    // ✅ RECALCUL DYNAMIQUE DES ASSIGNATIONS ACTIVES UNIQUEMENT DE TYPE PERMANENTE [30]
+    // ✅ RECALCUL DYNAMIQUE DES ASSIGNATIONS ACTIVES UNIQUEMENT DE TYPE PERMANENTES [30]
     const { count: currentAssignments, error: countError } = await supabase
       .from('aidant_assignments')
       .select('id', { count: 'exact', head: true })
       .eq('aidant_user_id', assignment.aidant_user_id)
       .eq('status', ASSIGNMENT_STATUS.ACTIVE)
-      .eq('assignment_type', 'primary'); // ✅ Filtre permanent actif [30]
+      .in('assignment_type', ['primary', 'secondary']); // ✅ Filtre permanent actif [30]
 
     if (!countError) {
       const { data: aidant, error: aidantError } = await supabase
@@ -682,13 +711,13 @@ const getAvailableAidantsForFamily = async (familyId, filters = {}) => {
 
     const enrichedAidants = await Promise.all((aidants || []).map(async (aidant) => {
       
-      // ✅ CALCUL DYNAMIQUE SECURISE EN DIRECT : Pour eviter tout decalage d'IHM de quotas (Uniquement type 'primary') 
+      // ✅ CALCUL DYNAMIQUE SECURISE EN DIRECT : Pour eviter tout decalage d'IHM de quotas (Uniquement types primary et secondary) [3, 30]
       const { count: dbActiveAssignments } = await supabase
         .from('aidant_assignments')
         .select('id', { count: 'exact', head: true })
         .eq('aidant_user_id', aidant.user_id)
         .eq('status', 'active')
-        .eq('assignment_type', 'primary'); 
+        .in('assignment_type', ['primary', 'secondary']); // ✅ Filtre d'unicité permanent [30]
 
       const current = dbActiveAssignments || 0;
       const max = aidant.max_assignments || 4;
@@ -737,14 +766,14 @@ const getAidantsWithQuota = async (filters = {}) => {
       return [];
     }
 
-    // ✅ CALCUL DYNAMIQUE EN DIRECT POUR TOUTES LES VUES ADMINS (Uniquement de type 'primary') [3, 30]
+    // ✅ CALCUL DYNAMIQUE EN DIRECT POUR TOUTES LES VUES ADMINS (Uniquement types primary et secondary) [3, 30]
     return await Promise.all((aidants || []).map(async (aidant) => {
       const { count: dbActiveAssignments } = await supabase
         .from('aidant_assignments')
         .select('id', { count: 'exact', head: true })
         .eq('aidant_user_id', aidant.user_id)
         .eq('status', 'active')
-        .eq('assignment_type', 'primary'); 
+        .in('assignment_type', ['primary', 'secondary']); 
 
       const current = dbActiveAssignments || 0;
       const max = aidant.max_assignments || 4;
@@ -811,13 +840,13 @@ const adminAssignAidantToVisit = async ({
       };
     }
 
-    // ✅ RECALCUL DYNAMIQUE SECURISE (Uniquement de type 'primary')  
+    // ✅ RECALCUL DYNAMIQUE SECURISE (Uniquement types primary et secondary) [3, 30] 
     const { count: dbActiveAssignments } = await supabase
       .from('aidant_assignments')
       .select('id', { count: 'exact', head: true })
       .eq('aidant_user_id', aidantUserId)
       .eq('status', 'active')
-      .eq('assignment_type', 'primary');  
+      .in('assignment_type', ['primary', 'secondary']);  
 
     const currentAssignments = dbActiveAssignments || 0;
     const maxAssignments = aidant.max_assignments || 4;
@@ -943,7 +972,7 @@ const createAidantAssignmentNotifications = async ({
     if (aidantUserId) {
       const { data: aidantProfile } = await supabase.from('profiles').select('full_name').eq('id', aidantUserId).maybeSingle();
       if (aidantProfile?.full_name) {
-        audantName = aidantProfile.full_name;
+        aidantName = aidantProfile.full_name;
       }
     }
 
@@ -1216,7 +1245,6 @@ const createAssignmentNotifications = async ({
           aidant_user_id: aidantUserId,
           target_type: targetType,
           target_id: targetId,
-          assignment_type: assignmentType,
           priority: priority,
           aidant_name: aidantName,  
         },
