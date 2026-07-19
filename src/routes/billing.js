@@ -1,5 +1,5 @@
 // 📁 backend/src/routes/billing.js
- 
+
 const express = require('express');
 const { createClient } = require('@supabase/supabase-js');
 const { FedaPay, Transaction } = require('fedapay');
@@ -141,40 +141,45 @@ async function getActiveAidantForTarget(targetType, targetId, familyId) {
   }
 }
 
-async function createPendingSubscription(userId, offerId, offer, patientId = null) {
+// ✅ CALCUL DYNAMIQUE ET MULTIPLICATION DU QUOTA BASÉ SUR LA DURÉE SÉLECTIONNÉE
+async function createPendingSubscription(userId, offerId, offer, patientId = null, durationMonths = 1) {
   try {
     const startDate = new Date();
     const endDate = new Date();
 
-    // ✅ COHÉRENCE : Aligner dynamiquement la durée de l'abonnement sur la grille tarifaire officielle
-    let durationDays = offer.duration_days || 30;
+    const multiplier = Number(durationMonths) || 1;
+
+    // Alignement de la durée de base en jours
+    let baseDurationDays = offer.duration_days || 30;
 
     if (offer.category === 'maman_bebe') {
       const nameLower = offer.name.toLowerCase();
       if (nameLower.includes('essentiel')) {
-        durationDays = 14; // 2 semaines
+        baseDurationDays = 14; 
       } else if (nameLower.includes('confort')) {
-        durationDays = 21; // 3 semaines
+        baseDurationDays = 21; 
       } else if (nameLower.includes('sérénité')) {
-        durationDays = 28; // 4 semaines
+        baseDurationDays = 28; 
       } else if (nameLower.includes('privilège')) {
-        durationDays = 35; // 5 semaines
+        baseDurationDays = 35; 
       }
     }
 
+    const durationDays = baseDurationDays * multiplier;
     endDate.setDate(startDate.getDate() + durationDays);
 
-    let totalVisits = offer.total_visits || 0;
+    // Multiplication des quotas
+    let totalVisits = (offer.total_visits || 0) * multiplier;
     if (!totalVisits) {
       totalVisits = offer.visits_per_week ? (offer.visits_per_week * Math.ceil(durationDays / 7)) : 0;
     }
     
-    let totalOrders = offer.total_orders || 0;
+    let totalOrders = (offer.total_orders || 0) * multiplier;
     if (!totalOrders) {
       totalOrders = Math.ceil(durationDays / 7);
     }
 
-    console.log('📝 Création abonnement pour user_id:', userId);
+    console.log(`📝 Création abonnement pour user_id: ${userId} (${multiplier} mois)`);
 
     const subscriptionData = {
       user_id: userId,
@@ -182,7 +187,7 @@ async function createPendingSubscription(userId, offerId, offer, patientId = nul
       status: 'en_attente',
       start_date: startDate.toISOString().split('T')[0],
       end_date: endDate.toISOString().split('T')[0],
-      auto_renew: true,
+      auto_renew: false, // ✅ Modifié à false (renouvellement manuel obligatoire)
       total_visits: totalVisits,
       used_visits: 0,        
       remaining_visits: totalVisits, 
@@ -527,9 +532,11 @@ router.post('/generate-payment', async (req, res) => {
       visit_id = null,
       is_visit = false,
       type = null,
+      duration_months = 1, // ✅ Récupération du multiplicateur de mois choisi par le client
     } = req.body;
 
     const finalAmount = Number(montant || amount || 0);
+    const multiplier = Number(duration_months) || 1; // ✅ Conservation de la valeur numérique
 
     if (!finalAmount || finalAmount <= 0) {
       return res.status(400).json({
@@ -567,26 +574,28 @@ router.post('/generate-payment', async (req, res) => {
     let actualAbonnementId = null;
 
     if (!is_ponctual && (abonnement_id || plan_id)) {
-      const targetOfferId = abonnement_id || plan_id; // ✅ CORRIGÉ : Remplacement de "displayName" par "abonnement_id"
+      const targetOfferId = abonnement_id || plan_id; 
       const { data: offer, error: offerError } = await supabase
         .from('offres')
-        .select('id, name, type, price, total_visits, total_orders')
+        .select('id, name, type, price, total_visits, total_orders, duration_days, category')
         .eq('id', targetOfferId)
         .single();
 
-      if (offerError) {
-        console.error('❌ Offre non trouvée:', offerError.message);
+      if (offerError || !offer) {
+        console.error('❌ Offre non trouvée:', offerError?.message);
         return res.status(400).json({
           success: false,
           message: 'Offre non trouvée',
         });
       }
 
+      // ✅ Passage du multiplicateur lors de la création en attente
       subscriptionRecord = await createPendingSubscription(
         user.id,
         offer.id,
         offer,
-        patient_id || null
+        patient_id || null,
+        multiplier
       );
 
       if (!subscriptionRecord) {
@@ -615,7 +624,8 @@ router.post('/generate-payment', async (req, res) => {
       target_name: target_name || finalName,
       is_visit: is_visit || false,
       visit_id: visit_id || null,
-      type: type || (is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription')), // ✅ Aiguillage explicite unifié
+      duration_months: multiplier, // ✅ Archivage de la personnalisation dans FedaPay
+      type: type || (is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription')), 
     };
 
     console.log('📦 Métadonnées envoyées à FedaPay:', metadata);
@@ -660,7 +670,7 @@ router.post('/generate-payment', async (req, res) => {
       reference: String(transaction.id),
       status: 'en_attente',
       abonnement_id: actualAbonnementId || null,
-      metadata: metadata, // ✅ Métadonnées unifiées
+      metadata: metadata, 
     };
 
     const { data: payment, error: dbError } = await supabase
@@ -912,7 +922,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     }
 
     try {
-      let notificationTitle = '✅ Paiement confirmé';
+      let notificationTitle = '✅ Paiement confirmed';
       let notificationBody = `Votre paiement de ${paymentRecord.amount} FCFA a été confirmé.`;
 
       if (type === 'visit' && result) {
