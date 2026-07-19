@@ -375,6 +375,7 @@ async function activateSubscription(paymentRecord, subscriptionId) {
 // =============================================
 // CRÉER UN PAIEMENT
 // =============================================
+ 
 router.post('/', async (req, res) => {
   try {
     const { 
@@ -399,15 +400,20 @@ router.post('/', async (req, res) => {
     const userId = req.user.id;
     const profile = req.profile;
 
-    console.log('📥 Création paiement:', {
-      userId,
-      amount,
-      is_ponctual,
-      is_visit,
-      visit_id,
-      subscriptionId,
-      patient_id,
-    });
+    const finalType = type || (is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription'));
+    const finalVisitId = visit_id || null;
+    const finalOrderId = orderId || order_id || null;
+
+    // ✅ CONSTITUTION DES URLS SÉCURISÉES DE REDIRECTION
+    const callbackUrl = `${process.env.CLIENT_URL}/payment/confirm?status=approved&type=${finalType}` +
+      (finalVisitId ? `&visit_id=${finalVisitId}` : '') +
+      (finalOrderId ? `&order_id=${finalOrderId}` : '') +
+      (patient_id ? `&patient_id=${patient_id}` : '');
+
+    const cancelUrl = `${process.env.CLIENT_URL}/payment/confirm?status=cancel&type=${finalType}` +
+      (finalVisitId ? `&visit_id=${finalVisitId}` : '') +
+      (finalOrderId ? `&order_id=${finalOrderId}` : '') +
+      (patient_id ? `&patient_id=${patient_id}` : '');
 
     const transaction = await createTransaction({
       amount,
@@ -417,18 +423,18 @@ router.post('/', async (req, res) => {
       lastname: profile.full_name.split(' ').slice(1).join(' ') || 'Client',
       phone: phone || profile.phone,
       userId,
-      orderId,
+      orderId: finalOrderId,
       subscriptionId,
-      callback_url: `${process.env.CLIENT_URL}/payment/confirm`,
-      cancel_url: `${process.env.CLIENT_URL}/payment/cancel`,
+      callback_url: callbackUrl,  
+      cancel_url: cancelUrl,      
       orderData: order_data || null,
       is_ponctual,
       is_visit,
-      visit_id,
+      visit_id: finalVisitId,
       patient_id,
       target_type,
       target_name,
-      type: type || (is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription')),
+      type: finalType,
     });
 
     const paymentData = {
@@ -440,17 +446,17 @@ router.post('/', async (req, res) => {
       abonnement_id: is_ponctual ? null : (subscriptionId || null),
       metadata: {
         transactionId: transaction.id,
-        orderId,
+        orderId: finalOrderId,
         subscriptionId: is_ponctual ? null : (subscriptionId || null),
         payment_url: transaction.url,
         is_ponctual: is_ponctual || false,
         is_visit: is_visit || false,
-        visit_id: visit_id || null,
+        visit_id: finalVisitId,
         order_data: order_data || null,
         patient_id: patient_id || null,
         target_type: target_type || 'personal',
         target_name: target_name || profile.full_name || 'Client',
-        type: type || (is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription')),
+        type: finalType,
         ...metadata,
       },
     };
@@ -484,7 +490,6 @@ router.post('/', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
 // =============================================
 // WEBHOOK - CONFIRMER UN PAIEMENT (SANS AUTH)
 // =============================================
