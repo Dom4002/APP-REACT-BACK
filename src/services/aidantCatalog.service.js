@@ -1,11 +1,11 @@
 // 📁 backend/src/services/aidantCatalog.service.js
+// ✅ SERVICE CATALOGUE AIDANTS : COMPTAGE STRICT DES QUOTAS PAR ASSIGNATIONS PERMANENTES (PRIMARY ONLY)
 
 const { supabase } = require('./supabase.service');
 const {
   getActiveAidantForTarget,
   getAllAidantsForTarget,
   assignAidantToTarget,
-  revokeAssignment: revokeAssignmentNew,
   TARGET_TYPES,
   ASSIGNMENT_TYPES,
   getAvailableAidantsForFamily,
@@ -13,7 +13,9 @@ const {
   isAidantFull,
 } = require('./aidantAssignment.service');
 
-// ✅ Cache pour les profils (pour éviter les appels répétés)
+const { revokeAssignment: revokeAssignmentNew } = require('./aidantAssignment.service');
+
+// Cache pour les profils
 const profileCache = new Map();
 
 // ============================================================
@@ -55,11 +57,6 @@ const getAvailableAidants = async (filters = {}) => {
       query = query.gte('experience_years', filters.minExperience);
     }
 
-    // ✅ Filtrer par quota (aidants qui ont de la place)
-    if (filters.hasQuota === true) {
-      // On filtrera après récupération
-    }
-
     const sortField = filters.sortBy || 'rating';
     const sortOrder = filters.sortOrder || 'desc';
     query = query.order(sortField, { ascending: sortOrder === 'asc' });
@@ -91,11 +88,14 @@ const getAvailableAidants = async (filters = {}) => {
 
     // ✅ Calculer les stats pour chaque aidant
     const aidantsWithStats = await Promise.all((aidants || []).map(async (aidant) => {
+      
+      // ✅ COHÉRENCE QUOTA : Compter uniquement les assignations permanentes ('primary') actives ! [30]
       const { count: activeAssignments, error: countError } = await supabase
         .from('aidant_assignments')
         .select('id', { count: 'exact', head: true })
         .eq('aidant_user_id', aidant.user_id)
-        .eq('status', 'active');
+        .eq('status', 'active')
+        .eq('assignment_type', 'primary'); // ✅ Filtre d'unicité permanent [30]
 
       if (countError) {
         console.error('❌ Erreur comptage assignations:', countError);
@@ -165,11 +165,13 @@ const getAidantById = async (aidantId) => {
 
     if (aidantError) throw aidantError;
 
+    // ✅ COHÉRENCE QUOTA : Compter uniquement les assignations permanentes ('primary') actives ! 
     const { count: activeAssignments, error: countError } = await supabase
       .from('aidant_assignments')
       .select('id', { count: 'exact', head: true })
       .eq('aidant_user_id', aidant.user_id)
-      .eq('status', 'active');
+      .eq('status', 'active')
+      .eq('assignment_type', 'primary');  
 
     if (countError) {
       console.error('❌ Erreur comptage assignations:', countError);
@@ -879,13 +881,14 @@ const getAidantsBySpecialty = async (specialty, filters = {}) => {
 
     if (error) throw error;
 
-    // Enrichir avec les quotas
+    // Enrichir avec les quotas (Uniquement type 'primary') [30]
     const enriched = await Promise.all((aidants || []).map(async (aidant) => {
       const { count: activeAssignments } = await supabase
         .from('aidant_assignments')
         .select('id', { count: 'exact', head: true })
         .eq('aidant_user_id', aidant.user_id)
-        .eq('status', 'active');
+        .eq('status', 'active')
+        .eq('assignment_type', 'primary'); 
 
       const maxAssignments = aidant.max_assignments || DEFAULT_MAX_ASSIGNMENTS;
 
@@ -938,13 +941,14 @@ const getAidantsByZone = async (zone, filters = {}) => {
 
     if (error) throw error;
 
-    // Enrichir avec les quotas
+    // Enrichir avec les quotas (Uniquement de type 'primary') [30]
     const enriched = await Promise.all((aidants || []).map(async (aidant) => {
       const { count: activeAssignments } = await supabase
         .from('aidant_assignments')
         .select('id', { count: 'exact', head: true })
         .eq('aidant_user_id', aidant.user_id)
-        .eq('status', 'active');
+        .eq('status', 'active')
+        .eq('assignment_type', 'primary');  
 
       const maxAssignments = aidant.max_assignments || DEFAULT_MAX_ASSIGNMENTS;
 
@@ -977,7 +981,7 @@ module.exports = {
   getAidantAssignments,
   revokeAssignment,
 
-  // 🆕 Nouvelles fonctions
+  // Nouvelles fonctions
   getAvailableAidantsForFamilyCatalog,
   getAidantsByAvailability,
   canAidantTakeOrder,
