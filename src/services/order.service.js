@@ -1,5 +1,5 @@
 // 📁 backend/src/services/order.service.js
-// ✅ SERVICE DE COMMANDES COMPLET : CORRECTION DES RÉFÉRENCES DE VARIABLES CAMELCASE DANS LES MÉTADONNÉES
+// ✅ SERVICE DE COMMANDES AUTONOME : DÉCOUPLAGE 100% DES ABONNEMENTS ET FLUX PONCTUEL UNIFIÉ POUR TOUS
 
 const { supabase } = require('./supabase.service');
 const { createNotification } = require('./notification.service');
@@ -20,7 +20,6 @@ const ORDER_STATUS = {
 };
 
 const ORDER_TYPES = {
-  SUBSCRIPTION: 'subscription',
   PONCTUAL: 'ponctual',
 };
 
@@ -30,16 +29,8 @@ const AUTO_VALIDATION_HOURS = 48; // Clôture automatique du cash après 48 heur
 // 📊 ALGORITHME DE CALCUL DES FRAIS DE RETRAIT MOBILE MONEY (BÉNIN)
 // ============================================================
 
-/**
- * Calcule les frais de retrait Mobile Money officiels au Bénin.
- * Supports: MTN, Moov et Celtiis Cash.
- * @param {number} amount - Montant d'achat prévisionnel
- * @param {string} operator - 'mtn_moov' ou 'celtiis'
- * @returns {number} Frais de retrait en FCFA
- */
 const calculateWithdrawalFee = (amount, operator) => {
   if (amount <= 0) return 0;
-
   const amt = Math.round(amount);
 
   if (operator === 'celtiis') {
@@ -56,7 +47,7 @@ const calculateWithdrawalFee = (amount, operator) => {
     if (amt <= 750000) return 5000;
     if (amt <= 1000000) return 5800;
     if (amt <= 1500000) return 7800;
-    return 9800; // Limite maximale (jusqu'à 2 000 000 F)
+    return 9800;
   } else {
     // MTN & Moov
     if (amt <= 500) return 50;
@@ -71,7 +62,7 @@ const calculateWithdrawalFee = (amount, operator) => {
     if (amt <= 750000) return 5000;
     if (amt <= 1000000) return 6000;
     if (amt <= 1500000) return 8000;
-    return 9900; // Limite maximale (jusqu'à 2 000 000 F)
+    return 9900;
   }
 };
 
@@ -79,10 +70,6 @@ const calculateWithdrawalFee = (amount, operator) => {
 // 📊 ALGORITHME DE SYNCHRONISATION DES QUOTAS DE COMMANDES ACTIVES
 // ============================================================
 
-/**
- * Recalcule et synchronise en direct le nombre réel de livraisons actives (en_cours) d'un aidant.
- * @param {string} aidantUserId - UUID de l'aidant (user_id)
- */
 const syncAidantOrderCount = async (aidantUserId) => {
   try {
     const { data: aidant } = await supabase
@@ -93,7 +80,6 @@ const syncAidantOrderCount = async (aidantUserId) => {
 
     if (!aidant) return;
 
-    // Compter les commandes actuellement en cours ('en_cours') de cet aidant en base de données
     const { count, error } = await supabase
       .from('commandes')
       .select('id', { count: 'exact', head: true })
@@ -112,14 +98,8 @@ const syncAidantOrderCount = async (aidantUserId) => {
   }
 };
 
-/**
- * Vérifie l'activité de commandes en cours d'un aidant (Toujours autorisé : canTake = true)
- * @param {string} aidantUserId - UUID de l'aidant (user_id)
- * @returns {Promise<Object>} - { canTake: true, current, max: Infinity, available: Infinity }
- */
 const checkAidantOrderQuota = async (aidantUserId) => {
   try {
-    // Forcer le recalcul dynamique en direct
     await syncAidantOrderCount(aidantUserId);
 
     const { data: aidant, error } = await supabase
@@ -133,20 +113,19 @@ const checkAidantOrderQuota = async (aidantUserId) => {
         success: false,
         error: 'Aidant non trouvé',
         current: 0,
-        max: 999,
-        available: 999,
-        canTake: true, 
+        max: 2,
+        available: 2,
+        canTake: true,
       };
     }
 
     const current = aidant.current_orders || 0;
-
     return {
       success: true,
       current,
-      max: 999,
-      available: 999,
-      canTake: true,
+      max: 2,
+      available: Math.max(0, 2 - current),
+      canTake: current < 2,
     };
   } catch (error) {
     console.error('❌ checkAidantOrderQuota error:', error);
@@ -154,31 +133,25 @@ const checkAidantOrderQuota = async (aidantUserId) => {
       success: false,
       error: error.message,
       current: 0,
-      max: 999,
-      available: 999,
+      max: 2,
+      available: 2,
       canTake: true,
     };
   }
 };
 
-/**
- * Incrémente le nombre de commandes (délégué au sync)
- */
 const incrementAidantOrders = async (aidantUserId) => {
   await syncAidantOrderCount(aidantUserId);
   return true;
 };
 
-/**
- * Décrémente le nombre de commandes (délégué au sync)
- */
 const decrementAidantOrders = async (aidantUserId) => {
   await syncAidantOrderCount(aidantUserId);
   return true;
 };
 
 // ============================================================
-// CRÉATION DE COMMANDE
+// CRÉATION DE COMMANDE (100% AUTONOME SANS ABONNEMENTS)
 // ============================================================
 
 const createOrder = async ({
@@ -189,13 +162,11 @@ const createOrder = async ({
   type,
   description,
   address,
-  latitude = null,   
-  longitude = null,  
-  purchaseAmount = 0,        
-  withdrawalOperator = null,  
+  latitude = null,
+  longitude = null,
+  purchaseAmount = 0,
+  withdrawalOperator = null,
   prescriptionUrl,
-  isPonctual = false,
-  wizardChoice = null,
   selectedAidantId = null,
   profile,
 }) => {
@@ -203,9 +174,6 @@ const createOrder = async ({
     const finalTargetType = targetType || (patientId ? 'patient' : 'personal');
     const finalTargetName = targetName || (patientId ? null : profile?.full_name);
     const familyId = userId;
-
-    const { hasActiveSubscription, remainingOrders, subscription } = 
-      await checkSubscriptionForOrders(userId);
 
     // Calcul automatique des frais de retrait Mobile Money s'il y a achat
     const withdrawalFee = purchaseAmount > 0 && withdrawalOperator 
@@ -217,25 +185,14 @@ const createOrder = async ({
     let status = ORDER_STATUS.CREATED;
     let requiresPayment = false;  
     let paymentAmount = 0;
-    let subscriptionId = null;
 
     if (requiresAdvancePayment) {
       requiresPayment = true;
       status = ORDER_STATUS.WAITING_PAYMENT; // Bloqué en attente du paiement de l'avance (achats + retrait)
       paymentAmount = purchaseAmount + withdrawalFee;
-    } else if (isPonctual) {
-      requiresPayment = false; // Pas d'avance requise s'il n'y a pas d'achat physique
-      status = ORDER_STATUS.CREATED;
-    } else if (hasActiveSubscription && remainingOrders > 0) {
-      status = ORDER_STATUS.CREATED;
-      requiresPayment = false;
-      subscriptionId = subscription?.id || null;
-    } else if (hasActiveSubscription && remainingOrders === 0) {
-      requiresPayment = false;
-      status = ORDER_STATUS.CREATED;
     } else {
       requiresPayment = false;
-      status = ORDER_STATUS.CREATED;
+      status = ORDER_STATUS.CREATED; // Immédiatement disponible si simple course de récupération
     }
 
     let finalAidantId = null;
@@ -243,28 +200,7 @@ const createOrder = async ({
     if (selectedAidantId) {
       const convertedId = await getAidantIdFromUserIdOrId(selectedAidantId);
       if (convertedId) {
-        if (wizardChoice === 'permanente') {
-          const { data: aidant, error } = await supabase
-            .from('aidants')
-            .select('current_assignments, max_assignments')
-            .eq('user_id', selectedAidantId)
-            .single();
-
-          if (!error && aidant) {
-            const current = aidant.current_assignments || 0;
-            const max = aidant.max_assignments || 4;
-            if (current >= max) {
-              return {
-                success: false,
-                error: `Cet aidant est complet (${current}/${max} assignations)`,
-                code: 'AIDANT_FULL',
-              };
-            }
-          }
-          finalAidantId = convertedId;
-        } else if (wizardChoice === 'ponctuelle') {
-          finalAidantId = convertedId;
-        }
+        finalAidantId = convertedId;
       }
     }
 
@@ -283,12 +219,11 @@ const createOrder = async ({
       items: [],
       prescription_url: prescriptionUrl || null,
       status: status,
-      order_type: requiresAdvancePayment || isPonctual ? ORDER_TYPES.PONCTUAL : ORDER_TYPES.SUBSCRIPTION,
+      order_type: ORDER_TYPES.PONCTUAL, 
       is_paid: !requiresAdvancePayment,
       aidant_id: finalAidantId,
-      subscription_id: subscriptionId,
+      subscription_id: null,  
       
-      // Stockage de la provision MM
       purchase_amount: purchaseAmount,
       withdrawal_operator: withdrawalOperator,
       withdrawal_fee: withdrawalFee,
@@ -300,16 +235,13 @@ const createOrder = async ({
         withdrawal_fee: withdrawalFee,
         created_by: userId,
         created_at: new Date().toISOString(),
-        auto_assigned_aidant: false,
         payment_amount: requiresAdvancePayment ? paymentAmount : null,
-        subscription_used: subscriptionId ? true : false,
-        ponctual_mode: requiresAdvancePayment || isPonctual,
-        wizard_choice: wizardChoice || null,
+        ponctual_mode: true,
         selected_aidant: selectedAidantId || null,
       },
     };
 
-    const { data: order, error: error } = await supabase
+    const { data: order, error } = await supabase
       .from('commandes')
       .insert(orderData)
       .select('*')
@@ -353,9 +285,10 @@ const createOrder = async ({
       order: fullOrder,
       requires_payment: requiresAdvancePayment,
       payment_amount: requiresAdvancePayment ? paymentAmount : null,
-      subscription_used: !!subscriptionId,
+      subscription_used: false,
       auto_assigned_aidant: false,
     };
+
   } catch (error) {
     console.error('❌ createOrder error:', error);
     return {
@@ -418,6 +351,13 @@ const takeOrder = async (orderId, aidantUserId, lat = null, lng = null) => {
     }
 
     const quotaCheck = await checkAidantOrderQuota(aidantUserId);
+    if (!quotaCheck.canTake) {
+      return {
+        success: false,
+        error: `Vous avez atteint votre quota maximal de commandes simultanées (${quotaCheck.current}/${quotaCheck.max})`,
+        code: 'QUOTA_EXCEEDED',
+      };
+    }
 
     if (order.aidant_id && order.aidant_id !== aidant.id) {
       return {
@@ -474,10 +414,11 @@ const takeOrder = async (orderId, aidantUserId, lat = null, lng = null) => {
       order: fullOrder,
       quota: {
         current: quotaCheck.current + 1,
-        max: 999,
-        available: 999,
+        max: quotaCheck.max,
+        available: Math.max(0, quotaCheck.max - (quotaCheck.current + 1)),
       },
     };
+
   } catch (error) {
     console.error('❌ takeOrder error:', error);
     return {
@@ -493,13 +434,13 @@ const takeOrder = async (orderId, aidantUserId, lat = null, lng = null) => {
 // ============================================================
 
 const deliverOrder = async (
-  orderId, 
-  aidantUserId, 
-  proofUrl = null, 
+  orderId,
+  aidantUserId,
+  proofUrl = null,
   location = null,
-  deliveryFee = 0,            
-  paymentMethod = 'online',    
-  cashAmountReceived = 0        
+  deliveryFee = 0,
+  paymentMethod = 'online',
+  cashAmountReceived = 0
 ) => {
   try {
     const { data: order, error: fetchError } = await supabase
@@ -516,22 +457,6 @@ const deliverOrder = async (
       };
     }
 
-    if (order.aidant_id) {
-      const { data: aidant } = await supabase
-        .from('aidants')
-        .select('user_id')
-        .eq('id', order.aidant_id)
-        .single();
-
-      if (aidant && aidant.user_id !== aidantUserId) {
-        return {
-          success: false,
-          error: 'Vous n\'êtes pas l\'aidant assigné à cette commande',
-          code: 'NOT_ASSIGNED',
-        };
-      }
-    }
-
     if (order.status !== ORDER_STATUS.IN_PROGRESS) {
       return {
         success: false,
@@ -540,33 +465,28 @@ const deliverOrder = async (
       };
     }
 
-    const isSubscriptionUsed = !!order.subscription_id;
-
-    // Si abonnement utilisé : livraison gratuite et validation immédiate sans attente
-    const isCompletedImmediately = isSubscriptionUsed;
-    const status = isCompletedImmediately ? ORDER_STATUS.VALIDATED : ORDER_STATUS.DELIVERED;
-
     const autoValidationAt = new Date(Date.now() + AUTO_VALIDATION_HOURS * 60 * 60 * 1000);
 
+    // Toutes les livraisons s'effectuent à l'acte. Le statut passe à "livree" en attente de paiement final [14]
     const { data: updatedOrder, error: updateError } = await supabase
       .from('commandes')
       .update({
-        status: status,
+        status: ORDER_STATUS.DELIVERED,
         proof_url: proofUrl || null,
-        delivery_fee: isSubscriptionUsed ? 0 : Number(deliveryFee),
+        delivery_fee: Number(deliveryFee),
         delivery_time: new Date().toISOString(),
         cash_amount_received: paymentMethod === 'cash' ? Number(cashAmountReceived) : 0,
-        delivery_payment_method: isSubscriptionUsed ? 'subscription' : paymentMethod,
+        delivery_payment_method: paymentMethod,
         cash_confirmation_status: paymentMethod === 'cash' ? 'pending' : null,
         cash_confirmation_expires_at: paymentMethod === 'cash' ? autoValidationAt.toISOString() : null,
-        is_paid: isCompletedImmediately, // Payé d'avance uniquement si abonnement
+        is_paid: false, // Non payé d'office car frais de livraison à régler à l'arrivée [14]
         updated_at: new Date().toISOString(),
         metadata: {
           ...(order.metadata || {}),
           location_end: location || null,
           delivery_completed_at: new Date().toISOString(),
           delivery_payment_method: paymentMethod,
-          delivery_fee_paid: isCompletedImmediately,
+          delivery_fee_paid: false,
           cash_confirmation_status: paymentMethod === 'cash' ? 'pending' : null,
         },
       })
@@ -586,15 +506,7 @@ const deliverOrder = async (
 
     const targetDisplay = order.target_name || 'un client';
     if (order.family_id) {
-      if (isCompletedImmediately) {
-        await createNotification({
-          userId: order.family_id,
-          title: '📦 Commande livrée et validée !',
-          body: `Votre commande pour ${targetDisplay} a été livrée avec succès (frais couverts par votre abonnement).`,
-          type: 'commande',
-          data: { order_id: orderId, status: ORDER_STATUS.VALIDATED },
-        });
-      } else if (paymentMethod === 'cash') {
+      if (paymentMethod === 'cash') {
         await createNotification({
           userId: order.family_id,
           title: '💵 Confirmation de paiement espèces requise',
@@ -621,6 +533,7 @@ const deliverOrder = async (
       order: fullOrder,
       auto_validation_at: autoValidationAt,
     };
+
   } catch (error) {
     console.error('❌ deliverOrder error:', error);
     return {
@@ -632,7 +545,7 @@ const deliverOrder = async (
 };
 
 // ============================================================
-// ✅ SÉCURITÉ CASH : CLIENT VALIDE OU LITIGE LA REMISE EN MAINS PROPRES
+// SÉCURITÉ CASH : CLIENT VALIDE OU LITIGE LA REMISE EN MAINS PROPRES
 // ============================================================
 
 const confirmCashPayment = async (orderId, userId, isConfirmed) => {
@@ -688,6 +601,7 @@ const confirmCashPayment = async (orderId, userId, isConfirmed) => {
 
     const fullOrder = await enrichOrderWithRelations(updatedOrder);
     return { success: true, order: fullOrder };
+
   } catch (error) {
     console.error('❌ confirmCashPayment error:', error);
     return { success: false, error: error.message };
@@ -756,6 +670,7 @@ const autoValidateOrder = async (orderId) => {
       success: true,
       order: updatedOrder,
     };
+
   } catch (error) {
     console.error('❌ autoValidateOrder error:', error);
     return {
@@ -802,6 +717,7 @@ const autoValidateExpiredCashOrders = async () => {
       count++;
     }
     return count;
+
   } catch (error) {
     console.error('❌ autoValidateExpiredCashOrders error:', error);
     return 0;
@@ -809,7 +725,7 @@ const autoValidateExpiredCashOrders = async () => {
 };
 
 // ============================================================
-// ✅ TRAITEMENT WEBHOOK : REDIRECTION ET MISE À JOUR COMMANDE AVANCE OU FINALE
+// TRAITEMENT WEBHOOK : REDIRECTION ET MISE À JOUR COMMANDE AVANCE OU FINALE
 // ============================================================
 
 const processOrderPaymentFromWebhook = async (orderId, transactionId) => {
@@ -890,6 +806,7 @@ const processOrderPaymentFromWebhook = async (orderId, transactionId) => {
     }
 
     return order;
+
   } catch (err) {
     console.error('❌ Erreur processOrderPaymentFromWebhook:', err.message);
     return null;
@@ -920,6 +837,7 @@ const notifyAvailableAidantsForOrder = async (orderId, { targetDisplay, descript
         data: { order_id: orderId, action: 'take' },
       });
     }
+
   } catch (error) {
     console.error('❌ notifyAvailableAidantsForOrder error:', error);
   }
@@ -1014,39 +932,6 @@ const getAidantIdFromUserIdOrId = async (userIdOrId) => {
   return null;
 };
 
-const checkSubscriptionForOrders = async (userId) => {
-  try {
-    const { data: subscription, error } = await supabase
-      .from('abonnements')
-      .select('id, remaining_orders, status, total_orders, used_orders, user_id')
-      .eq('user_id', userId)
-      .eq('status', 'actif')
-      .gte('end_date', new Date().toISOString().split('T')[0])
-      .maybeSingle();
-
-    if (error || !subscription) {
-      return {
-        hasActiveSubscription: false,
-        remainingOrders: 0,
-        subscription: null,
-      };
-    }
-
-    return {
-      hasActiveSubscription: true,
-      remainingOrders: subscription.remaining_orders || 0,
-      subscription: subscription,
-    };
-  } catch (error) {
-    console.error('❌ checkSubscriptionForOrders error:', error);
-    return {
-      hasActiveSubscription: false,
-      remainingOrders: 0,
-      subscription: null,
-    };
-  }
-};
-
 // ============================================================
 // EXPORTS
 // ============================================================
@@ -1057,8 +942,8 @@ module.exports = {
   AUTO_VALIDATION_HOURS,
   calculateWithdrawalFee,
   autoValidateExpiredCashOrders,
-  processOrderPaymentFromWebhook, 
-  syncAidantOrderCount,  
+  processOrderPaymentFromWebhook,
+  syncAidantOrderCount,
   checkAidantOrderQuota,
   incrementAidantOrders,
   decrementAidantOrders,
@@ -1071,5 +956,4 @@ module.exports = {
   enrichOrderWithRelations,
   getPonctualOrderPrice,
   getAidantIdFromUserIdOrId,
-  checkSubscriptionForOrders,
 };
