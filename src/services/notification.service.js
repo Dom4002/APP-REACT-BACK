@@ -1,4 +1,5 @@
 // 📁 backend/src/services/notification.service.js
+// ✅ SERVICE NOTIFICATIONS : ENRICHISSEMENT DES MÉTADONNÉES REELLES (TARGET_NAME & AIDANT_NAME) SANS ACCORDS GENERIQUES
 
 const admin = require('firebase-admin');
 const { supabase } = require('./supabase.service');
@@ -38,7 +39,7 @@ const NOTIFICATION_TYPES = {
 };
 
 // ============================================================
-// FONCTIONS EXISTANTES (conservées)
+// FONCTIONS EXISTANTES
 // ============================================================
 
 /**
@@ -131,7 +132,7 @@ const sendPushNotification = async (userId, title, body, data = {}) => {
       const response = await admin.messaging().sendEachForMulticast(message);
       console.log(`📨 Push envoyé à ${userId}: ${response.successCount} succès, ${response.failureCount} échecs`);
 
-      // ✅ Nettoyer les tokens invalides
+      // Supprimer les tokens invalides
       response.responses.forEach((resp, idx) => {
         if (!resp.success) {
           console.warn(`⚠️ Token invalide pour ${userId}: ${resp.error?.code}`);
@@ -331,11 +332,9 @@ const notifyFamily = async (familyUserId, title, body, type, data = {}) => {
 
 /**
  * Notifie les aidants disponibles d'une nouvelle commande
- * Filtre ceux qui ont de la place (current_orders < max_orders)
  */
 const notifyAvailableAidantsForOrder = async (orderId, { targetDisplay, description, urgency = false }) => {
   try {
-    // Récupérer tous les aidants disponibles
     const { data: aidants, error } = await supabase
       .from('aidants')
       .select('user_id, current_orders, max_orders')
@@ -348,22 +347,15 @@ const notifyAvailableAidantsForOrder = async (orderId, { targetDisplay, descript
       return;
     }
 
-    if (!aidants || aidants.length === 0) {
-      console.log('ℹ️ Aucun aidant disponible pour la commande');
-      return;
-    }
+    if (!aidants || aidants.length === 0) return;
 
-    // Filtrer ceux qui ont de la place (current_orders < max_orders)
     const availableAidants = aidants.filter(a => {
       const current = a.current_orders || 0;
       const max = a.max_orders || 2;
       return current < max;
     });
 
-    if (availableAidants.length === 0) {
-      console.log('ℹ️ Tous les aidants ont atteint leur quota de commandes');
-      return;
-    }
+    if (availableAidants.length === 0) return;
 
     const title = urgency ? '🚨 Commande urgente disponible' : '🛒 Nouvelle commande disponible';
     const body = urgency 
@@ -380,11 +372,10 @@ const notifyAvailableAidantsForOrder = async (orderId, { targetDisplay, descript
           order_id: orderId,
           action: 'take',
           urgency: urgency ? 'high' : 'normal',
+          target_name: targetDisplay,  
         },
       });
     }
-
-    console.log(`✅ ${availableAidants.length} aidants notifiés pour la commande ${orderId}`);
   } catch (error) {
     console.error('❌ notifyAvailableAidantsForOrder error:', error);
   }
@@ -404,6 +395,7 @@ const notifyAidantOfOrderAssignment = async (aidantUserId, orderId, { targetDisp
         order_id: orderId,
         action: 'take',
         auto_assigned: true,
+        target_name: targetDisplay, 
       },
     });
   } catch (error) {
@@ -424,6 +416,8 @@ const notifyFamilyOfOrderTaken = async (familyUserId, orderId, { targetDisplay, 
       data: {
         order_id: orderId,
         status: 'en_cours',
+        target_name: targetDisplay,  
+        aidant_name: aidantName,     
       },
     });
   } catch (error) {
@@ -444,6 +438,7 @@ const notifyFamilyOfOrderDelivered = async (familyUserId, orderId, { targetDispl
       data: {
         order_id: orderId,
         status: 'livree',
+        target_name: targetDisplay, 
       },
     });
   } catch (error) {
@@ -464,6 +459,7 @@ const notifyFamilyOfOrderValidated = async (familyUserId, orderId, { targetDispl
       data: {
         order_id: orderId,
         status: 'validee',
+        target_name: targetDisplay, 
       },
     });
   } catch (error) {
@@ -490,10 +486,7 @@ const notifyAdminsForPendingAidant = async (visitId, { targetName, scheduledDate
       return;
     }
 
-    if (!admins || admins.length === 0) {
-      console.log('ℹ️ Aucun admin à notifier');
-      return;
-    }
+    if (!admins || admins.length === 0) return;
 
     for (const admin of admins) {
       await createNotification({
@@ -505,14 +498,12 @@ const notifyAdminsForPendingAidant = async (visitId, { targetName, scheduledDate
           visit_id: visitId,
           action: 'assign_aidant',
           urgency: 'high',
-          target_name: targetName,
+          target_name: targetName,  
           scheduled_date: scheduledDate,
           scheduled_time: scheduledTime,
         },
       });
     }
-
-    console.log(`✅ ${admins.length} admins notifiés pour la visite ${visitId} (en attente d'aidant)`);
   } catch (error) {
     console.error('❌ notifyAdminsForPendingAidant error:', error);
   }
@@ -536,6 +527,7 @@ const notifyAidantOfVisitAssignment = async (aidantUserId, visitId, { targetName
         action: 'approve',
         assignment_type: assignmentType,
         forced: forced,
+        target_name: targetName, 
       },
     });
   } catch (error) {
@@ -556,6 +548,7 @@ const notifyFamilyOfVisitPlanned = async (familyUserId, visitId, { targetName, s
       data: {
         visit_id: visitId,
         status: 'planifiee',
+        target_name: targetName,  
       },
     });
   } catch (error) {
@@ -576,6 +569,7 @@ const notifyFamilyOfPendingAidant = async (familyUserId, visitId, { targetName }
       data: {
         visit_id: visitId,
         status: 'en_attente_aidant',
+        target_name: targetName,  
       },
     });
   } catch (error) {
@@ -596,6 +590,8 @@ const notifyFamilyOfVisitAccepted = async (familyUserId, visitId, { targetName, 
       data: {
         visit_id: visitId,
         status: 'acceptee',
+        target_name: targetName, 
+        aidant_name: aidantName,   
       },
     });
   } catch (error) {
@@ -616,6 +612,7 @@ const notifyFamilyOfVisitRefused = async (familyUserId, visitId, { targetName, s
       data: {
         visit_id: visitId,
         status: 'refusee',
+        target_name: targetName,  
       },
     });
   } catch (error) {
@@ -636,6 +633,8 @@ const notifyFamilyOfVisitInProgress = async (familyUserId, visitId, { targetName
       data: {
         visit_id: visitId,
         status: 'en_cours',
+        target_name: targetName, 
+        aidant_name: aidantName,  
       },
     });
   } catch (error) {
@@ -656,6 +655,7 @@ const notifyFamilyOfVisitCompleted = async (familyUserId, visitId, { targetName 
       data: {
         visit_id: visitId,
         status: 'terminee',
+        target_name: targetName,  
       },
     });
   } catch (error) {
@@ -676,6 +676,7 @@ const notifyFamilyOfVisitValidated = async (familyUserId, visitId, { targetName 
       data: {
         visit_id: visitId,
         status: 'validee',
+        target_name: targetName,  
       },
     });
   } catch (error) {
@@ -703,6 +704,7 @@ const notifyPaymentRequired = async (userId, { amount, description, type = 'visi
         action: 'pay',
         amount,
         type,
+        target_name: description, 
       },
     });
   } catch (error) {
@@ -724,6 +726,7 @@ const notifyPaymentConfirmed = async (userId, { amount, description, type = 'vis
       data: {
         [`${type}_id`]: id,
         status: 'payé',
+        target_name: description, 
       },
     });
   } catch (error) {
@@ -750,6 +753,7 @@ const sendVisitReminder = async (visitId, { targetName, scheduledDate, scheduled
         data: {
           visit_id: visitId,
           action: 'view',
+          target_name: targetName, 
         },
       });
     }
@@ -764,6 +768,7 @@ const sendVisitReminder = async (visitId, { targetName, scheduledDate, scheduled
         data: {
           visit_id: visitId,
           action: 'prepare',
+          target_name: targetName, 
         },
       });
     }
@@ -789,6 +794,7 @@ const notifyVisitExpired = async (visitId, { targetName, scheduledDate, reason =
         visit_id: visitId,
         action: 'reassign',
         urgency: 'high',
+        target_name: targetName,  
       }
     );
   } catch (error) {
