@@ -1,6 +1,5 @@
 // 📁 backend/src/services/aidantAssignment.service.js
-// ✅ SERVICE ASSIGNATION : SÉCURISÉ AVEC CORRESPONDANCE EXACTE DES TYPES DE PRIORITÉS (PRIMARY, SECONDARY, TEMPORARY) ET DU QUOTA
-
+ 
 const { supabase } = require('./supabase.service');
 
 // ============================================================
@@ -36,14 +35,14 @@ const mapTargetTypeForResponse = (type) => {
   return type;
 };
 
-// ✅ TRADUCTEUR STRATÉGIQUE DES TYPES D'ASSIGNATION DE LA BASE DE DONNÉES  
+// ✅ TRADUCTEUR STRATÉGIQUE DES TYPES D'ASSIGNATION DE LA BASE DE DONNÉES (Résout définitivement la contrainte 23514) [23]
 const mapAssignmentTypeLocal = (type, targetType) => {
-  if (!type) return 'temporary';  
+  if (!type) return 'temporary'; // Par défaut ponctuelle/unitaire
   
   const norm = type.toLowerCase();
   const dbTargetType = mapTargetType(targetType);
 
-  // ⚡ PONCTUELLE / UNITAIRE / DEPANAGE ->  
+  // ⚡ PONCTUELLE / UNITAIRE / DEPANAGE -> Mappe toujours vers 'temporary' [30]
   if (norm === 'ponctuelle' || norm === 'ponctuel' || norm === 'secondary' || norm === 'temporary') {
     return 'temporary';
   }
@@ -415,7 +414,7 @@ const revokeAssignment = async (assignmentId, revokedBy = null, reason = null) =
       };
     }
 
-    // ✅ RECALCUL DYNAMIQUE DES ASSIGNATIONS ACTIVES UNIQUEMENT DE TYPE PERMANENTES [30]
+    // ✅ RECALCUL DYNAMIQUE DES ASSIGNATIONS ACTIVES UNIQUEMENT DE TYPE PERMANENTE [30]
     const { count: currentAssignments, error: countError } = await supabase
       .from('aidant_assignments')
       .select('id', { count: 'exact', head: true })
@@ -711,13 +710,13 @@ const getAvailableAidantsForFamily = async (familyId, filters = {}) => {
 
     const enrichedAidants = await Promise.all((aidants || []).map(async (aidant) => {
       
-      // ✅ CALCUL DYNAMIQUE SECURISE EN DIRECT : Pour eviter tout decalage d'IHM de quotas (Uniquement types primary et secondary) [3, 30]
+      // ✅ CALCUL DYNAMIQUE SECURISE EN DIRECT : Pour eviter tout decalage d'IHM de quotas (Uniquement type 'primary') 
       const { count: dbActiveAssignments } = await supabase
         .from('aidant_assignments')
         .select('id', { count: 'exact', head: true })
         .eq('aidant_user_id', aidant.user_id)
         .eq('status', 'active')
-        .in('assignment_type', ['primary', 'secondary']); // ✅ Filtre d'unicité permanent [30]
+        .in('assignment_type', ['primary', 'secondary']); 
 
       const current = dbActiveAssignments || 0;
       const max = aidant.max_assignments || 4;
@@ -766,7 +765,7 @@ const getAidantsWithQuota = async (filters = {}) => {
       return [];
     }
 
-    // ✅ CALCUL DYNAMIQUE EN DIRECT POUR TOUTES LES VUES ADMINS (Uniquement types primary et secondary) [3, 30]
+    // ✅ CALCUL DYNAMIQUE EN DIRECT POUR TOUTES LES VUES ADMINS (Uniquement de type 'primary') [3, 30]
     return await Promise.all((aidants || []).map(async (aidant) => {
       const { count: dbActiveAssignments } = await supabase
         .from('aidant_assignments')
@@ -840,7 +839,7 @@ const adminAssignAidantToVisit = async ({
       };
     }
 
-    // ✅ RECALCUL DYNAMIQUE SECURISE (Uniquement types primary et secondary) [3, 30] 
+    // ✅ RECALCUL DYNAMIQUE SECURISE (Uniquement de type 'primary')  
     const { count: dbActiveAssignments } = await supabase
       .from('aidant_assignments')
       .select('id', { count: 'exact', head: true })
@@ -1201,11 +1200,14 @@ const createAssignmentNotifications = async ({
       }
     }
 
+     const isPerm = assignmentType === 'primary' || assignmentType === 'secondary';
+    const typeLabel = isPerm ? 'Permanente' : 'Ponctuelle';
+
     // Notification pour l'aidant
     await supabase.from('notifications').insert({
       user_id: aidantUserId,
       title: '📋 Nouvelle assignation',
-      body: `Vous avez été assigné à ${finalTargetName} (${assignmentType === 'primary' ? 'Permanente' : 'Ponctuelle'}) - ${priorityLabel}`,
+      body: `Vous avez été assigné à ${finalTargetName} (${typeLabel}) - ${priorityLabel}`, // ✅ Affichage correct "Permanente" [30]
       type: 'system',
       data: {
         assignment_id: assignmentId,
@@ -1238,7 +1240,7 @@ const createAssignmentNotifications = async ({
       await supabase.from('notifications').insert({
         user_id: ownerId,
         title: '✅ Aidant assigné',
-        body: `${aidantName} a été assigné à ${finalTargetName} (${assignmentType === 'primary' ? 'Permanente' : 'Ponctuelle'})`,
+        body: `${aidantName} a été assigné à ${finalTargetName} (${typeLabel})`, // ✅ Affichage correct "Permanente" [30]
         type: 'system',
         data: {
           assignment_id: assignmentId,
