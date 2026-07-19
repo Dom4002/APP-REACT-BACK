@@ -479,6 +479,7 @@ async function activateSubscription(paymentRecord, subscriptionId) {
 // ============================================================
 // 💳 GÉNÉRER UN PAIEMENT FEDAPAY
 // ============================================================
+ 
 router.post('/generate-payment', async (req, res) => {
   const startTime = Date.now();
 
@@ -532,11 +533,11 @@ router.post('/generate-payment', async (req, res) => {
       visit_id = null,
       is_visit = false,
       type = null,
-      duration_months = 1, // ✅ Récupération du multiplicateur de mois choisi par le client
+      duration_months = 1,
     } = req.body;
 
     const finalAmount = Number(montant || amount || 0);
-    const multiplier = Number(duration_months) || 1; // ✅ Conservation de la valeur numérique
+    const multiplier = Number(duration_months) || 1;
 
     if (!finalAmount || finalAmount <= 0) {
       return res.status(400).json({
@@ -567,8 +568,21 @@ router.post('/generate-payment', async (req, res) => {
       process.env.CLIENT_URL ||
       'http://localhost:5173';
 
-    const callbackUrl = `${frontendUrl}/payment/confirm`;
-    const cancelUrl = `${frontendUrl}/payment/confirm?status=cancel`;
+    // ✅ DÉTERMINATION DU TYPE ET IDENTIFIANT UNIQUE DE CONTEXTE
+    const finalType = type || (is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription'));
+    const finalVisitId = visit_id || null;
+    const finalOrderId = order_id || null;
+
+    // ✅ CONSTITUTION DES URLS AVEC PARAMÈTRES POUR LE REDIRECT DE FEDAPAY
+    const callbackUrl = `${frontendUrl}/payment/confirm?status=approved&type=${finalType}` +
+      (finalVisitId ? `&visit_id=${finalVisitId}` : '') +
+      (finalOrderId ? `&order_id=${finalOrderId}` : '') +
+      (patient_id ? `&patient_id=${patient_id}` : '');
+
+    const cancelUrl = `${frontendUrl}/payment/confirm?status=cancel&type=${finalType}` +
+      (finalVisitId ? `&visit_id=${finalVisitId}` : '') +
+      (finalOrderId ? `&order_id=${finalOrderId}` : '') +
+      (patient_id ? `&patient_id=${patient_id}` : '');
 
     let subscriptionRecord = null;
     let actualAbonnementId = null;
@@ -589,7 +603,6 @@ router.post('/generate-payment', async (req, res) => {
         });
       }
 
-      // ✅ Passage du multiplicateur lors de la création en attente
       subscriptionRecord = await createPendingSubscription(
         user.id,
         offer.id,
@@ -615,7 +628,7 @@ router.post('/generate-payment', async (req, res) => {
       user_id: user.id,
       plan_id: plan_id || null,
       abonnement_id: actualAbonnementId || null,
-      order_id: order_id || null,
+      order_id: finalOrderId,
       is_ponctual: is_ponctual || false,
       source: 'sante_plus_services',
       order_data: is_ponctual && order_data ? JSON.stringify(order_data) : null,
@@ -623,9 +636,9 @@ router.post('/generate-payment', async (req, res) => {
       target_type: target_type || 'personal',
       target_name: target_name || finalName,
       is_visit: is_visit || false,
-      visit_id: visit_id || null,
-      duration_months: multiplier, // ✅ Archivage de la personnalisation dans FedaPay
-      type: type || (is_visit ? 'visit' : (is_ponctual ? 'order' : 'subscription')), 
+      visit_id: finalVisitId,
+      duration_months: multiplier, 
+      type: finalType, 
     };
 
     console.log('📦 Métadonnées envoyées à FedaPay:', metadata);
@@ -636,8 +649,8 @@ router.post('/generate-payment', async (req, res) => {
       currency: {
         iso: 'XOF',
       },
-      callback_url: callbackUrl,
-      cancel_url: cancelUrl,
+      callback_url: callbackUrl,  
+      cancel_url: cancelUrl,     
       customer: {
         email: finalEmail,
         firstname: firstName,
@@ -730,7 +743,6 @@ router.post('/generate-payment', async (req, res) => {
     });
   }
 });
-
 // ============================================================
 // ✅ VÉRIFIER LE STATUT D'UN PAIEMENT
 // ============================================================
