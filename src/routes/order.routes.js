@@ -1,32 +1,14 @@
 // 📁 backend/src/routes/order.routes.js
- 
+// ✅ ROUTEUR COMMANDES : APPEL DES APIS SÉCURISÉES DE LIVRAISON SANS COUPLAGE D'ABONNEMENTS
+
 const express = require('express');
 const router = express.Router();
 const { supabase } = require('../services/supabase.service');
 const authMiddleware = require('../middleware/auth.middleware');
 const { roleMiddleware } = require('../middleware/role.middleware');
 const { createNotification } = require('../services/notification.service');
-const { 
-  getActiveAidantForTarget,
-  getAvailableAidantsForFamily,
-} = require('../services/aidantAssignment.service');
-const {
-  getPonctualOrderPrice,
-  checkSubscriptionForOrders,
-  decrementOrder,
-} = require('../services/visitPayment.service');
-const {
-  checkAidantOrderQuota,
-  incrementAidantOrders,
-  decrementAidantOrders,
-  createOrder,
-  takeOrder,
-  deliverOrder,
-  confirmCashPayment, // ✅ Importé pour la confirmation espèces
-  autoValidateOrder,
-  enrichOrderWithRelations,
-  syncAidantOrderCount,
-} = require('../services/order.service');
+const { getActiveAidantForTarget, getAvailableAidantsForFamily } = require('../services/aidantAssignment.service');
+const { checkAidantOrderQuota, syncAidantOrderCount, createOrder, takeOrder, deliverOrder, confirmCashPayment, autoValidateOrder, getAidantIdFromUserIdOrId } = require('../services/order.service');
 
 router.use(authMiddleware);
 
@@ -43,42 +25,6 @@ const ORDER_PONCTUAL_PRICES = {
 };
 
 const DEFAULT_ORDER_PRICE = 2500;
-const MAX_ORDERS_IN_PROGRESS = 2;
-
-const getPonctualOrderPriceLocal = (type, items) => {
-  if (items && items.length > 0) {
-    const total = items.reduce((sum, item) => sum + (item.quantity * item.price), 0);
-    if (total > 0) return total;
-  }
-  return ORDER_PONCTUAL_PRICES[type] || DEFAULT_ORDER_PRICE;
-};
-
-// ============================================================
-// UTILITAIRES AIDANTS ET QUOTAS
-// ============================================================
-const getAidantIdFromUserIdOrId = async (userIdOrId) => {
-  const { data: aidantById, error: errorById } = await supabase
-    .from('aidants')
-    .select('id')
-    .eq('id', userIdOrId)
-    .maybeSingle();
-
-  if (!errorById && aidantById) {
-    return aidantById.id;
-  }
-
-  const { data: aidantByUser, error: errorByUser } = await supabase
-    .from('aidants')
-    .select('id')
-    .eq('user_id', userIdOrId)
-    .maybeSingle();
-
-  if (!errorByUser && aidantByUser) {
-    return aidantByUser.id;
-  }
-
-  return null;
-};
 
 // =============================================
 // 1️⃣ ROUTES STATIQUES (SANS PARAMÈTRE :id)
@@ -124,6 +70,7 @@ router.get('/available', async (req, res) => {
       max: quotaCheck.max,
       available: quotaCheck.available,
     });
+
   } catch (error) {
     console.error('❌ Get available orders error:', error);
     res.status(500).json({ error: error.message });
@@ -178,6 +125,7 @@ router.get('/', async (req, res) => {
     }
 
     res.json(filteredData);
+
   } catch (error) {
     console.error('❌ GET orders error:', error);
     res.status(500).json({ error: error.message });
@@ -192,21 +140,19 @@ router.post('/', async (req, res) => {
   try {
     const { user, profile } = req;
     const { 
-      patient_id,
-      target_type,
-      target_name,
-      type,
-      description,
+      patient_id, 
+      target_type, 
+      target_name, 
+      type, 
+      description, 
       address,
-      latitude = null,
-      longitude = null,
-      purchase_amount = 0,         
-      withdrawal_operator = null,  
-      prescription_url,
-      order_type,
-      is_ponctual = false,
+      latitude = null, 
+      longitude = null, 
+      purchase_amount = 0,
+      withdrawal_operator = null,
+      prescription_url, 
       wizard_choice = null,
-      selected_aidant_id = null,
+      selected_aidant_id = null, 
     } = req.body;
 
     if (profile.role === 'aidant') {
@@ -226,7 +172,7 @@ router.post('/', async (req, res) => {
       purchaseAmount: Number(purchase_amount || 0),       
       withdrawalOperator: withdrawal_operator,             
       prescriptionUrl: prescription_url || null,
-      isPonctual: is_ponctual || order_type === 'ponctual',
+      isPonctual: true, // Désormais, toutes les commandes sont en mode ponctuel autonome
       wizardChoice: wizard_choice,
       selectedAidantId: selected_aidant_id,
       profile,
@@ -241,9 +187,10 @@ router.post('/', async (req, res) => {
       order: result.order,
       requires_payment: result.requires_payment,
       payment_amount: result.payment_amount,
-      subscription_used: result.subscription_used,
-      auto_assigned_aidant: result.auto_assigned_aidant,
+      subscription_used: false,
+      auto_assigned_aidant: false,
     });
+
   } catch (error) {
     console.error('❌ Erreur création de commande (route):', error);
     res.status(500).json({ error: error.message });
@@ -316,6 +263,7 @@ router.get('/:id', async (req, res) => {
     }
 
     res.json({ ...order, patient, family, aidant });
+
   } catch (error) {
     console.error('❌ Get order detail route error:', error);
     res.status(500).json({ error: error.message });
@@ -410,6 +358,7 @@ router.post('/:id/confirm-payment', async (req, res) => {
     }
 
     res.json({ success: true, order: data });
+
   } catch (error) {
     console.error('❌ Confirm payment route error:', error);
     res.status(500).json({ error: error.message });
@@ -421,7 +370,7 @@ router.post('/:id/take', async (req, res) => {
   try {
     const { id } = req.params;
     const aidantUserId = req.user.id;
-    const { lat, lng } = req.body; 
+    const { lat, lng } = req.body;
 
     const { takeOrder } = require('../services/order.service');
     const result = await takeOrder(id, aidantUserId, lat, lng); 
@@ -439,6 +388,7 @@ router.post('/:id/take', async (req, res) => {
       message: 'Commande prise en charge avec succès',
       order: result.order,
     });
+
   } catch (error) {
     console.error('❌ Take order route error:', error);
     res.status(500).json({ error: error.message });
@@ -463,16 +413,6 @@ router.post('/:id/status', async (req, res) => {
 
     if (error) throw error;
 
-    // ✅ RÉCRÉDITER (+1) L'ABONNEMENT EN CAS D'ANNULATION D'UNE COMMANDE DÉJÀ LIVRÉE OU VALIDÉE
-    const wasDelivered = order.status === 'livree' || order.status === 'validee';
-    if (wasDelivered && status === 'annulee' && order.subscription_id) {
-      const { incrementOrder } = require('../services/visitPayment.service');
-      const result = await incrementOrder(order.subscription_id);
-      if (result.success) {
-        console.log(`📈 [Récrédit] Forfait récrédité (+1 commande) suite à l'annulation de statut.`);
-      }
-    }
-
     if (order.aidant_id) {
       const { data: aidant } = await supabase.from('aidants').select('user_id').eq('id', order.aidant_id).single();
       if (aidant) {
@@ -481,32 +421,19 @@ router.post('/:id/status', async (req, res) => {
     }
 
     res.json({ success: true, order: data });
+
   } catch (error) {
     console.error('❌ Update status route error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// ✅ 3.5 LIVRAISON DE LA COMMANDE (AVEC DÉCOMPTE FORFAIT IMMÉDIAT, TRANSPORT ET SÉCURISATION CASH)
+// ✅ 3.5 LIVRAISON DE LA COMMANDE (AVEC SÉCURISATION DU TRANSPORT ET DU CASH SANS ABONNEMENTS)
 router.post('/:id/deliver', async (req, res) => {
   try {
     const { id } = req.params;
-    const { 
-      proof_url, 
-      location, 
-      delivery_fee, 
-      payment_method, 
-      cash_amount_received 
-    } = req.body;
+    const { proof_url, location, delivery_fee, payment_method, cash_amount_received } = req.body;
     const aidantUserId = req.user.id;
-
-    const { data: order, error: orderError } = await supabase
-      .from('commandes')
-      .select('subscription_id')
-      .eq('id', id)
-      .single();
-
-    if (orderError) throw orderError;
 
     const { deliverOrder } = require('../services/order.service');
     const result = await deliverOrder(
@@ -523,22 +450,12 @@ router.post('/:id/deliver', async (req, res) => {
       return res.status(400).json({ success: false, error: result.error });
     }
 
-    // Décompte de forfait d'abonnement immédiat s'il y a lieu
-    if (order.subscription_id) {
-      const { decrementOrder } = require('../services/visitPayment.service');
-      const decResult = await decrementOrder(order.subscription_id);
-      if (decResult.success) {
-        console.log(`📉 [Décompte] Commande décomptée de l'abonnement ${order.subscription_id} lors de la livraison.`);
-      } else {
-        console.warn(`⚠️ [Décompte] Échec du décompte immédiat de commande:`, decResult.error);
-      }
-    }
-
     res.json({
       success: true,
       message: 'Commande livrée avec succès',
       order: result.order,
     });
+
   } catch (error) {
     console.error('❌ Deliver order route error:', error);
     res.status(500).json({ error: error.message });
@@ -568,13 +485,14 @@ router.post('/:id/confirm-cash', async (req, res) => {
       message: is_confirmed ? 'Paiement espèces validé' : 'Litige de paiement espèces enregistré',
       order: result.order,
     });
+
   } catch (error) {
     console.error('❌ Confirm cash route error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// ✅ 3.7 ANNULER UNE COMMANDE ET RESTITUER LE QUOTA ET CRÉDIT (+1 !)
+// ✅ 3.7 ANNULER UNE COMMANDE ET RESTITUER LE QUOTA (SANS FORFAIT D'ABONNEMENT)
 router.post('/:id/cancel', async (req, res) => {
   try {
     const { id } = req.params;
@@ -607,16 +525,6 @@ router.post('/:id/cancel', async (req, res) => {
 
     if (updateError) throw updateError;
 
-    // ✅ RÉCRÉDITER (+1) L'ABONNEMENT EN CAS D'ANNULATION D'UNE COMMANDE DÉJÀ LIVRÉE OU VALIDÉE
-    const wasDelivered = order.status === 'livree' || order.status === 'validee';
-    if (wasDelivered && order.subscription_id) {
-      const { incrementOrder } = require('../services/visitPayment.service');
-      const result = await incrementOrder(order.subscription_id);
-      if (result.success) {
-        console.log(`📈 [Récrédit] Forfait récrédité (+1 commande) suite à l'annulation.`);
-      }
-    }
-
     if (order.aidant_id) {
       const { data: aidant } = await supabase.from('aidants').select('user_id').eq('id', order.aidant_id).single();
        if (aidant) {
@@ -625,6 +533,7 @@ router.post('/:id/cancel', async (req, res) => {
     }
 
     res.json({ success: true, order: updatedOrder });
+
   } catch (error) {
     console.error('❌ Cancel order route error:', error);
     res.status(500).json({ error: error.message });
@@ -694,6 +603,7 @@ router.post('/:id/assign', roleMiddleware(['admin', 'coordinator']), async (req,
       message: 'Intervenant rattaché avec succès à la commande par l’administration',
       order: updatedOrder,
     });
+
   } catch (error) {
     console.error('❌ Admin assign order error:', error);
     res.status(500).json({ success: false, error: error.message });
@@ -713,6 +623,7 @@ router.post('/:id/auto-validate', roleMiddleware(['admin', 'coordinator']), asyn
       message: 'Commande validée avec succès',
       order: result.order,
     });
+
   } catch (error) {
     console.error('❌ Auto-validate route error:', error);
     res.status(500).json({ error: error.message });
