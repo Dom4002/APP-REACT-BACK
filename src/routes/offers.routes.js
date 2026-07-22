@@ -105,7 +105,7 @@ router.post('/', authMiddleware, roleMiddleware(['admin', 'coordinator']), async
     const { data, error } = await supabase.from('offres').insert(req.body).select().single();
     if (error) throw error;
     res.status(201).json({ success: true, data: mapOfferFromDb(data) });
-  } catch (error: any) {
+  } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -147,7 +147,7 @@ router.put('/:id', authMiddleware, roleMiddleware(['admin', 'coordinator']), asy
     }
 
     res.json({ success: true, message: 'Offre mise à jour', data: mapOfferFromDb(data) });
-  } catch (error: any) {
+  } catch (error) {
     console.error('❌ PUT /offers/:id error:', error);
     res.status(500).json({ success: false, error: error.message });
   }
@@ -165,7 +165,7 @@ router.delete('/:id', authMiddleware, roleMiddleware(['admin']), async (req, res
 
     if (error) throw error;
     res.json({ success: true, message: 'Offre désactivée' });
-  } catch (error: any) {
+  } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
 });
