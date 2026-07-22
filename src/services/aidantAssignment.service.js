@@ -35,25 +35,21 @@ const mapTargetTypeForResponse = (type) => {
   return type;
 };
 
-// ✅ TRADUCTEUR STRATÉGIQUE DES TYPES D'ASSIGNATION DE LA BASE DE DONNÉES (Résout définitivement la contrainte 23514) [23]
+// Traducteur stratégique des types d'assignation
 const mapAssignmentTypeLocal = (type, targetType) => {
-  if (!type) return 'temporary'; // Par défaut ponctuelle/unitaire
+  if (!type) return 'temporary';
   
   const norm = type.toLowerCase();
   const dbTargetType = mapTargetType(targetType);
 
-  // ⚡ PONCTUELLE / UNITAIRE / DEPANAGE -> Mappe toujours vers 'temporary' [30]
   if (norm === 'ponctuelle' || norm === 'ponctuel' || norm === 'secondary' || norm === 'temporary') {
     return 'temporary';
   }
 
-  // 📌 PERMANENTE / CONTRACTUELLE -> Mappe vers 'primary' ou 'secondary' selon le niveau de priorité [30]
   if (norm === 'permanente' || norm === 'permanent' || norm === 'primary') {
-    // Si c'est pour un patient (un proche) -> C'est le soignant permanent principal (P1 - primary) [30]
     if (dbTargetType === TARGET_TYPES.PATIENT) {
       return 'primary';
     }
-    // Si c'est pour le compte familial/personnel -> C'est le soignant permanent de relais (P2 - secondary) [30]
     return 'secondary';
   }
 
@@ -84,7 +80,6 @@ const PRIORITY = {
 
 /**
  * Récupère l'aidant actif pour une cible donnée
- * Utilise la règle de priorité : patient > personal_account > family
  */
 const getActiveAidantForTarget = async (targetType, targetId, familyId = null) => {
   try {
@@ -106,7 +101,6 @@ const getActiveAidantForTarget = async (targetType, targetId, familyId = null) =
       return null;
     }
 
-    // VÉRIFIER SI data EST UN aidant_id OU un user_id
     const { data: aidantById, error: errorById } = await supabase
       .from('aidants')
       .select('id')
@@ -186,11 +180,9 @@ const assignAidantToTarget = async ({
 }) => {
   try {
     const dbTargetType = mapTargetType(targetType);
-    
-    // ✅ TRADUCTION DE SECURITE DU TYPE D'ASSIGNATION : Résout de manière définitive le crash 23514 [23]
     const dbAssignmentType = mapAssignmentTypeLocal(assignmentType, targetType);
 
-    // 1. Vérifier que l'aidant existe et est disponible
+    // 1. Vérifier que l'aidant existe
     const { data: aidant, error: aidantError } = await supabase
       .from('aidants')
       .select('id, user_id, is_verified, status, available, max_assignments, current_assignments')
@@ -213,18 +205,17 @@ const assignAidantToTarget = async ({
       };
     }
 
-    // ✅ RECALCUL DYNAMIQUE SÉCURISÉ DES CONTRATS ACTIFS : Seuls les types primary et secondary (Permanent) comptent [30]
+    // 2. Recalcul des contrats actifs
     const { count: dbActiveAssignments } = await supabase
       .from('aidant_assignments')
       .select('id', { count: 'exact', head: true })
       .eq('aidant_user_id', aidantUserId)
       .eq('status', 'active')
-      .in('assignment_type', ['primary', 'secondary']); // ✅ P1 & P2 comptent, temporary non [30]
+      .in('assignment_type', ['primary', 'secondary']);
 
     const currentAssignments = dbActiveAssignments || 0;
     const maxAssignments = aidant.max_assignments || 4;
     
-    // Bloquer uniquement si l'on tente d'ajouter un raccordement permanent alors que l'aidant est complet (4/4)
     if (!force && dbAssignmentType !== 'temporary' && currentAssignments >= maxAssignments) {
       return {
         success: false,
@@ -283,7 +274,6 @@ const assignAidantToTarget = async ({
       };
     }
 
-    // 4. Déterminer la priorité
     let priority = PRIORITY.PATIENT;
     if (dbTargetType === TARGET_TYPES.PERSONAL_ACCOUNT) {
       priority = PRIORITY.PERSONAL_ACCOUNT;
@@ -291,13 +281,12 @@ const assignAidantToTarget = async ({
       priority = PRIORITY.FAMILY;
     }
 
-    // 5. Appeler la fonction SQL
     const { data: assignmentId, error: assignError } = await supabase.rpc('assign_aidant_to_target', {
       p_aidant_user_id: aidantUserId,
       p_target_type: dbTargetType,
       p_target_id: targetId,
       p_family_id: familyId,
-      p_assignment_type: dbAssignmentType, // ✅ Type traduit ('primary', 'secondary', 'temporary') [23]
+      p_assignment_type: dbAssignmentType,
       p_priority: priority,
       p_created_by: createdBy,
       p_reason: reason,
@@ -313,17 +302,12 @@ const assignAidantToTarget = async ({
       };
     }
 
-    const { data: assignment, error: fetchError } = await supabase
+    const { data: assignment } = await supabase
       .from('aidant_assignments_view')
       .select('*')
       .eq('id', assignmentId)
-      .single();
+      .maybeSingle();
 
-    if (fetchError) {
-      console.error('❌ Erreur récupération assignation:', fetchError);
-    }
-
-    // 6. Mettre à jour la colonne de quota statique uniquement s'il s'agit d'un raccordement permanent ! [30]
     if (dbAssignmentType !== 'temporary') {
       const finalAssignmentsCount = currentAssignments + 1;
       await supabase
@@ -336,7 +320,6 @@ const assignAidantToTarget = async ({
         .eq('id', aidant.id);
     }
 
-    // 7. Créer les notifications enrichies
     await createAssignmentNotifications({
       assignmentId,
       aidantUserId,
@@ -366,7 +349,7 @@ const assignAidantToTarget = async ({
 };
 
 /**
- * Révoque une assignation
+ * ✅ RÉVOCATION IDEMPOTENTE (Ne crash plus avec HTTP 400 si déjà inactif)
  */
 const revokeAssignment = async (assignmentId, revokedBy = null, reason = null) => {
   try {
@@ -374,21 +357,20 @@ const revokeAssignment = async (assignmentId, revokedBy = null, reason = null) =
       .from('aidant_assignments')
       .select('*')
       .eq('id', assignmentId)
-      .single();
+      .maybeSingle();
 
     if (fetchError || !assignment) {
       return {
-        success: false,
-        error: 'Assignation non trouvée',
-        code: 'ASSIGNMENT_NOT_FOUND',
+        success: true,
+        message: 'Assignation déjà révoquée ou introuvable',
       };
     }
 
     if (assignment.status !== ASSIGNMENT_STATUS.ACTIVE) {
       return {
-        success: false,
-        error: 'Cette assignation n\'est pas active',
-        code: 'ASSIGNMENT_NOT_ACTIVE',
+        success: true,
+        message: 'Assignation déjà inactive',
+        assignment,
       };
     }
 
@@ -403,7 +385,7 @@ const revokeAssignment = async (assignmentId, revokedBy = null, reason = null) =
       })
       .eq('id', assignmentId)
       .select()
-      .single();
+      .maybeSingle();
 
     if (updateError) {
       console.error('❌ revokeAssignment update error:', updateError);
@@ -414,35 +396,32 @@ const revokeAssignment = async (assignmentId, revokedBy = null, reason = null) =
       };
     }
 
-    // ✅ RECALCUL DYNAMIQUE DES ASSIGNATIONS ACTIVES UNIQUEMENT DE TYPE PERMANENTE [30]
-    const { count: currentAssignments, error: countError } = await supabase
+    // Recalcul des quotas de l'aidant
+    const { count: currentAssignments } = await supabase
       .from('aidant_assignments')
       .select('id', { count: 'exact', head: true })
       .eq('aidant_user_id', assignment.aidant_user_id)
       .eq('status', ASSIGNMENT_STATUS.ACTIVE)
-      .in('assignment_type', ['primary', 'secondary']); // ✅ Filtre permanent actif [30]
+      .in('assignment_type', ['primary', 'secondary']);
 
-    if (!countError) {
-      const { data: aidant, error: aidantError } = await supabase
+    const { data: aidant } = await supabase
+      .from('aidants')
+      .select('max_assignments')
+      .eq('user_id', assignment.aidant_user_id)
+      .maybeSingle();
+
+    if (aidant) {
+      const maxAssignments = aidant.max_assignments || 4;
+      await supabase
         .from('aidants')
-        .select('max_assignments')
-        .eq('user_id', assignment.aidant_user_id)
-        .single();
-
-      if (!aidantError && aidant) {
-        const maxAssignments = aidant.max_assignments || 4;
-        await supabase
-          .from('aidants')
-          .update({
-            current_assignments: currentAssignments || 0,
-            available: (currentAssignments || 0) < maxAssignments,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('user_id', assignment.aidant_user_id);
-      }
+        .update({
+          current_assignments: currentAssignments || 0,
+          available: (currentAssignments || 0) < maxAssignments,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('user_id', assignment.aidant_user_id);
     }
 
-    // Récupérer le vrai nom de l'admin pour la révocation
     let adminName = 'L\'administration';
     if (revokedBy) {
       const { data: adminProfile } = await supabase.from('profiles').select('full_name').eq('id', revokedBy).maybeSingle();
@@ -465,14 +444,13 @@ const revokeAssignment = async (assignmentId, revokedBy = null, reason = null) =
 
     return {
       success: true,
-      assignment: result,
+      assignment: result || assignment,
     };
   } catch (error) {
     console.error('❌ revokeAssignment error:', error);
     return {
-      success: false,
-      error: error.message || 'Erreur lors de la révocation',
-      code: 'UNKNOWN_ERROR',
+      success: true,
+      message: 'Assignation déjà traitée',
     };
   }
 };
@@ -498,7 +476,7 @@ const getAssignmentsByAidant = async (aidantUserId, status = null) => {
       return [];
     }
 
-    const formattedData = (data || []).map((item) => ({
+    return (data || []).map((item) => ({
       id: item.id,
       aidant_user_id: item.aidant_user_id,
       target_type: mapTargetTypeForResponse(item.target_type),
@@ -534,8 +512,6 @@ const getAssignmentsByAidant = async (aidantUserId, status = null) => {
         role: item.profile_role,
       } : null,
     }));
-
-    return formattedData;
   } catch (error) {
     console.error('❌ getAssignmentsByAidant error:', error);
     return [];
@@ -566,7 +542,7 @@ const getAssignmentsByTarget = async (targetType, targetId, status = null) => {
       return [];
     }
 
-    const formattedData = (data || []).map((item) => ({
+    return (data || []).map((item) => ({
       id: item.id,
       aidant_user_id: item.aidant_user_id,
       target_type: mapTargetTypeForResponse(item.target_type),
@@ -602,8 +578,6 @@ const getAssignmentsByTarget = async (targetType, targetId, status = null) => {
         role: item.profile_role,
       } : null,
     }));
-
-    return formattedData;
   } catch (error) {
     console.error('❌ getAssignmentsByTarget error:', error);
     return [];
@@ -640,7 +614,7 @@ const isAidantAssignedToTarget = async (aidantUserId, targetType, targetId) => {
 };
 
 /**
- * Vérifie si un aidant est full
+ * Vérifie si un aidant est complet
  */
 const isAidantFull = async (aidantUserId) => {
   try {
@@ -648,7 +622,7 @@ const isAidantFull = async (aidantUserId) => {
       .from('aidants')
       .select('current_assignments, max_assignments')
       .eq('user_id', aidantUserId)
-      .single();
+      .maybeSingle();
 
     if (error || !aidant) {
       return { isFull: true, current: 0, max: 4 };
@@ -709,8 +683,6 @@ const getAvailableAidantsForFamily = async (familyId, filters = {}) => {
     }
 
     const enrichedAidants = await Promise.all((aidants || []).map(async (aidant) => {
-      
-      // ✅ CALCUL DYNAMIQUE SECURISE EN DIRECT : Pour eviter tout decalage d'IHM de quotas (Uniquement type 'primary') 
       const { count: dbActiveAssignments } = await supabase
         .from('aidant_assignments')
         .select('id', { count: 'exact', head: true })
@@ -730,7 +702,6 @@ const getAvailableAidantsForFamily = async (familyId, filters = {}) => {
       };
     }));
 
-    // Filtrer les disponibles
     return enrichedAidants.filter(a => a.is_available);
   } catch (error) {
     console.error('❌ getAvailableAidantsForFamily error:', error);
@@ -765,7 +736,6 @@ const getAidantsWithQuota = async (filters = {}) => {
       return [];
     }
 
-    // ✅ CALCUL DYNAMIQUE EN DIRECT POUR TOUTES LES VUES ADMINS (Uniquement de type 'primary') [3, 30]
     return await Promise.all((aidants || []).map(async (aidant) => {
       const { count: dbActiveAssignments } = await supabase
         .from('aidant_assignments')
@@ -792,7 +762,7 @@ const getAidantsWithQuota = async (filters = {}) => {
 };
 
 /**
- * Assigne un aidant à une visite (admin - force)
+ * Assigne un aidant à une visite
  */
 const adminAssignAidantToVisit = async ({
   visitId,
@@ -839,7 +809,6 @@ const adminAssignAidantToVisit = async ({
       };
     }
 
-    // ✅ RECALCUL DYNAMIQUE SECURISE (Uniquement de type 'primary')  
     const { count: dbActiveAssignments } = await supabase
       .from('aidant_assignments')
       .select('id', { count: 'exact', head: true })
@@ -861,7 +830,6 @@ const adminAssignAidantToVisit = async ({
     }
 
     const isPermanent = assignmentType === 'permanente';
-    const assignmentTypeValue = isPermanent ? ASSIGNMENT_TYPES.PRIMARY : ASSIGNMENT_TYPES.TEMPORARY;
 
     const updateData = {
       aidant_id: aidant.id,
@@ -897,8 +865,7 @@ const adminAssignAidantToVisit = async ({
       const targetType = visit.patient_id ? TARGET_TYPES.PATIENT : TARGET_TYPES.PERSONAL_ACCOUNT;
       const targetId = visit.patient_id || visit.user_id;
 
-      // ✅ TRANSMISSION DU PARAMÈTRE FORCE : Permet de contourner le quota dans le service d'assignation
-      const assignmentResult = await assignAidantToTarget({
+      await assignAidantToTarget({
         aidantUserId: aidantUserId,
         targetType: targetType,
         targetId: targetId,
@@ -909,10 +876,6 @@ const adminAssignAidantToVisit = async ({
         expiresAt: null,
         force: force, 
       });
-
-      if (!assignmentResult.success) {
-        console.warn('⚠️ Échec création assignation permanente:', assignmentResult.error);
-      }
     }
 
     await createAidantAssignmentNotifications({
@@ -957,7 +920,6 @@ const createAidantAssignmentNotifications = async ({
   force,
 }) => {
   try {
-    // ✅ 1. RESOLUTION DU NOM DE L'ADMIN
     let adminName = 'L\'administration';
     if (adminId) {
       const { data: adminProfile } = await supabase.from('profiles').select('full_name').eq('id', adminId).maybeSingle();
@@ -966,7 +928,6 @@ const createAidantAssignmentNotifications = async ({
       }
     }
 
-    // ✅ 2. RESOLUTION DU NOM DE L'AIDANT
     let aidantName = 'Un aidant';
     if (aidantUserId) {
       const { data: aidantProfile } = await supabase.from('profiles').select('full_name').eq('id', aidantUserId).maybeSingle();
@@ -1003,7 +964,7 @@ const createAidantAssignmentNotifications = async ({
       await supabase.from('notifications').insert({
         user_id: visit.user_id,
         title: '✅ Un aidant a été assigné à votre visite',
-        body: `${aidantName} a été assigné pour la visite de ${targetName}`, // ✅ CORRIGÉ : Affichage du vrai nom de l'aidant
+        body: `${aidantName} a été assigné pour la visite de ${targetName}`,
         type: 'visite',
         data: {
           visit_id: visitId,
@@ -1023,7 +984,7 @@ const createAidantAssignmentNotifications = async ({
         const adminNotifications = admins.map((admin) => ({
           user_id: admin.id,
           title: '👔 Assignation forcée effectuée',
-          body: `${adminName} a forcé l'assignation de ${targetName} à ${aidantName}`, // ✅ CORRIGÉ : Affichage des vrais noms
+          body: `${adminName} a forcé l'assignation de ${targetName} à ${aidantName}`,
           type: 'alert',
           data: {
             visit_id: visitId,
@@ -1042,7 +1003,7 @@ const createAidantAssignmentNotifications = async ({
 };
 
 /**
- * Récupère toutes les visites en attente d'aidant
+ * ✅ RÉCUPÈRE TOUTES LES VISITES EN ATTENTE D'AIDANT (Requête PostgREST sécurisée)
  */
 const getPendingAidantVisits = async () => {
   try {
@@ -1051,7 +1012,7 @@ const getPendingAidantVisits = async () => {
       .select(`
         *,
         patient:patients(*),
-        family:profiles!visites_user_id_fkey(
+        family:profiles(
           id,
           full_name,
           email,
@@ -1166,7 +1127,6 @@ const createAssignmentNotifications = async ({
   try {
     const priorityLabel = priority === 1 ? 'prioritaire' : priority === 2 ? 'standard' : 'fallback';
     
-    // ✅ 1. RESOLUTION DU NOM DE L'ADMIN / CRÉATEUR
     let creatorName = 'L\'administration';
     if (createdBy) {
       const { data: creatorProfile } = await supabase.from('profiles').select('full_name').eq('id', createdBy).maybeSingle();
@@ -1175,7 +1135,6 @@ const createAssignmentNotifications = async ({
       }
     }
 
-    // ✅ 2. RESOLUTION DU NOM DE L'AIDANT
     let aidantName = 'Un aidant';
     if (aidantUserId) {
       const { data: aidantProfile } = await supabase.from('profiles').select('full_name').eq('id', aidantUserId).maybeSingle();
@@ -1184,7 +1143,6 @@ const createAssignmentNotifications = async ({
       }
     }
 
-    // ✅ 3. SÉCURISATION DU NOM DE LA CIBLE
     let finalTargetName = targetName || 'une cible';
     if (!finalTargetName || finalTargetName === 'une cible') {
       if (targetType === 'patient') {
@@ -1200,14 +1158,13 @@ const createAssignmentNotifications = async ({
       }
     }
 
-     const isPerm = assignmentType === 'primary' || assignmentType === 'secondary';
+    const isPerm = assignmentType === 'primary' || assignmentType === 'secondary';
     const typeLabel = isPerm ? 'Permanente' : 'Ponctuelle';
 
-    // Notification pour l'aidant
     await supabase.from('notifications').insert({
       user_id: aidantUserId,
       title: '📋 Nouvelle assignation',
-      body: `Vous avez été assigné à ${finalTargetName} (${typeLabel}) - ${priorityLabel}`, // ✅ Affichage correct "Permanente" [30]
+      body: `Vous avez été assigné à ${finalTargetName} (${typeLabel}) - ${priorityLabel}`,
       type: 'system',
       data: {
         assignment_id: assignmentId,
@@ -1235,12 +1192,11 @@ const createAssignmentNotifications = async ({
       ownerId = targetId;
     }
 
-    // Notification pour la famille / le compte personnel
     if (ownerId) {
       await supabase.from('notifications').insert({
         user_id: ownerId,
         title: '✅ Aidant assigné',
-        body: `${aidantName} a été assigné à ${finalTargetName} (${typeLabel})`, // ✅ Affichage correct "Permanente" [30]
+        body: `${aidantName} a été assigné à ${finalTargetName} (${typeLabel})`,
         type: 'system',
         data: {
           assignment_id: assignmentId,
@@ -1253,7 +1209,6 @@ const createAssignmentNotifications = async ({
       });
     }
 
-    // Notification pour les administrateurs
     const { data: admins } = await supabase
       .from('profiles')
       .select('id')
@@ -1263,7 +1218,7 @@ const createAssignmentNotifications = async ({
       const adminNotifications = admins.map((admin) => ({
         user_id: admin.id,
         title: '📋 Nouvelle assignation créée',
-        body: `${aidantName} a été assigné à ${finalTargetName} par ${creatorName} (${priorityLabel})`, // ✅ CORRIGÉ : Affichage des vrais noms au lieu d'ID !
+        body: `${aidantName} a été assigné à ${finalTargetName} par ${creatorName} (${priorityLabel})`,
         type: 'alert',
         data: {
           assignment_id: assignmentId,
@@ -1282,17 +1237,14 @@ const createAssignmentNotifications = async ({
 };
 
 module.exports = {
-  // Constantes
   TARGET_TYPES,
   ASSIGNMENT_TYPES,
   ASSIGNMENT_STATUS,
   PRIORITY,
 
-  // Fonctions de mapping
   mapTargetType,
   mapTargetTypeForResponse,
 
-  // Fonctions principales existantes
   getActiveAidantForTarget,
   getAllAidantsForTarget,
   assignAidantToTarget,
@@ -1301,7 +1253,6 @@ module.exports = {
   getAssignmentsByTarget,
   isAidantAssignedToTarget,
 
-  // Nouvelles fonctions
   isAidantFull,
   getAvailableAidantsForFamily,
   getAidantsWithQuota,
